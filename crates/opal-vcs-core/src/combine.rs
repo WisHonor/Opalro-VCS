@@ -214,9 +214,9 @@ pub(crate) fn merge_three(
     {
         let mut trees =
             [start, ours, theirs].map(|v| Tree::new(store, &made.listings, v.root, EXACT));
-        let froms: BTreeSet<&String> = went[0].keys().chain(went[1].keys()).collect();
+        let froms: BTreeSet<&String> = went[0].went.keys().chain(went[1].went.keys()).collect();
         for from in froms {
-            let (moved_on, to, apart) = match (went[0].get(from), went[1].get(from)) {
+            let (moved_on, to, apart) = match (went[0].went.get(from), went[1].went.get(from)) {
                 (Some(o), Some(t)) if o == t => {
                     move_in(&mut trees[0], &mut puts[0], from, o)?;
                     continue;
@@ -237,13 +237,20 @@ pub(crate) fn merge_three(
                 Some(clash) => clash,
                 None => {
                     let other = if moved_on == Side::Ours { 2 } else { 1 };
-                    match trees[other].entry(from)? {
+                    // A file its own notes brought there is not the start's.
+                    let held = if went[other - 1].replaced.contains(from) {
+                        None
+                    } else {
+                        trees[other].entry(from)?
+                    };
+                    match held {
                         None => Clash::MovedRemoved {
                             moved_on,
                             to: to.clone(),
                         },
                         // Made into something else: the tree merge tells of that.
                         Some(e) if !is_file(&e) => continue,
+                        // The clash at `to` itself is the tree merge's to name as well.
                         Some(_) if !room_at(&mut trees[other], to)? => Clash::MovedOnto {
                             moved_on,
                             to: to.clone(),
@@ -257,7 +264,7 @@ pub(crate) fn merge_three(
                 }
             };
             // What any version holds there, a new file a mover made included, is part of this
-            // conflict, not one of its own.
+            // conflict, not one of its own; a new folder there goes too, as the combine stops.
             for (tree, puts) in trees.iter_mut().zip(&mut puts) {
                 if tree.entry(from)?.is_some() {
                     puts.insert(from.clone(), None);

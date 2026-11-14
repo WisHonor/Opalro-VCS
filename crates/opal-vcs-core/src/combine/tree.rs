@@ -34,6 +34,9 @@ pub struct Made {
     /// Their bytes, and the most allowed (`MAX_HELD_TEXT`; tests lower it).
     pub held: u64,
     pub max_held: u64,
+    /// The most bytes of paths of files that left a side held to follow them by contents
+    /// (`moves::MAX_LEFT_BYTES`; tests lower it).
+    pub max_left_bytes: usize,
 }
 
 impl Default for Made {
@@ -43,6 +46,7 @@ impl Default for Made {
             texts: HashMap::new(),
             held: 0,
             max_held: MAX_HELD_TEXT,
+            max_left_bytes: crate::moves::MAX_LEFT_BYTES,
         }
     }
 }

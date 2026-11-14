@@ -1,7 +1,7 @@
 //! Files that moved between two versions of the project: the same contents gone from one path and
 //! present at exactly one new one.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::ancestry::only_in;
 use crate::combine::Made;
@@ -45,14 +45,16 @@ fn file(e: Option<&Entry>) -> Option<&Entry> {
 /// Files that left one path and arrived at another between `from_root` and `to_root` with the
 /// same non-empty contents, no other file that left and none that arrived holding those
 /// contents; sorted by where they went. A path that left holds nothing at `to_root`, and one
-/// that arrived held nothing at `from_root`. Either side's listings may be in `unstored`.
+/// that arrived held nothing at `from_root`. Either side's listings may be in `unstored`. None
+/// when the paths of the files that left come to more than `most_left_bytes`.
 pub(crate) fn same_contents(
     store: &Store,
     unstored: &HashMap<Id, Listing>,
     from_root: Id,
     to_root: Id,
+    most_left_bytes: usize,
 ) -> Result<Vec<MoveNote>, StoreError> {
-    count_and_moves(store, unstored, from_root, to_root, usize::MAX)?.1
+    count_and_moves(store, unstored, from_root, to_root, most_left_bytes)?.1
 }
 
 /// At most this many bytes of paths of files that left a save are held to pair them; past it, a
@@ -158,14 +160,23 @@ pub(crate) struct Version {
     pub save: Option<Id>,
 }
 
-/// Where the files of `start` went on `side`: start path to side path. Each move is checked.
-/// Listings in `made` are read before the store's.
+/// Where the files of a start went on one side.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Followed {
+    /// Start path to side path, each move checked.
+    pub went: BTreeMap<String, String>,
+    /// Paths where the side's notes show another file arriving: whatever the side holds there,
+    /// the start's file at such a path is removed on that side.
+    pub replaced: BTreeSet<String>,
+}
+
+/// Where the files of `start` went on `side`. Listings in `made` are read before the store's.
 pub(crate) fn followed(
     repo: &Repository,
     made: &Made,
     start: &Version,
     side: &Version,
-) -> Result<BTreeMap<String, String>, RepoError> {
+) -> Result<Followed, RepoError> {
     let store = repo.store();
     let noted = match (start.save, side.save) {
         (Some(from), Some(tip)) => noted(repo, from, start.root, tip)?,
@@ -173,24 +184,28 @@ pub(crate) fn followed(
     };
     let mut at_start = Tree::new(store, &made.listings, start.root, EXACT);
     let mut on_side = Tree::new(store, &made.listings, side.root, EXACT);
-    let mut went = BTreeMap::new();
+    let mut out = Followed {
+        replaced: noted.values().cloned().collect(),
+        ..Followed::default()
+    };
     // A side whose notes moved a file has moved it, whatever it holds where the file was.
     for (from, to) in noted {
         if fits(&mut at_start, &mut on_side, &from, &to)? {
-            went.insert(from, to);
+            out.went.insert(from, to);
         }
     }
-    let taken: HashSet<String> = went.values().cloned().collect();
-    for n in same_contents(store, &made.listings, start.root, side.root)? {
-        if !went.contains_key(&n.from)
+    let taken: HashSet<String> = out.went.values().cloned().collect();
+    let left = made.max_left_bytes;
+    for n in same_contents(store, &made.listings, start.root, side.root, left)? {
+        if !out.went.contains_key(&n.from)
             && !taken.contains(&n.to)
             && fits(&mut at_start, &mut on_side, &n.from, &n.to)?
             && on_side.entry(&n.from)?.is_none()
         {
-            went.insert(n.from, n.to);
+            out.went.insert(n.from, n.to);
         }
     }
-    Ok(went)
+    Ok(out)
 }
 
 /// The moves the notes of `tip`'s saves tell, back along first parents to `start` (whose root
@@ -234,12 +249,23 @@ fn noted(
         let mut before = Tree::new(repo.store(), &unstored, parent_root, EXACT);
         // A save's notes all hold between it and its first parent, so they are taken together.
         // A file removed and made again in a later save is taken for the same file, as an edit.
-        let mut moved = Vec::new();
+        let mut true_notes = Vec::new();
         for n in std::mem::take(&mut save.move_notes) {
-            if validate_path(&n.from).is_err()
-                || validate_path(&n.to).is_err()
-                || !true_of(&mut before, &mut after, &n)?
+            if validate_path(&n.from).is_ok()
+                && validate_path(&n.to).is_ok()
+                && true_of(&mut before, &mut after, &n)?
             {
+                true_notes.push(n);
+            }
+        }
+        // One file gone to two places, alike: neither is certain.
+        let mut froms: HashMap<String, usize> = HashMap::new();
+        for n in &true_notes {
+            *froms.entry(n.from.clone()).or_default() += 1;
+        }
+        let mut moved = Vec::new();
+        for n in true_notes {
+            if froms.get(&n.from) != Some(&1) {
                 continue;
             }
             let tip_path = match back.remove(&n.to) {
@@ -371,7 +397,7 @@ mod tests {
         let store = Store::open(dir.path()).unwrap();
         let mut unstored = HashMap::new();
         let (a, b) = (tree(&mut unstored, from), tree(&mut unstored, to));
-        same_contents(&store, &unstored, a, b)
+        same_contents(&store, &unstored, a, b, MAX_LEFT_BYTES)
             .unwrap()
             .into_iter()
             .map(|n| (n.from, n.to))
