@@ -59,6 +59,9 @@ const MERGE_ABORT: &str = "`opalro combine` never stops half-way, so there is no
 const NO_FF: &str = "`opalro combine` makes a combined save only when both lines have work\n\
                      the other lacks; otherwise it moves your line forward.\n\
                      Opalro can't make a combined save every time.";
+const MERGE_MANY: &str = "Opalro combines one line at a time.\n\
+                          `opalro combine <line>` brings one line's work into the line you're on;\n\
+                          a second word after it is the combined save's message.";
 const SQUASH: &str = "Opalro can't bring a line's work in as one plain save.\n\
                       `opalro combine <line>` makes a combined save that keeps both lines' history.";
 const MOVE_SAVES: &str = "Opalro can't move saves from one line to another yet; that comes after v0.2.\n\
@@ -136,6 +139,8 @@ pub fn translate(mut args: Vec<OsString>) -> Typed {
         "merge" if given().any(|a| a == "--abort") => Typed::Explain(MERGE_ABORT),
         "merge" if given().any(|a| a == "--no-ff") => Typed::Explain(NO_FF),
         "merge" if given().any(|a| a == "--squash") => Typed::Explain(SQUASH),
+        // Git merges every line named at once; Opalro would take the second as a message.
+        "merge" if given().filter(|a| !is_option(a)).count() > 1 => Typed::Explain(MERGE_MANY),
         // Any other option goes to `combine` as typed, which refuses what it doesn't know.
         "merge" => run("merge", &["combine"], rest),
         "blame" => Typed::Explain(LATER),
@@ -440,7 +445,7 @@ mod tests {
         }
     }
 
-    const EXPLANATIONS: [&str; 15] = [
+    const EXPLANATIONS: [&str; 16] = [
         ADD,
         RM_MV,
         RESET,
@@ -451,6 +456,7 @@ mod tests {
         LATER,
         MERGE_ABORT,
         NO_FF,
+        MERGE_MANY,
         SQUASH,
         MOVE_SAVES,
         SYNC,
@@ -500,7 +506,8 @@ mod tests {
             ("merge side", "merge", "combine side"),
             ("merge --json side", "merge", "combine --json side"),
             // Any other option goes to `combine` as typed, which refuses it.
-            ("merge -m x side", "merge", "combine -m x side"),
+            ("merge --edit side", "merge", "combine --edit side"),
+            ("merge", "merge", "combine"),
             ("fsck", "fsck", "verify"),
             ("gc", "gc", "tidy"),
         ] {
@@ -641,6 +648,14 @@ mod tests {
         assert_eq!(explained("merge --abort"), MERGE_ABORT);
         assert_eq!(explained("merge side --no-ff"), NO_FF);
         assert_eq!(explained("merge --squash side"), SQUASH);
+        for typed in [
+            "merge a b",
+            "merge --json a b",
+            "merge a --json b",
+            "merge -m x side",
+        ] {
+            assert_eq!(explained(typed), MERGE_MANY, "{typed}");
+        }
         for word in ["rebase", "cherry-pick"] {
             assert_eq!(explained(word), MOVE_SAVES);
         }

@@ -42,10 +42,13 @@ pub fn combined(
             (text, details)
         }
         Combined::Made { merged_files, .. } => {
-            let details: Vec<String> = (!merged_files.is_empty())
-                .then(|| format!("Merged {} line by line.", output::files(merged_files.len())))
-                .into_iter()
-                .collect();
+            let mut details = vec![];
+            if !merged_files.is_empty() {
+                details.push(format!(
+                    "Merged {} line by line.",
+                    output::files(merged_files.len())
+                ));
+            }
             let combined = s.paint(Role::Ok, "Combined");
             let text = format!("{combined} {painted_target} into {painted_line}: save {at}.\n");
             (text, details)

@@ -2162,8 +2162,11 @@ fn combine_named(
     if repo.tag_list(&entry.state)?.tags.contains_key(text) {
         return Ok((as_typed(tags::shown_name(text)), false));
     }
-    let save = repo.store().save(id, repo.signatures_allowed())?;
-    let short = short_or_whole(repo, id, &save.change_id, warnings);
+    // A save that can't be read is named by its fingerprint; the combine says what is wrong.
+    let short = match repo.store().save(id, repo.signatures_allowed()) {
+        Ok(save) => short_or_whole(repo, id, &save.change_id, warnings),
+        Err(_) => id.short_hex(),
+    };
     Ok((
         Named {
             raw: short.clone(),

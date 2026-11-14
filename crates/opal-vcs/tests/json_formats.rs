@@ -141,6 +141,13 @@ fn every_document() -> Vec<(&'static str, usize, Value)> {
     let combine = "`opalro combine --json`";
     docs.push((combine, 0, run(&["combine", "side"], 0)));
     docs.push((combine, 0, run(&["combine", "side"], 0)));
+    run(&["line", "new", "ahead"], 0);
+    env.overwrite("c.txt", "c\n");
+    run(&["save", "C"], 0);
+    run(&["goto", "main"], 0);
+    let forward = run(&["combine", "ahead"], 0);
+    assert_eq!(forward["result"], "forward", "{forward}");
+    docs.push((combine, 0, forward));
     docs.push(("5. Errors", 0, run(&["combine", "nowhere"], 1)));
     env.overwrite("a.txt", "three\n");
     docs.push(("`opalro discard --json`", 0, run(&["discard"], 0)));

@@ -356,11 +356,47 @@ fn merge_no_ff_and_squash_are_explained() {
 fn merge_with_another_option_is_refused_as_unknown() {
     let env = with_side_ahead();
     let before = head(&env);
-    let out = run(&env, &["merge", "-m", "x", "side"]);
+    let out = run(&env, &["merge", "--edit", "side"]);
     assert_eq!(out.status.code(), Some(2));
     assert_eq!(text(&out.stdout), "");
-    assert!(text(&out.stderr).contains("-m"), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("--edit"),
+        "{}",
+        text(&out.stderr)
+    );
     assert_eq!(head(&env), before);
+}
+
+#[test]
+fn merge_of_two_lines_is_explained_and_changes_nothing() {
+    let env = with_side_ahead();
+    ok(&env, &["line", "new", "other"]);
+    ok(&env, &["goto", "main"]);
+    let lines = env.state().1.lines;
+    for args in [
+        &["merge", "side", "other"][..],
+        &["merge", "--json", "side", "other"],
+        &["merge", "-m", "x", "side"],
+    ] {
+        let said = explained(&env, args);
+        assert_eq!(
+            said,
+            "Opalro combines one line at a time.\n\
+             `opalro combine <line>` brings one line's work into the line you're on;\n\
+             a second word after it is the combined save's message.\n",
+            "{args:?}"
+        );
+    }
+    assert_eq!(env.state().1.lines, lines, "no line moved");
+    // One line is still combined, and none is refused as `combine` with none is.
+    ok(&env, &["merge", "side"]);
+    assert_eq!(head(&env).1.command, "combine");
+    let merge = run(&env, &["merge"]);
+    let combine = run(&env, &["combine"]);
+    assert_eq!(merge.status.code(), Some(2));
+    assert_eq!(merge.status.code(), combine.status.code());
+    assert_eq!(text(&merge.stdout), "");
+    assert_eq!(text(&merge.stderr), text(&combine.stderr));
 }
 
 #[test]

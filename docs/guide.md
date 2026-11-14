@@ -30,7 +30,7 @@ Opalro keeps every version of your project: the code and the big files together,
 - **Undo.** Opalro keeps a diary of every command that changed something. `opalro undo` takes back the last one, like Ctrl+Z in an editor. Before a command throws away work you haven't saved, Opalro keeps a copy of it, so undo can bring it back.
 - **Big files.** Files of 1 MiB or more are cut into pieces, called chunks. When you change part of a big file, only the pieces that changed are stored again.
 
-**What v0.1 is.** Opalro v0.1 is for one person on one computer. Everything stays in your project folder, in a hidden folder named `.opalro`. There is no server yet, so you can't share a project through Opalro or work on one with other people. Combining two lines into one is planned for v0.2, and syncing with a server and locking files for v0.3 (see [section 13](#13-what-v01-doesnt-do-yet)).
+**What v0.1 is.** Opalro v0.1 is for one person on one computer. Everything stays in your project folder, in a hidden folder named `.opalro`. There is no server yet, so you can't share a project through Opalro or work on one with other people. You can bring one line's work into another with `opalro combine`; syncing with a server and locking files are planned for v0.3 (see [section 13](#13-what-v01-doesnt-do-yet)).
 
 ## 2. Installing
 
@@ -1262,7 +1262,7 @@ hint: in Opalro, commit is save; it takes new files too: opalro save "message"
 | `git reset` | `opalro undo`, `opalro discard` or `opalro goto <save>` | explained |
 | `git branch <name>`; `git checkout -b`, `git switch -c` with a starting point | `opalro goto <save>`, then `opalro line new <name>` | explained |
 | `git revert` | `opalro reverse`, in v0.3; until then `opalro undo` | explained |
-| `git merge <target>` | `opalro combine <target>` | runs; `merge --abort`, `--no-ff` and `--squash` are explained, and other options refused |
+| `git merge <target>` | `opalro combine <target>` | runs; `merge --abort`, `--no-ff`, `--squash` and more than one line are explained, and other options refused |
 | `git blame` | not yet; until then `opalro history` | explained |
 | `git rebase`, `cherry-pick` | not yet: moving saves between lines comes after v0.2; until then `opalro save --amend` or `opalro undo` | explained |
 | `git clone`, `fetch`, `pull`, `push`, `remote` | coming in v0.3 | explained |
@@ -1443,7 +1443,7 @@ The `--json` reference, published on https://opalro.com, describes every documen
 ## 13. What v0.1 doesn't do yet
 
 - **No server, no sharing.** v0.1 is one person on one computer. Opalro can't yet copy a project from a server, or send and get changes (syncing is planned for v0.3).
-- **No keeping conflicts.** `opalro combine` stops when both lines changed the same place in a file, and Opalro can't yet show who changed each line of a file (both v0.2).
+- **No keeping conflicts.** `opalro combine` stops when both lines changed the same place in a file, and Opalro can't yet show who changed each line of a file.
 - **No locking.** Rules can mark files lockable, but nothing locks them until syncing arrives (v0.3).
 - **No repair.** `opalro verify` finds damage but can't fix it.
 - **No export to Git yet,** and an import happens once: bringing in Git's newer commits later comes after v0.1.
@@ -1509,7 +1509,7 @@ Removing Opalro doesn't touch your projects: each keeps its files and its `.opal
 
 A project's files are ordinary files in an ordinary folder. Opalro keeps everything else in the hidden `.opalro` folder beside them.
 
-**The folder holds only the files of the save you are on,** with your unsaved changes and the files Opalro leaves out (those stay where they are). Everything else lives only in `.opalro`, and goes when `.opalro` goes: every earlier save, the other lines and their saves, the newest saves of your line if you went back to an older one, your shelves, and everything `opalro undo` could take back. v0.1 can't combine lines or export to Git, so nothing carries that work out for you. Before you delete anything:
+**The folder holds only the files of the save you are on,** with your unsaved changes and the files Opalro leaves out (those stay where they are). Everything else lives only in `.opalro`, and goes when `.opalro` goes: every earlier save, the other lines and their saves, the newest saves of your line if you went back to an older one, your shelves, and everything `opalro undo` could take back. Combining a line into another keeps its saves, but only inside `.opalro`, and Opalro can't export to Git, so nothing carries that work out for you. Before you delete anything:
 
 1. **Go to the files you want to keep.** `opalro line` lists your lines, and `opalro status` says where you are. Go to the line or save whose files you want in the folder, such as `opalro goto main`.
 2. **Bring back your shelves.** `opalro shelf --list` shows them: bring each back with `opalro unshelf` and save it. If `opalro unshelf` stops, the shelf was made on another save and changes a file that differs here; it changes nothing, and the shelf stays safe in the copy of step 3, which you then must make. Then `opalro status` should say "Nothing changed since then"; if not, save.
