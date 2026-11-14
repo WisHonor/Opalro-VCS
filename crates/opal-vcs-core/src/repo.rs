@@ -25,7 +25,7 @@ use crate::pack::{ObjectKind, PackError, PackSet};
 use crate::rules::{self, RulesRead};
 use crate::safe_fs;
 use crate::save::{EXTRA_LINE, Person, Save};
-use crate::store::{Store, StoreError, is_damage};
+use crate::store::{Store, StoreError, is_damage, is_unreadable_record};
 use crate::text::escape;
 use crate::warning::{self, Warning};
 
@@ -1587,20 +1587,7 @@ impl Repository {
         };
         #[cfg(test)]
         TAG_LISTS_READ.set(TAG_LISTS_READ.get() + 1);
-        let unreadable = |e: &dyn std::fmt::Display| {
-            damaged(format!("the project's tag list can't be read: {e}"))
-        };
-        let bytes = match self.store.read_record(&id, ObjectKind::TagList) {
-            Ok(bytes) => bytes,
-            Err(
-                e @ (StoreError::Missing(_)
-                | StoreError::WrongKind { .. }
-                | StoreError::Decode(_)
-                | StoreError::Pack(PackError::FingerprintMismatch { .. })),
-            ) => return Err(unreadable(&e)),
-            Err(e) => return Err(e.into()),
-        };
-        TagList::decode(&bytes).map_err(|e| unreadable(&e))
+        self.listed(&id, ObjectKind::TagList, "tag list", TagList::decode)
     }
 
     /// The server lines of `state`; empty if it has none.
@@ -1608,9 +1595,31 @@ impl Repository {
         let Some(id) = state.server_lines else {
             return Ok(ServerLines::default());
         };
-        Ok(ServerLines::decode(
-            &self.store.read_record(&id, ObjectKind::ServerLines)?,
-        )?)
+        self.listed(
+            &id,
+            ObjectKind::ServerLines,
+            "server lines",
+            ServerLines::decode,
+        )
+    }
+
+    /// The record `id` of `kind`, decoded. One that can't be read for what the store holds is
+    /// damage naming the project's `what`.
+    fn listed<T>(
+        &self,
+        id: &Id,
+        kind: ObjectKind,
+        what: &str,
+        decode: impl FnOnce(&[u8]) -> Result<T, DecodeError>,
+    ) -> Result<T, RepoError> {
+        let unreadable =
+            |e: &dyn std::fmt::Display| damaged(format!("the project's {what} can't be read: {e}"));
+        let bytes = match self.store.read_record(id, kind) {
+            Ok(bytes) => bytes,
+            Err(e) if is_unreadable_record(&e) => return Err(unreadable(&e)),
+            Err(e) => return Err(e.into()),
+        };
+        decode(&bytes).map_err(|e| unreadable(&e))
     }
 
     /// Takes the change lock, waiting if another command holds it. `on_wait` gets that command's
@@ -2086,32 +2095,26 @@ mod tests {
         let mut state = repo.current().unwrap().1.state;
         // Each pointer at the other record.
         (state.tags, state.server_lines) = (Some(r), Some(t));
-        let tag_list_damaged = |repo: &Repository, state: &State| match repo.tag_list(state) {
-            Err(RepoError::Damaged { detail }) => {
-                detail.starts_with("the project's tag list can't be read: ")
-            }
-            _ => false,
+        let damaged = |repo: &Repository, state: &State| {
+            let named = |done: Result<(), RepoError>, what: &str| match done {
+                Err(RepoError::Damaged { detail }) => {
+                    detail.starts_with(&format!("the project's {what} can't be read: "))
+                }
+                _ => false,
+            };
+            (
+                named(repo.tag_list(state).map(drop), "tag list"),
+                named(repo.server_lines(state).map(drop), "server lines"),
+            )
         };
-        assert!(tag_list_damaged(&repo, &state));
-        assert!(matches!(
-            repo.server_lines(&state),
-            Err(RepoError::Store(StoreError::WrongKind { .. }))
-        ));
+        assert_eq!(damaged(&repo, &state), (true, true));
         // A record that was never stored.
         (state.tags, state.server_lines) = (Some(Id([9; 32])), Some(Id([9; 32])));
-        assert!(tag_list_damaged(&repo, &state));
-        assert!(matches!(
-            repo.server_lines(&state),
-            Err(RepoError::Store(StoreError::Missing(_)))
-        ));
+        assert_eq!(damaged(&repo, &state), (true, true));
         // Records with the right fingerprints that break the format: neither may be empty.
         commit_records(&mut repo, &TagList::default(), &ServerLines::default());
         let state = repo.current().unwrap().1.state;
-        assert!(tag_list_damaged(&repo, &state));
-        assert!(matches!(
-            repo.server_lines(&state),
-            Err(RepoError::Decode(_))
-        ));
+        assert_eq!(damaged(&repo, &state), (true, true));
     }
 
     #[test]

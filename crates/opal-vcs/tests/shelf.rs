@@ -984,17 +984,62 @@ fn relabel(env: &Env, label: &str) {
 
 #[test]
 fn unshelfs_hint_carries_a_label_only_when_it_is_plain() {
+    let not_yet = "Opalro can't yet bring a shelf back onto changes saved since it was made";
+    let unsaved = "Save, shelve or discard your unsaved changes there, and move ignored files \
+                   somewhere else.";
     for (label, plain) in [("1", true), ("1; touch pwned", false), ("-1", false)] {
-        let env = project(SAVED);
-        write(&env, "a.txt", "mine\n");
-        ok(&env, &["shelf"]);
-        relabel(&env, label);
-        write(&env, "a.txt", "in the way\n");
-        // The newest shelf: `-1` couldn't be typed as a label.
-        let (_, said) = refused(&env, &["unshelf"]);
-        let carried = format!("then run opalro unshelf {label} (a new shelf would be the newest).");
-        let same = "then run the same unshelf command again (a new shelf would be the newest).";
-        assert_eq!(said.contains(&carried), plain, "{label}: {said}");
-        assert_eq!(said.contains(same), !plain, "{label}: {said}");
+        // Unsaved work in the way, changes saved since, or both.
+        for (in_the_way, saved_since) in [(true, false), (false, true), (true, true)] {
+            let env = project(SAVED);
+            let shelved_on = main_tip(&env);
+            write(&env, "a.txt", "mine\n");
+            write(&env, "b.txt", "mine\n");
+            ok(&env, &["shelf"]);
+            relabel(&env, label);
+            if saved_since {
+                write(&env, "a.txt", "theirs\n");
+                ok(&env, &["save", "Change a"]);
+            }
+            if in_the_way {
+                write(&env, "b.txt", "in the way\n");
+            }
+            // The newest shelf: `-1` couldn't be typed as a label.
+            let (_, said) = refused(&env, &["unshelf"]);
+            let goto = goto_hint(&env, shelved_on);
+            let (bring, there, newest, list) = if plain {
+                let run = format!("run opalro unshelf {label}");
+                let there = format!("{run} there");
+                (run, there, " (a new shelf would be the newest)", "")
+            } else {
+                let by_label = "bring this shelf back by its label with opalro unshelf <label>";
+                let list = " opalro shelf --list shows the label.";
+                (by_label.to_owned(), by_label.to_owned(), "", list)
+            };
+            let elsewhere = format!("go to the save it was made on with {goto}, then {there}");
+            let hint = match (in_the_way, saved_since) {
+                (true, false) => format!(
+                    "Save, shelve or discard your changes there, and move ignored files somewhere \
+                     else, then {bring}{newest}.{list}"
+                ),
+                (false, _) => format!("{not_yet}: {elsewhere}.{list}"),
+                (true, true) => format!("{unsaved} {not_yet}: {elsewhere}{newest}.{list}"),
+            };
+            let shape = format!("{label}, {in_the_way}, {saved_since}");
+            assert!(said.contains(&format!("hint: {hint}\n")), "{shape}: {said}");
+            assert!(
+                !said.contains("the same unshelf command"),
+                "{shape}: {said}"
+            );
+            if !plain {
+                // The error names the shelf, escaped; no command carries its label.
+                let hint = said.split_once("hint:").unwrap().1;
+                assert!(!hint.contains(label), "{shape}: {said}");
+                assert!(
+                    !said.contains(&format!("unshelf {label}")),
+                    "{shape}: {said}"
+                );
+                assert!(said.contains("opalro shelf --list"), "{shape}: {said}");
+            }
+        }
     }
 }

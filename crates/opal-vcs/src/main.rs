@@ -1658,6 +1658,12 @@ fn line_action(
                     );
                 }
                 Err(LineError::Kept { line, only_here }) => {
+                    // A stored name could read as an option or as shell text.
+                    let named = if is_plain(&line) {
+                        escape(&line, false)
+                    } else {
+                        "<line>".to_owned()
+                    };
                     let line = escape(&line, false);
                     return Err(Failure {
                         message: format!(
@@ -1666,7 +1672,7 @@ fn line_action(
                             output::counted(only_here, "save", "saves"),
                             unasked(json)
                         ),
-                        hint: Some(format!("To delete it: opalro line delete {line} --yes")),
+                        hint: Some(format!("To delete it: opalro line delete {named} --yes")),
                         printed: false,
                     });
                 }

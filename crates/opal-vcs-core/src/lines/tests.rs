@@ -395,6 +395,25 @@ fn a_no_keeps_the_line() {
     assert_eq!(repo.head().unwrap(), head);
 }
 
+#[test]
+fn a_kept_lines_hint_carries_its_name_only_when_it_is_plain() {
+    // A stored name may start with `-`: in a command it would be an option.
+    let kept = |line: &str| {
+        let kept = LineError::Kept {
+            line: line.to_owned(),
+            only_here: 1,
+        };
+        kept.hint().unwrap()
+    };
+    assert_eq!(kept("b"), "To delete it anyway: opalro line delete b --yes");
+    for odd in ["-x", "b; touch pwned"] {
+        assert_eq!(
+            kept(odd),
+            "To delete it anyway: opalro line delete <line> --yes"
+        );
+    }
+}
+
 fn hex12(id: Id) -> String {
     id.to_hex()[..12].to_owned()
 }
@@ -752,12 +771,36 @@ fn orphan(repo: &mut Repository, like: Id) -> Id {
 }
 
 #[test]
-fn a_thousand_tags_whose_history_cant_be_read_are_looked_through_once() {
+fn a_thousand_tags_on_one_long_history_are_looked_through_once() {
+    const LONG: usize = 200;
+    const TAGS: usize = 1000;
     let (_dir, mut repo, _, two) = two_of_its_own();
+    // Each tag at a save of its own, on one long history they share; only line b's own
+    // history can't be read, so the look goes through every tag before it finds that.
+    let like = repo.store().save(&two, false).unwrap();
+    let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
+    let (head, mut entry) = repo.current().unwrap();
+    let mut packs = repo.new_packs().unwrap();
+    let mut on = |parent: Id| {
+        let save = Save {
+            parents: vec![parent],
+            change_id: ChangeId::random().unwrap(),
+            ..like.clone()
+        };
+        packs.add_record(ObjectKind::Save, &save.encode()).unwrap()
+    };
+    let shared = (0..LONG).fold(two, |parent, _| on(parent));
+    let names: Vec<String> = (0..TAGS).map(|i| format!("t{i:04}")).collect();
+    let at: Vec<(&str, Id)> = names.iter().map(|n| (n.as_str(), on(shared))).collect();
+    entry.parent = Some(head);
+    entry.command = "save".into();
+    entry.folder_change = None;
+    repo.commit(&lock, packs, &entry).unwrap();
+    drop(lock);
     let lost = orphan(&mut repo, two);
-    let names: Vec<String> = (0..1000).map(|i| format!("t{i:04}")).collect();
-    let list = tags(&names.iter().map(|n| (n.as_str(), lost)).collect::<Vec<_>>());
-    set(&mut repo, Some(&list), |_| {});
+    set(&mut repo, Some(&tags(&at)), |st| {
+        st.lines.insert("b".into(), lost);
+    });
     let head = repo.head().unwrap();
     let before = repo.store().saves_read();
     let (done, asked) = deleted(&mut repo, "b", true);
@@ -766,13 +809,14 @@ fn a_thousand_tags_whose_history_cant_be_read_are_looked_through_once() {
     assert_eq!(
         e.to_string(),
         format!(
-            "This project's Opalro data looks damaged: the tag t0000 names a save whose history \
-             can't be read: object {} is not in the store.",
+            "This project's Opalro data looks damaged: line b's history can't be read: object {} \
+             is not in the store.",
             "5".repeat(64)
         )
     );
     assert!(asked.is_empty());
     assert_eq!(repo.head().unwrap(), head);
-    // The walk and the look read the four saves there are, each at most twice.
-    assert!(read <= 8, "{read}");
+    // One set of saves seen across the tags: the walk and the look each read about the history
+    // and the tags' own saves once. A set per tag would read the history once per tag.
+    assert!(read <= 2 * (LONG + TAGS) + 10, "{read}");
 }

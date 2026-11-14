@@ -9,6 +9,7 @@ use crate::id::{ChangeId, Id, is_hex_start};
 use crate::lines::Target;
 use crate::repo::{RepoError, Repository};
 use crate::save::Save;
+use crate::store::is_unreadable_record;
 use crate::text::escape;
 
 /// A short change ID has at least this many letters.
@@ -470,15 +471,15 @@ fn by_fingerprint_prefix(
             found.push((*id, hex));
         }
     };
-    let first_parent = |id: &Id| {
-        let save = repo.store().save(id, repo.signatures_allowed())?;
-        Ok::<_, RepoError>(save.parents.first().copied())
+    let parent = |id: &Id| {
+        let save = repo.store().save(id, repo.signatures_allowed());
+        save.map(|save| save.parents.first().copied())
     };
     let mut seen = HashSet::new();
     each_once(
         &mut seen,
         entry.state.lines.values().copied(),
-        first_parent,
+        |id| Ok::<_, RepoError>(parent(id)?),
         &mut visit,
     )?;
     // A server line's or tag's save that can't be read ends its chain there: it can still be
@@ -487,12 +488,11 @@ fn by_fingerprint_prefix(
     let more = (servers.servers.values())
         .flat_map(|lines| lines.values().copied())
         .chain(tags.tags.values().map(|tag| tag.save));
-    each_once(
-        &mut seen,
-        more,
-        |id| Ok::<_, RepoError>(first_parent(id).ok().flatten()),
-        &mut visit,
-    )?;
+    let damage_ends = |id: &Id| match parent(id) {
+        Err(e) if is_unreadable_record(&e) => Ok(None),
+        read => Ok::<_, RepoError>(read?),
+    };
+    each_once(&mut seen, more, damage_ends, &mut visit)?;
     Ok(found)
 }
 
@@ -1039,8 +1039,10 @@ mod tests {
         ));
     }
 
+    // Reading a name reads the tag list once, whatever the name turns out to be: a line, a tag,
+    // hex text, or a line refused as a tag's name too.
     #[test]
-    fn a_name_is_read_with_one_read_of_the_tag_list() {
+    fn reading_a_name_reads_the_tag_list_once_whatever_it_names() {
         use crate::repo::TAG_LISTS_READ;
         let (_dir, mut repo, ids) = project_with(&["lmnopq"]);
         name_tag(&mut repo, "rel-1", ids[0]);

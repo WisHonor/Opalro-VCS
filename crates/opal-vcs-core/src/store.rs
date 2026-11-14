@@ -1321,6 +1321,18 @@ pub(crate) fn is_damage(e: &PackError) -> bool {
     )
 }
 
+/// Whether a record or save couldn't be read for what the store holds as it: missing, another
+/// kind of object, undecodable, or not matching its fingerprint. Any other failure is told as itself.
+pub(crate) fn is_unreadable_record(e: &StoreError) -> bool {
+    matches!(
+        e,
+        StoreError::Missing(_)
+            | StoreError::WrongKind { .. }
+            | StoreError::Decode(_)
+            | StoreError::Pack(PackError::FingerprintMismatch { .. })
+    )
+}
+
 /// A pack gone since it was listed, merged into another, say.
 fn is_gone(e: &PackError) -> bool {
     matches!(e, PackError::Io(e) if e.kind() == io::ErrorKind::NotFound)
@@ -1400,6 +1412,34 @@ mod tests {
             w.add_content(c).unwrap();
         }
         w.finish(packs).unwrap().unwrap()
+    }
+
+    #[test]
+    fn only_what_the_store_holds_makes_a_record_unreadable() {
+        let id = Id([7; 32]);
+        let unreadable = [
+            StoreError::Missing(id),
+            StoreError::WrongKind {
+                id,
+                expected: ObjectKind::TagList,
+                found: ObjectKind::ServerLines,
+            },
+            StoreError::Decode(DecodeError::Invalid("bad")),
+            StoreError::Pack(PackError::FingerprintMismatch { id }),
+        ];
+        for e in &unreadable {
+            assert!(is_unreadable_record(e), "{e}");
+        }
+        let told = [
+            StoreError::Pack(PackError::Io(io::Error::other("disk"))),
+            StoreError::Pack(PackError::Io(io::ErrorKind::PermissionDenied.into())),
+            StoreError::SaveTooLarge {
+                detail: "big".into(),
+            },
+        ];
+        for e in &told {
+            assert!(!is_unreadable_record(e), "{e}");
+        }
     }
 
     proptest! {

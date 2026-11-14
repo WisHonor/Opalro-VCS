@@ -5,15 +5,15 @@ use std::io;
 
 use crate::ancestry::only_in;
 use crate::diary::{
-    Action, DiaryEntry, Position, ServerLines, State, TagList, line_named_alike, validate_line_name,
+    Action, DiaryEntry, Position, ServerLines, State, TagList, is_plain, line_named_alike,
+    validate_line_name,
 };
 use crate::encoding::DecodeError;
 use crate::history::{ResolveError, find, tip_of};
 use crate::id::Id;
-use crate::pack::PackError;
 use crate::repo::{ChangeLock, RepoError, Repository};
 use crate::save::Person;
-use crate::store::StoreError;
+use crate::store::is_unreadable_record;
 use crate::switch::{self, Earlier, SwitchError};
 use crate::text::escape;
 use crate::warning::Warning;
@@ -128,10 +128,17 @@ impl LineError {
                 Some("Name the line too: opalro line rename <old> <new>".to_owned())
             }
             LineError::OnIt(_) => Some("Go to another line first: opalro goto <line>".to_owned()),
-            LineError::Kept { line, .. } => Some(format!(
-                "To delete it anyway: opalro line delete {} --yes",
-                escape(line, false)
-            )),
+            LineError::Kept { line, .. } => {
+                // A stored name could read as an option or as shell text.
+                let line = if is_plain(line) {
+                    escape(line, false)
+                } else {
+                    "<line>".to_owned()
+                };
+                Some(format!(
+                    "To delete it anyway: opalro line delete {line} --yes"
+                ))
+            }
             LineError::Repo(e) => e.hint(),
         }
     }
@@ -293,12 +300,7 @@ fn unreadable_history(
             }
             match repo.store().save(&id, repo.signatures_allowed()) {
                 Ok(save) => next.extend(save.parents),
-                Err(
-                    e @ (StoreError::Missing(_)
-                    | StoreError::WrongKind { .. }
-                    | StoreError::Decode(_)
-                    | StoreError::Pack(PackError::FingerprintMismatch { .. })),
-                ) => {
+                Err(e) if is_unreadable_record(&e) => {
                     let detail = match holder {
                         Some(h) if id == start => {
                             format!("{} names a save that can't be read: {e}", h.shown())

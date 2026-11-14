@@ -752,6 +752,50 @@ fn line_delete_without_a_terminal_stops_and_names_yes() {
     assert_eq!(env.standing(), before);
 }
 
+#[test]
+fn server_lines_that_cant_be_read_are_told_as_damage_by_name() {
+    let env = project();
+    let main = env.state().1.lines["main"];
+    plant_state(&env, |state, _| {
+        state.server_lines = Some(Id::from_hex(&"09".repeat(32)).unwrap());
+    });
+    let before = env.standing();
+    let hex = &main.to_hex()[..8];
+    for args in [&["goto", hex][..], &["line"]] {
+        let (shown, said) = run(&env, args, 1);
+        assert_eq!(shown, "", "{args:?}");
+        assert!(
+            said.contains(&format!(
+                "the project's server lines can't be read: object {} is not in the store",
+                "09".repeat(32)
+            )),
+            "{args:?}: {said}"
+        );
+        assert_eq!(env.standing(), before, "{args:?}");
+    }
+}
+
+#[test]
+fn line_deletes_hint_carries_a_stored_name_only_when_it_is_plain() {
+    // A planted or imported name may start with `-`: in a command it would be an option.
+    let env = with_a_line_of_its_own();
+    plant_state(&env, |state, _| {
+        let save = state.lines.remove("side").unwrap();
+        state.lines.insert("-x".into(), save);
+    });
+    let before = env.standing();
+    let (_, said) = run(&env, &["line", "delete", "--", "-x"], 1);
+    let hint = said.lines().find(|l| l.starts_with("hint:")).unwrap();
+    assert_eq!(hint, "hint: To delete it: opalro line delete <line> --yes");
+    let (shown, _) = run(&env, &["line", "delete", "--json", "--", "-x"], 1);
+    let doc: serde_json::Value = serde_json::from_str(&shown).unwrap();
+    assert_eq!(
+        doc["error"]["hint"],
+        "To delete it: opalro line delete <line> --yes"
+    );
+    assert_eq!(env.standing(), before);
+}
+
 #[cfg(feature = "fault-injection")]
 #[test]
 fn line_delete_asks_in_a_terminal() {

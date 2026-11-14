@@ -7,7 +7,7 @@ use std::collections::{BTreeSet, HashSet};
 use std::fmt;
 use std::path::Path;
 
-use crate::diary::{Action, DiaryEntry, FolderChange, Position, State, TagList};
+use crate::diary::{Action, DiaryEntry, FolderChange, Position, ServerLines, State, TagList};
 use crate::drive::Drive;
 use crate::fsio::Done;
 use crate::history::tip_of;
@@ -345,15 +345,20 @@ fn pick_up(
         let read = repo.store().save(save, repo.signatures_allowed());
         read.map_err(|e| unusable(saves, e.to_string()))?;
     }
-    // Read here rather than through `tag_list`, so the line gives the store's own words.
+    // Read here rather than through `tag_list` and `server_lines`, so the line gives the store's
+    // own words.
     if let Some(id) = entry.state.tags {
         let tag_list = "its tag list";
         let bytes = (repo.store().read_record(&id, ObjectKind::TagList))
             .map_err(|e| unusable(tag_list, e.to_string()))?;
         TagList::decode(&bytes).map_err(|e| unusable(tag_list, e.to_string()))?;
     }
-    repo.server_lines(&entry.state)
-        .map_err(|e| unusable("its server lines", e.to_string()))?;
+    if let Some(id) = entry.state.server_lines {
+        let server_lines = "its server lines";
+        let bytes = (repo.store().read_record(&id, ObjectKind::ServerLines))
+            .map_err(|e| unusable(server_lines, e.to_string()))?;
+        ServerLines::decode(&bytes).map_err(|e| unusable(server_lines, e.to_string()))?;
+    }
     // A switch stopped with `head` lost can't be finished any more; its saves keep what it held.
     // Dropped before the new entry, so a crash between them never leaves it to refuse every command.
     // Told through the store at once, so a pick-up that then fails still says so.
