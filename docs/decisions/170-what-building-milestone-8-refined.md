@@ -51,6 +51,10 @@ The most serious were three cases in which following a moved file, as decision 1
 - **Damage met while looking.** When a save is looked for through every parent and none is found, and a save on the way couldn't be read, the error is the damage, not "no save matches": the save asked for may lie behind it.
 - **`opalro history <line>`** keeps short change IDs only for the line the project is on. Any other line, like any other place, is listed with 12-letter IDs.
 
+**Added the same day, from comparing whole combines with `git merge`**
+
+- **A file moved and changed at once, and removed on the other line, is kept without a question.** Opalro follows a move only when it is certain: a move saved by itself is noted, and a history from Git has no notes, so there only identical contents count. A file moved and changed in one save is therefore, to Opalro, an old file removed and a new file added. When the other line removed the old file too, both lines agree that it is gone, one line has a new file, and the combine goes through with the new file kept. Git pairs the two files by their likeness and stops to ask. Opalro's way loses nothing, since the file a person kept and changed is kept; but the other line's removal doesn't reach it, and nobody is asked. Saved as two steps (the move, then the change), the move is noted and the combine stops with a conflict, as in Git. Guessing moves by likeness, in order to ask in such cases, stays deferred ([decision 157](157-v0.2-in-four-milestones.md)). The comparison with `git merge` allows this one difference, counts it, and holds everything else: where both programs combine cleanly, they give the same files.
+
 ## Consequences
 
 - Opalro's claim about Git is narrower and exact: on text without repeated lines a combine merges a file exactly when Git does, to the same bytes; with repeated lines it can differ either way.
