@@ -299,7 +299,7 @@ fn pairs<'a>(
 
 /// Whether one side of the walk went into the folder listing `id` before, and so has counted all
 /// of it now; see [`SaveLimits::enter`].
-fn again(
+pub(crate) fn again(
     seen: &mut SaveLimits,
     id: Option<Id>,
     depth: usize,

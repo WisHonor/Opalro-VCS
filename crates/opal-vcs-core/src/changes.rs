@@ -291,7 +291,7 @@ fn scope(repo: &Repository, paths: Option<&[String]>) -> Result<Option<Scope>, S
 }
 
 /// One side of a file: what it holds, or too much to read.
-enum Side {
+pub(crate) enum Side {
     Bytes(Vec<u8>),
     TooBig,
 }
@@ -325,7 +325,7 @@ fn has_content(kind: EntryKind) -> bool {
 
 /// What the store holds for one side, read whole unless it is over the limit. The size a listing
 /// gives is checked first, and the read stops past the limit whatever the listing said.
-fn stored(
+pub(crate) fn stored(
     store: &Store,
     kind: Option<EntryKind>,
     id: Option<Id>,
