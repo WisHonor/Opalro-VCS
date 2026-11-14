@@ -266,14 +266,16 @@ pub(crate) fn overlay(
     changes: &BTreeMap<String, Option<Put>>,
     packs: &mut PackSet,
 ) -> Result<Id, SaveError> {
-    overlay_with(store, base_root, changes, &mut |listing| {
+    overlay_with(store, &HashMap::new(), base_root, changes, &mut |listing| {
         store_listing(store, packs, listing)
     })
 }
 
-/// [`overlay`], with each listing it builds handed to `keep`, which gives its ID.
-fn overlay_with(
+/// [`overlay`], with the base's folders read from `unstored` first, and each listing it builds
+/// handed to `keep`, which gives its ID.
+pub(crate) fn overlay_with(
     store: &Store,
+    unstored: &HashMap<Id, Listing>,
     base_root: Id,
     changes: &BTreeMap<String, Option<Put>>,
     keep: &mut dyn FnMut(&Listing) -> Result<Id, SaveError>,
@@ -304,8 +306,7 @@ fn overlay_with(
             .or_default()
             .push((name.to_owned(), entry));
     }
-    let unstored = HashMap::new();
-    let mut base = Tree::new(store, &unstored, base_root, EXACT);
+    let mut base = Tree::new(store, unstored, base_root, EXACT);
     let mut paths: Vec<String> = todo.keys().filter(|p| !p.is_empty()).cloned().collect();
     // The deepest first, so each folder is built before the one holding it.
     paths.sort_by_key(|p| std::cmp::Reverse(p.len()));
@@ -436,7 +437,7 @@ fn placeholders(
                 .collect()
         };
         let mut listings = HashMap::new();
-        let root = overlay_with(store, base_root, &held, &mut |listing| {
+        let root = overlay_with(store, &HashMap::new(), base_root, &held, &mut |listing| {
             let id = listing.id();
             listings.insert(id, listing.clone());
             Ok(id)

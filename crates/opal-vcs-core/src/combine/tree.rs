@@ -22,7 +22,7 @@ use crate::store::{Store, StoreError};
 pub const MAX_HELD_TEXT: u64 = 256 << 20;
 
 /// Conflicts named; the rest are only counted.
-const MAX_NAMED: usize = 100;
+pub(super) const MAX_NAMED: usize = 100;
 
 /// What a combine has built that a later merge of the same combine may read, before anything
 /// is stored. Every object it built is in the combine's `PackSet` too.

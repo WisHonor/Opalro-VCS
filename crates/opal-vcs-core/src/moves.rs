@@ -1,14 +1,20 @@
 //! Files that moved between two versions of the project: the same contents gone from one path and
 //! present at exactly one new one.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
+use crate::ancestry::only_in;
+use crate::combine::Made;
 use crate::diff::{file_change, for_each_entry_change_in};
 use crate::id::Id;
+use crate::kept::EXACT;
 use crate::listing::{Entry, EntryKind, Listing};
 use crate::names::validate_path;
+use crate::repo::{RepoError, Repository};
 use crate::save::MoveNote;
+use crate::scope::ancestors;
 use crate::store::{Store, StoreError};
+use crate::writeout::Tree;
 
 /// At most this many bytes of paths in one save's notes, both paths of each note counted, so that
 /// the notes never make a save's record too large to store.
@@ -40,10 +46,6 @@ fn file(e: Option<&Entry>) -> Option<&Entry> {
 /// same non-empty contents, no other file that left and none that arrived holding those
 /// contents; sorted by where they went. A path that left holds nothing at `to_root`, and one
 /// that arrived held nothing at `from_root`. Either side's listings may be in `unstored`.
-#[allow(
-    dead_code,
-    reason = "a save takes its count too; a combine needs only the moves"
-)]
 pub(crate) fn same_contents(
     store: &Store,
     unstored: &HashMap<Id, Listing>,
@@ -112,6 +114,152 @@ pub(crate) fn count_and_moves(
         .collect();
     notes.sort_unstable_by(|a, b| a.to.cmp(&b.to));
     Ok((changed, notes))
+}
+
+/// One version a merge reads: its root listing, and its save, `None` when it is made up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Version {
+    pub root: Id,
+    pub save: Option<Id>,
+}
+
+/// Where the files of `start` went on `side`: start path to side path. Each move is checked.
+/// Listings in `made` are read before the store's.
+pub(crate) fn followed(
+    repo: &Repository,
+    made: &Made,
+    start: &Version,
+    side: &Version,
+) -> Result<BTreeMap<String, String>, RepoError> {
+    let store = repo.store();
+    let noted = match (start.save, side.save) {
+        (Some(from), Some(tip)) => noted(repo, from, start.root, tip)?,
+        _ => BTreeMap::new(),
+    };
+    let mut at_start = Tree::new(store, &made.listings, start.root, EXACT);
+    let mut on_side = Tree::new(store, &made.listings, side.root, EXACT);
+    let mut went = BTreeMap::new();
+    // A side whose notes moved a file has moved it, whatever it holds where the file was.
+    for (from, to) in noted {
+        if fits(&mut at_start, &mut on_side, &from, &to)? {
+            went.insert(from, to);
+        }
+    }
+    let taken: HashSet<String> = went.values().cloned().collect();
+    for n in same_contents(store, &made.listings, start.root, side.root)? {
+        if !went.contains_key(&n.from)
+            && !taken.contains(&n.to)
+            && fits(&mut at_start, &mut on_side, &n.from, &n.to)?
+            && on_side.entry(&n.from)?.is_none()
+        {
+            went.insert(n.from, n.to);
+        }
+    }
+    Ok(went)
+}
+
+/// The moves the notes of `tip`'s saves tell, back along first parents to `start` (whose root
+/// is `start_root`) and taken one after another; none when that path doesn't reach it. A note
+/// counts only when it is true of its own save.
+fn noted(
+    repo: &Repository,
+    start: Id,
+    start_root: Id,
+    tip: Id,
+) -> Result<BTreeMap<String, String>, RepoError> {
+    let none = Ok(BTreeMap::new());
+    if tip == start {
+        return none;
+    }
+    // Every save on that path before the start is one the start doesn't have.
+    let most = only_in(repo, tip, &[start])?;
+    let read = |id: Id| repo.store().save(&id, repo.signatures_allowed());
+    let unstored = HashMap::new();
+    // Where each file of the tip was, as the walk goes back: there, to its path at the tip.
+    let mut back: HashMap<String, String> = HashMap::new();
+    // Paths at the tip whose file arrived there later than the save the walk is at.
+    let mut arrived: HashSet<String> = HashSet::new();
+    let mut save = read(tip)?;
+    let mut reads = 1u64;
+    // Each save is read once; its tree and its parent's keep only the listings its notes need.
+    let mut after = Tree::new(repo.store(), &unstored, save.root, EXACT);
+    loop {
+        let Some(&parent) = save.parents.first() else {
+            return none;
+        };
+        let parent_save = if parent == start {
+            None
+        } else if reads > most {
+            return none;
+        } else {
+            reads += 1;
+            Some(read(parent)?)
+        };
+        let parent_root = parent_save.as_ref().map_or(start_root, |p| p.root);
+        let mut before = Tree::new(repo.store(), &unstored, parent_root, EXACT);
+        // A save's notes all hold between it and its first parent, so they are taken together.
+        // A file removed and made again in a later save is taken for the same file, as an edit.
+        let mut moved = Vec::new();
+        for n in std::mem::take(&mut save.move_notes) {
+            if validate_path(&n.from).is_err()
+                || validate_path(&n.to).is_err()
+                || !true_of(&mut before, &mut after, &n)?
+            {
+                continue;
+            }
+            let tip_path = match back.remove(&n.to) {
+                Some(p) => p,
+                None if arrived.insert(n.to.clone()) => n.to,
+                None => continue,
+            };
+            moved.push((n.from, tip_path));
+        }
+        for (from, tip_path) in moved {
+            // Whatever the tip holds there came later.
+            arrived.insert(from.clone());
+            back.insert(from, tip_path);
+        }
+        match parent_save {
+            None => break,
+            Some(p) => (save, after) = (p, before),
+        }
+    }
+    Ok(back.into_iter().filter(|(from, to)| from != to).collect())
+}
+
+/// Whether a note is true of the save it is in: its file left `from` for `to` with the same
+/// non-empty contents, as a save's own notes are made.
+fn true_of(before: &mut Tree, after: &mut Tree, n: &MoveNote) -> Result<bool, StoreError> {
+    let (Some(left), Some(came)) = (
+        file(before.entry(&n.from)?.as_ref()).cloned(),
+        file(after.entry(&n.to)?.as_ref()).cloned(),
+    ) else {
+        return Ok(false);
+    };
+    Ok(left.id == came.id && after.entry(&n.from)?.is_none() && before.entry(&n.to)?.is_none())
+}
+
+/// Whether a move from `from` to `to` counts: the start holds a file at `from` and has room at
+/// `to`, and the side holds a file at `to`.
+fn fits(start: &mut Tree, side: &mut Tree, from: &str, to: &str) -> Result<bool, StoreError> {
+    let is_file = |e: Option<Entry>| e.is_some_and(|e| is_file(&e));
+    Ok(is_file(start.entry(from)?) && room_at(start, to)? && is_file(side.entry(to)?))
+}
+
+pub(crate) fn is_file(e: &Entry) -> bool {
+    matches!(e.kind, EntryKind::File | EntryKind::Executable)
+}
+
+/// Whether `tree` holds nothing at `path` and nothing but folders above it.
+pub(crate) fn room_at(tree: &mut Tree, path: &str) -> Result<bool, StoreError> {
+    for up in ancestors(path) {
+        match tree.entry(up)? {
+            None => return Ok(true),
+            Some(e) if e.kind == EntryKind::Folder => {}
+            Some(_) => return Ok(false),
+        }
+    }
+    Ok(tree.entry(path)?.is_none())
 }
 
 /// The first of `notes`, sorted by where the file went, that a save keeps: at most `most`, and at

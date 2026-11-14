@@ -8,13 +8,20 @@ mod tree;
 pub use text::{Text, merge_text};
 pub use tree::{MAX_HELD_TEXT, Made, Merged, merge_trees};
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::io;
 
+use crate::changes::DEADLINE;
+use crate::kept::{EXACT, Put, overlay_with};
+use crate::moves::{Version, followed, is_file, room_at};
 use crate::names::PortabilityProblem;
-use crate::repo::RepoError;
-use crate::snapshot::SaveError;
+use crate::pack::PackSet;
+use crate::repo::{RepoError, Repository};
+use crate::rules::RuleMatcher;
+use crate::snapshot::{SaveError, store_listing};
 use crate::store::StoreError;
 use crate::text::escape;
+use crate::writeout::Tree;
 
 /// Why both sides' changes to a file aren't merged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -179,4 +186,126 @@ impl From<SaveError> for CombineError {
             other => CombineError::Repo(io::Error::other(other.to_string()).into()),
         }
     }
+}
+
+/// Merges `ours` and `theirs` from `start`, following moves. Everything it builds goes to
+/// `packs`, its listings to `made` too, and its texts as well only when `inner`; nothing is
+/// stored.
+#[allow(clippy::too_many_arguments)]
+#[allow(dead_code, reason = "`opalro combine` is its caller")]
+pub(crate) fn merge_three(
+    repo: &Repository,
+    packs: &mut PackSet,
+    made: &mut Made,
+    inner: bool,
+    start: &Version,
+    ours: &Version,
+    theirs: &Version,
+    rules: &RuleMatcher,
+) -> Result<Merged, CombineError> {
+    let store = repo.store();
+    let went = [
+        followed(repo, made, start, ours)?,
+        followed(repo, made, start, theirs)?,
+    ];
+    // Each version's files moved first, in the order of `Which`.
+    let mut puts: [BTreeMap<String, Option<Put>>; 3] = Default::default();
+    let mut clashes = Vec::new();
+    {
+        let mut trees =
+            [start, ours, theirs].map(|v| Tree::new(store, &made.listings, v.root, EXACT));
+        let froms: BTreeSet<&String> = went[0].keys().chain(went[1].keys()).collect();
+        for from in froms {
+            let (moved_on, to, apart) = match (went[0].get(from), went[1].get(from)) {
+                (Some(o), Some(t)) if o == t => {
+                    move_in(&mut trees[0], &mut puts[0], from, o)?;
+                    continue;
+                }
+                (Some(o), Some(t)) => (
+                    Side::Ours,
+                    o,
+                    Some(Clash::MovedApart {
+                        ours_to: o.clone(),
+                        theirs_to: t.clone(),
+                    }),
+                ),
+                (Some(o), None) => (Side::Ours, o, None),
+                (None, Some(t)) => (Side::Theirs, t, None),
+                (None, None) => continue,
+            };
+            let clash = match apart {
+                Some(clash) => clash,
+                None => {
+                    let other = if moved_on == Side::Ours { 2 } else { 1 };
+                    match trees[other].entry(from)? {
+                        None => Clash::MovedRemoved {
+                            moved_on,
+                            to: to.clone(),
+                        },
+                        // Made into something else: the tree merge tells of that.
+                        Some(e) if !is_file(&e) => continue,
+                        Some(_) if !room_at(&mut trees[other], to)? => Clash::MovedOnto {
+                            moved_on,
+                            to: to.clone(),
+                        },
+                        Some(_) => {
+                            move_in(&mut trees[0], &mut puts[0], from, to)?;
+                            move_in(&mut trees[other], &mut puts[other], from, to)?;
+                            continue;
+                        }
+                    }
+                }
+            };
+            // What any version holds there, a new file a mover made included, is part of this
+            // conflict, not one of its own.
+            for (tree, puts) in trees.iter_mut().zip(&mut puts) {
+                if tree.entry(from)?.is_some() {
+                    puts.insert(from.clone(), None);
+                }
+            }
+            clashes.push(Conflict {
+                path: from.clone(),
+                clash,
+            });
+        }
+    }
+    let mut roots = [start.root, ours.root, theirs.root];
+    for (root, changes) in roots.iter_mut().zip(&puts) {
+        if changes.is_empty() {
+            continue;
+        }
+        let mut built = Vec::new();
+        *root = overlay_with(store, &made.listings, *root, changes, &mut |listing| {
+            let id = store_listing(store, packs, listing)?;
+            built.push((id, listing.clone()));
+            Ok(id)
+        })?;
+        made.listings.extend(built);
+    }
+    let [s, o, t] = roots;
+    let mut merged = merge_trees(store, packs, made, inner, s, o, t, rules, DEADLINE)?;
+    if !clashes.is_empty() {
+        // Each names a path the tree merge found nothing at, so the two are named together.
+        let mut all = std::mem::take(&mut merged.conflicts);
+        all.extend(clashes);
+        all.sort_by(|a, b| a.path.cmp(&b.path));
+        let unnamed = all.len().saturating_sub(tree::MAX_NAMED);
+        all.truncate(tree::MAX_NAMED);
+        merged.more += unnamed as u64;
+        merged.conflicts = all;
+    }
+    Ok(merged)
+}
+
+/// Sets `to` in `puts` to what `tree` holds at `from`, and `from` to nothing.
+fn move_in(
+    tree: &mut Tree,
+    puts: &mut BTreeMap<String, Option<Put>>,
+    from: &str,
+    to: &str,
+) -> Result<(), StoreError> {
+    let e = tree.entry(from)?;
+    puts.insert(from.to_owned(), None);
+    puts.insert(to.to_owned(), e.map(|e| (e.kind, e.id, e.size)));
+    Ok(())
 }
