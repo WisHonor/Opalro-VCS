@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 8 build)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 164](164-where-two-lines-parted.md) (when the walk's candidates are the answer; starting points with no save in common); [decision 165](165-combine-the-command.md) (what a refused combine stores; Git's `merge` with two lines); [decision 166](166-merging-two-versions-of-the-project.md) (names alike in threes); [decision 167](167-merging-text-line-by-line.md) (how close to Git the text merge is; how a rule's patterns match); [decision 168](168-moves-in-saves-and-in-combines.md) (what a save may hold for its notes; when a move is believed; what a file arriving at another's place means); [decision 169](169-saves-reached-through-a-combine.md) (damage met while looking for a save)
+- **Refined by:** [decision 171](171-red-team-m8-rulings.md) (the limit of 16 is applied after the extra candidates are dropped, not before)
 
 ## Context
 
