@@ -157,7 +157,8 @@ enum Act {
         edit: u8,
     },
     /// Moves the file `pick` chooses to `to`, makes a new text where it was if `remake` says so,
-    /// and saves, so that the move is noted unless other work goes into the same save.
+    /// and saves. The move is noted unless a new text is made where it was, it lands on a file
+    /// that was there, or the file was edited since the last save.
     Moved {
         pick: usize,
         to: &'static str,
