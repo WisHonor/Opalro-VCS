@@ -110,6 +110,11 @@ The decisions themselves are records [157](../decisions/157-v0.2-in-four-milesto
 43. No third red-team session: the fixes are small, each has its proof test, the whole-branch review reads them, and milestone 8's session attacks names and hints again. Cost if wrong: a flaw in these fixes waits for that session.
 44. The review of the second fixes found one hint that could mislead: with a shelf label that isn't plain it said to run the same unshelf command again, which after a plain `opalro unshelf` and a new shelf brings back the wrong shelf. It now shows `opalro unshelf <label>` as it stands and points at `opalro shelf --list`. The same round put `line delete`'s two hints through the plain-text rule (a stored line name can start with `-`), told a server-lines record that can't be read as damage by name, and let only damage, never another error, end a tag's or server line's chain in the fingerprint search. This round was not reviewed by itself: the whole-branch review was asked to check each of its seven points. Cost if wrong: a slip in it is seen one step later.
 
+**The whole-branch review**
+
+45. A fresh reviewer read the whole milestone: nothing critical, nothing that had to be fixed before the merge, and all seven points of the last fix round in place. Its seven small points went to the follow-ups with no further round of fixes: `opalro tag` holds the tag list several times over when piped or as `--json`; `show` walks more history than before for a save off the current line; a test that isn't as exact as it reads; the rule against a leading `-` written in three places; two harmless oddities. Cost if wrong: small debts carried into milestone 8, each written down.
+46. Milestone 7 was merged into `v0.2` once the whole test suite passed on Windows, macOS and Linux for its last commit, and the nightly run (the model test at 1,024 cases, fuzzing, the comparison with Git on Git's own repository, the gates) passed on the code with both sessions' fixes. `main` was not touched.
+
 ## Deferred
 
 Each of these is a row in the [follow-ups](2026-11-01-milestone-1-follow-ups.md), under "Deferred by milestone 7".

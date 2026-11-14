@@ -447,7 +447,7 @@ The owner decided that Opalro is closed source ([decision 140](decisions/140-bol
 
 ## v0.2: lines and combining
 
-Planned on 2026-11-14 ([decision 157](decisions/157-v0.2-in-four-milestones.md)). Claude decided 157 to 160 at the owner's request while the owner was away; each can be reversed. v0.2 is built on the branch `v0.2`: each milestone on a branch of its own, merged into `v0.2` after its red-team session. `main` stays what v0.1 is released from, and `v0.2` goes into it only by the owner's hand.
+Planned on 2026-11-14 ([decision 157](decisions/157-v0.2-in-four-milestones.md)). Claude decided 157 to 160 at the owner's request while the owner was away, and 161 to 163 while building milestone 7; each can be reversed. v0.2 is built on the branch `v0.2`: each milestone on a branch of its own, merged into `v0.2` after its red-team session. `main` stays what v0.1 is released from, and `v0.2` goes into it only by the owner's hand.
 
 | # | Milestone | Done when |
 |---|---|---|
@@ -480,6 +480,8 @@ Planned on 2026-11-14 after decisions [158](decisions/158-making-renaming-and-de
 **5. Proof** ✅ (2026-11-14; Tasks 11 and 12)
 - The model test makes, renames and deletes lines and tags among its random steps; the ancestry walk is compared with `git rev-list` on every imported repository.
 
-**6. Docs, red team, review and merge** (Tasks 13 to 15)
+**6. Docs, red team, review and merge** ✅ (2026-11-14; Tasks 13 to 15)
+- **Docs** ✅: the design, the guide, [terminal.md](terminal.md), [json.md](json.md), [security.md](security.md), [testing.md](testing.md) and [benchmarks.md](benchmarks.md) §11 say what is built.
 - **Red team** ✅ (2026-11-14): two sessions from the sandbox, RT17 (2 Medium, 3 Low) and RT18 on its fixes (1 Medium, 5 Low), every finding fixed ([decisions 162](decisions/162-red-team-m7-rulings.md) and [163](decisions/163-red-team-m7-session-2-rulings.md); [security.md](security.md) §6).
+- **Review and merge** ✅ (2026-11-14): a whole-branch review found nothing that had to be fixed first; the calls made on the way, with twelve for the owner to confirm, are in [the rulings](plans/2026-11-14-milestone-7-rulings.md); merged into `v0.2`.
 - *Done when:* every proven finding is fixed or ruled on, every document matches the code, and the branch is merged into `v0.2`.
