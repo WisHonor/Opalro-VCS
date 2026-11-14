@@ -4,7 +4,7 @@
 mod support;
 
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::time::Instant;
 
@@ -15,7 +15,7 @@ use opal_core::repo::Repository;
 use proptest::prelude::*;
 use proptest::sample::Index;
 use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
-use support::{Env, files, git, git_with_input, text};
+use support::{Env, files, git, git_with_input, main_tip, saved_files, text};
 
 const ALPHABET: &[&str] = &["a\n", "b\n", "c\n", "d\n"];
 
@@ -289,8 +289,9 @@ enum Step {
 #[derive(Clone, Debug)]
 enum Commit {
     Changes(Vec<Step>),
-    /// One file moved to a free path, with nothing else changed.
-    Move(Index, Index),
+    /// One file moved to a free path, with nothing else changed; if `true`, one this branch
+    /// edited, when there is one.
+    Move(Index, Index, bool),
 }
 
 #[derive(Clone, Debug)]
@@ -329,7 +330,8 @@ fn step() -> impl Strategy<Value = Step> {
 fn commits() -> impl Strategy<Value = Vec<Commit>> {
     let commit = prop_oneof![
         3 => prop::collection::vec(step(), 1..=3).prop_map(Commit::Changes),
-        2 => (any::<Index>(), any::<Index>()).prop_map(|(f, t)| Commit::Move(f, t)),
+        2 => (any::<Index>(), any::<Index>(), any::<bool>())
+            .prop_map(|(f, t, edited)| Commit::Move(f, t, edited)),
     ];
     prop::collection::vec(commit, 1..=4)
 }
@@ -367,8 +369,18 @@ fn make(tree: &mut Tree, commit: &Commit, who: &str, fresh: &mut usize) {
         format!("{who} {fresh}\n")
     };
     let steps = match commit {
-        Commit::Move(from, to) => {
-            if let (Some(from), Some(to)) = (nth_path(tree, from), free_path(tree, to)) {
+        Commit::Move(from, to, edited) => {
+            let was_edited: Tree = tree
+                .iter()
+                .filter(|(_, f)| f.edited[0])
+                .map(|(p, f)| (p.clone(), f.clone()))
+                .collect();
+            let pick = if *edited && !was_edited.is_empty() {
+                nth_path(&was_edited, from)
+            } else {
+                nth_path(tree, from)
+            };
+            if let (Some(from), Some(to)) = (pick, free_path(tree, to)) {
                 let mut file = tree.remove(&from).unwrap();
                 file.moved = true;
                 tree.insert(to, file);
@@ -470,8 +482,38 @@ fn commit_text(branch: &str, mark: u32, from: Option<u32>, before: &Tree, after:
 /// branch edited.
 type MoveCounts = [(usize, usize); 3];
 
-/// The history as a `git fast-import` stream, with how many files each branch moved.
-fn stream(h: &History) -> (String, MoveCounts) {
+/// A generated history: the `git fast-import` stream, the files of the first commit and of each
+/// branch's end (`side`, then `main`), and how many files each branch moved.
+struct Generated {
+    stream: String,
+    first: Tree,
+    ends: [Tree; 2],
+    moves: MoveCounts,
+}
+
+impl Generated {
+    /// Whether `path` is where a moved file of the first commit was, or where it went.
+    fn moved(&self, path: &str) -> bool {
+        self.ends.iter().flatten().any(|(at, f)| {
+            f.moved && f.origin.is_some() && (at == path || f.origin.as_deref() == Some(path))
+        })
+    }
+
+    /// Whether `branch` (0 `side`, 1 `main`) moved the first commit's `from` to `to` and edited
+    /// it, and the other branch removed it.
+    fn moved_edited_removed(&self, branch: usize, from: &str, to: &str) -> bool {
+        let kept = self.ends[branch].get(to).is_some_and(|f| {
+            f.moved && f.origin.as_deref() == Some(from) && f.lines != self.first[from].lines
+        });
+        let gone = !self.ends[1 - branch]
+            .values()
+            .any(|f| f.origin.as_deref() == Some(from));
+        kept && gone
+    }
+}
+
+/// The history `h` written out.
+fn generate(h: &History) -> Generated {
     let mut fresh = 0;
     let first: Tree = h
         .first
@@ -520,7 +562,13 @@ fn stream(h: &History) -> (String, MoveCounts) {
             }
         }
     }
-    (out, counts)
+    let [side, main] = <[Tree; 2]>::try_from(ends).unwrap();
+    Generated {
+        stream: out,
+        first,
+        ends: [side, main],
+        moves: counts,
+    }
 }
 
 /// Every file of the save `main` is at, with whether it is executable.
@@ -561,11 +609,63 @@ fn git_marks(dir: &Path) -> BTreeMap<String, bool> {
         .collect()
 }
 
+/// Every folder below `dir` but `.opalro` and `.git` at the top, empty ones included.
+fn folders(dir: &Path) -> BTreeSet<String> {
+    let mut found = BTreeSet::new();
+    let mut todo = vec![(dir.to_path_buf(), String::new())];
+    while let Some((at, rel)) = todo.pop() {
+        for e in std::fs::read_dir(&at).unwrap() {
+            let e = e.unwrap();
+            let name = e.file_name().to_string_lossy().into_owned();
+            if !e.file_type().unwrap().is_dir()
+                || rel.is_empty() && [".opalro", ".git"].contains(&name.as_str())
+            {
+                continue;
+            }
+            let path = if rel.is_empty() {
+                name
+            } else {
+                format!("{rel}/{name}")
+            };
+            found.insert(path.clone());
+            todo.push((e.path(), path));
+        }
+    }
+    found
+}
+
+/// Whether each file below `dir` is executable on disk.
+#[cfg(unix)]
+fn disk_marks(dir: &Path) -> BTreeMap<String, bool> {
+    use std::os::unix::fs::PermissionsExt;
+    files(dir)
+        .into_keys()
+        .map(|p| {
+            let mode = std::fs::metadata(dir.join(&p))
+                .unwrap()
+                .permissions()
+                .mode();
+            (p, mode & 0o111 != 0)
+        })
+        .collect()
+}
+
+/// The branch Git names in a conflict line: 0 for `side`, 1 for `main`.
+fn branch_named(name: &str) -> usize {
+    match name {
+        "origin/side" => 0,
+        "HEAD" => 1,
+        _ => panic!("Git named a branch {name:?}"),
+    }
+}
+
 /// Generated histories of two branches, combined by both programs. Where both combine cleanly,
-/// they give the same files and marks. Git pairs a file moved and edited with its old self by
-/// likeness, which Opalro never guesses: so Git alone may merge, and where the other branch removed
-/// the file, Opalro alone keeps it where Git asks (rename/delete, modify/delete, and nothing else).
-/// The seed is fixed and both counts kept under ceilings.
+/// they leave the same files, folders and marks, on disk and in the saves. Where Opalro stops, it
+/// stopped for conflicts and changed nothing. Git pairs a file moved and edited with its old self
+/// by likeness, which Opalro never guesses: so Git alone may merge (Opalro's reasons then name
+/// moved files), and where the other branch removed the file, Opalro alone keeps it where Git
+/// reports exactly that pair of conflicts. The seed is fixed; counts sit between floors and
+/// ceilings.
 #[test]
 fn combine_matches_git_merge() {
     const KINDS: [&str; 4] = [
@@ -576,6 +676,7 @@ fn combine_matches_git_merge() {
     ];
     let counts = RefCell::new([0usize; 4]);
     let moves = RefCell::new(MoveCounts::default());
+    let followed = RefCell::new(0);
     let git_only = RefCell::new(Vec::new());
     let opalro_only = RefCell::new(Vec::new());
     let started = Instant::now();
@@ -587,14 +688,15 @@ fn combine_matches_git_merge() {
     };
     TestRunner::new_with_rng(config, rng)
         .run(&history(), |h| {
-            let (fast_import, moved) = stream(&h);
+            let made = generate(&h);
+            let fast_import = &made.stream;
             let env = Env::new();
-            let made = git_with_input(
+            let out = git_with_input(
                 env.root(),
                 &["fast-import", "--quiet"],
                 fast_import.as_bytes(),
             );
-            assert!(made.status.success(), "{}", text(&made.stderr));
+            assert!(out.status.success(), "{}", text(&out.stderr));
             // The import takes the folder as it finds it.
             env.git(&["reset", "-q", "--hard"]);
             env.import();
@@ -604,9 +706,23 @@ fn combine_matches_git_merge() {
                 &["clone", "-q", ".", clone.path().to_str().unwrap()],
             );
 
+            let before = (env.standing(), files(env.root()), folders(env.root()));
             let ours = env.opalro().args(["combine", "side"]).output().unwrap();
             let ours_code = ours.status.code().unwrap();
-            prop_assert!(ours_code <= 1, "{}", text(&ours.stderr));
+            let said = text(&ours.stderr);
+            prop_assert!(ours_code <= 1, "{said}\n{fast_import}");
+            let why: Vec<&str> = said.lines().filter(|l| l.starts_with("  ")).collect();
+            if ours_code == 1 {
+                // Stopped for conflicts, not refused or failed, and nothing changed.
+                prop_assert!(
+                    said.starts_with("error: Combining side into main would leave ")
+                        && said.contains(" in conflict")
+                        && !why.is_empty(),
+                    "{said}\n{fast_import}"
+                );
+                let after = (env.standing(), files(env.root()), folders(env.root()));
+                prop_assert!(after == before, "{said}\n{fast_import}");
+            }
             let theirs = git_with_input(
                 clone.path(),
                 &[
@@ -630,56 +746,98 @@ fn combine_matches_git_merge() {
                 (false, true) => 3,
             };
             if kind == 0 {
-                prop_assert_eq!(files(env.root()), files(clone.path()), "{}", fast_import);
+                let on_disk = files(clone.path());
+                prop_assert_eq!(&files(env.root()), &on_disk, "{}", fast_import);
                 prop_assert_eq!(
-                    opalro_marks(env.root()),
-                    git_marks(clone.path()),
+                    &saved_files(&env, main_tip(&env)),
+                    &on_disk,
                     "{}",
                     fast_import
                 );
+                prop_assert_eq!(
+                    folders(env.root()),
+                    folders(clone.path()),
+                    "{}",
+                    fast_import
+                );
+                let marks = git_marks(clone.path());
+                prop_assert_eq!(&opalro_marks(env.root()), &marks, "{}", fast_import);
+                #[cfg(unix)]
+                {
+                    prop_assert_eq!(&disk_marks(env.root()), &marks, "{}", fast_import);
+                    prop_assert_eq!(&disk_marks(clone.path()), &marks, "{}", fast_import);
+                }
+                *followed.borrow_mut() += made.moves[0].1;
             }
             if kind == 2 {
-                let said = text(&theirs.stdout);
-                let conflicts: Vec<&str> = said
+                // Only a file moved and edited on one branch and removed on the other, which Git
+                // reports as a rename/delete of it and a modify/delete at its new place.
+                let git_said = text(&theirs.stdout);
+                let mut renamed = BTreeMap::new();
+                let mut modified = BTreeSet::new();
+                for c in git_said
                     .lines()
                     .filter_map(|l| l.strip_prefix("CONFLICT ("))
-                    .collect();
-                let allowed = !conflicts.is_empty()
-                    && conflicts.iter().all(|c| {
-                        c.starts_with("rename/delete): ") || c.starts_with("modify/delete): ")
-                    });
+                {
+                    if let Some(c) = c.strip_prefix("rename/delete): ") {
+                        let (from, rest) = c.split_once(" renamed to ").unwrap();
+                        let (to, rest) = rest.split_once(" in ").unwrap();
+                        let by = branch_named(rest.split_once(',').unwrap().0);
+                        renamed.insert(to.to_owned(), (from.to_owned(), by));
+                    } else if let Some(c) = c.strip_prefix("modify/delete): ") {
+                        modified.insert(c.split_once(" deleted in ").unwrap().0.to_owned());
+                    } else {
+                        prop_assert!(
+                            false,
+                            "Opalro combined cleanly where Git didn't:\n{git_said}\n{fast_import}"
+                        );
+                    }
+                }
                 prop_assert!(
-                    allowed,
-                    "Opalro combined cleanly where Git didn't:\n{said}\n{fast_import}"
+                    !renamed.is_empty()
+                        && renamed.keys().cloned().collect::<BTreeSet<_>>() == modified,
+                    "Opalro combined cleanly where Git didn't:\n{git_said}\n{fast_import}"
                 );
-                // Git leaves the kept file in its folder and every other file merged.
+                for (to, (from, by)) in &renamed {
+                    prop_assert!(
+                        made.moved_edited_removed(*by, from, to),
+                        "{from} to {to}:\n{git_said}\n{fast_import}"
+                    );
+                }
+                // Git's stopped merge leaves the kept file at its new place and every other file
+                // merged.
                 prop_assert_eq!(files(env.root()), files(clone.path()), "{}", fast_import);
+                prop_assert_eq!(
+                    folders(env.root()),
+                    folders(clone.path()),
+                    "{}",
+                    fast_import
+                );
                 prop_assert_eq!(
                     opalro_marks(env.root()),
                     git_left_marks(clone.path()),
                     "{}",
                     fast_import
                 );
-                for c in &conflicts {
-                    if let Some(moved) = c.strip_prefix("rename/delete): ") {
-                        let (from, rest) = moved.split_once(" renamed to ").unwrap();
-                        let to = rest.split_once(" in ").unwrap().0;
-                        let ours = opalro_marks(env.root());
-                        prop_assert!(ours.contains_key(to) && !ours.contains_key(from), "{c}");
-                    }
+                let ours = opalro_marks(env.root());
+                for (to, (from, _)) in &renamed {
+                    prop_assert!(ours.contains_key(to) && !ours.contains_key(from), "{to}");
                 }
-                opalro_only.borrow_mut().push(conflicts.join(" | "));
+                opalro_only.borrow_mut().push(format!("{renamed:?}"));
             }
             if kind == 3 {
-                let said = text(&ours.stderr);
-                let why: Vec<&str> = said.lines().filter(|l| l.starts_with("  ")).collect();
+                // Git followed a move Opalro didn't: each file Opalro names was moved.
+                for line in &why {
+                    let path = line.trim_start().split_once(": ").unwrap().0;
+                    prop_assert!(made.moved(path), "{said}\n{fast_import}");
+                }
                 git_only
                     .borrow_mut()
-                    .push(format!("{} (moves {moved:?})", why.join(";")));
+                    .push(format!("{} (moves {:?})", why.join(";"), made.moves));
             }
             counts.borrow_mut()[kind] += 1;
             let mut m = moves.borrow_mut();
-            for (total, case) in m.iter_mut().zip(moved) {
+            for (total, case) in m.iter_mut().zip(made.moves) {
                 total.0 += case.0;
                 total.1 += case.1;
             }
@@ -691,21 +849,32 @@ fn combine_matches_git_merge() {
         println!("{kind}: {n}");
     }
     let [pure, before, after] = moves.into_inner();
+    let followed = followed.into_inner();
     println!(
-        "files moved (in brackets, edited on the other branch): as they were {} ({}), edited before the move {} ({}), edited after it {} ({})",
+        "files moved (in brackets, edited on the other branch): as they were {} ({}, of which {followed} in cases both merged), edited before the move {} ({}), edited after it {} ({})",
         pure.0, pure.1, before.0, before.1, after.0, after.1
     );
     for why in opalro_only.into_inner() {
-        println!("Opalro clean only, Git said: {why}");
+        println!("Opalro clean only, Git's rename/delete pairs: {why}");
     }
     for why in git_only.into_inner() {
         println!("Git clean only: {why}");
     }
     println!("took {:.1?}", started.elapsed());
-    // Ceilings, not exact counts: another Git may pair files its own way.
+    // Measured with Git 2.50.1: 36 both clean, 1 Opalro clean only, 4 Git clean only, 8 moves
+    // followed into a file the other branch edited, 3 files edited before their move and on the
+    // other branch. Another Git can pair a few files its own way, so each bound has some room.
     assert!(
-        counts[0] >= 16 && counts[2] <= 6 && counts[3] <= 8,
+        counts[0] >= 24 && counts[2] <= 3 && counts[3] <= 8,
         "{KINDS:?}: {counts:?}"
+    );
+    assert!(
+        followed >= 4,
+        "{followed} moves followed into an edited file"
+    );
+    assert!(
+        before.1 >= 1,
+        "no file edited before its move and on the other branch"
     );
 }
 
@@ -763,6 +932,8 @@ fn a_file_moved_and_changed_and_removed_on_the_other_line_is_kept_where_git_asks
         clone.path(),
         &[
             "-c",
+            "merge.directoryRenames=false",
+            "-c",
             "merge.renames=true",
             "merge",
             "--no-edit",
@@ -804,7 +975,11 @@ fn a_move_saved_by_itself_is_followed_and_one_saved_with_an_edit_is_not() {
                 "{said}"
             );
         } else {
+            let (main, side) = (main_tip(&env), env.state().1.lines["side"]);
             opalro(&env, &["combine", "side"], 0);
+            let repo = Repository::open(env.root()).unwrap();
+            let combined = repo.store().save(&main_tip(&env), false).unwrap();
+            assert_eq!(combined.parents, [main, side]);
             assert!(!env.root().join("a.txt").exists());
             assert_eq!(
                 std::fs::read(env.root().join("b.txt")).unwrap(),
