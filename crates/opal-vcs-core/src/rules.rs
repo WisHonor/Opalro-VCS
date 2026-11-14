@@ -89,18 +89,18 @@ impl RuleMatcher {
     #[must_use]
     pub fn new(rules: &Rules) -> RuleMatcher {
         let rules = rules.rules.iter().map(|rule| {
+            let mut text = Vec::new();
             // A pattern can't be split across lines of the one rule file it becomes.
-            let lines: Vec<&str> = rule
-                .files
-                .iter()
-                .map(String::as_str)
-                .filter(|p| !p.contains(['\n', '\r']))
-                .collect();
+            for pattern in rule.files.iter().filter(|p| !p.contains(['\n', '\r'])) {
+                // Every line starts after a line break, so no byte-order mark is taken off.
+                text.push(b'\n');
+                if pattern.starts_with('#') {
+                    text.push(b'\\');
+                }
+                fold_pattern(pattern.as_bytes(), &mut text);
+            }
             let mut matcher = Matcher::new(RULE_DRIVE);
-            matcher.enter(
-                "",
-                vec![IgnoreRules::parse(lines.join("\n").as_bytes(), "", false)],
-            );
+            matcher.enter("", vec![IgnoreRules::parse(&text, "", false)]);
             (matcher, rule.conflict_markers)
         });
         RuleMatcher {
@@ -119,6 +119,86 @@ impl RuleMatcher {
             })
         };
         self.rules.iter().rev().find_map(says).unwrap_or(true)
+    }
+}
+
+/// Writes `pattern` with each ASCII letter that stands for itself lowered, so that it matches
+/// either case as the lowered name does. A range's ends and a class's name are kept as written:
+/// they take either case already, and lowering them could change what they hold.
+fn fold_pattern(mut rest: &[u8], out: &mut Vec<u8>) {
+    while let Some((&c, after)) = rest.split_first() {
+        out.push(c.to_ascii_lowercase());
+        rest = after;
+        match c {
+            b'\\' => {
+                if let Some((&escaped, after)) = rest.split_first() {
+                    out.push(escaped.to_ascii_lowercase());
+                    rest = after;
+                }
+            }
+            b'[' => rest = fold_bracket(rest, out),
+            _ => {}
+        }
+    }
+}
+
+/// Writes the inside of a `[…]` whose `[` is written, read as the ignore matcher reads it, and
+/// gives what follows its `]`.
+fn fold_bracket<'a>(mut rest: &'a [u8], out: &mut Vec<u8>) -> &'a [u8] {
+    if let Some((&c @ (b'!' | b'^'), after)) = rest.split_first() {
+        out.push(c);
+        rest = after;
+    }
+    let mut first = true;
+    loop {
+        let Some(close) = rest.iter().position(|&b| b == b']') else {
+            // It never closes, so the pattern matches nothing whatever it holds.
+            out.extend_from_slice(rest);
+            return &[];
+        };
+        if !first && close == 0 {
+            out.push(b']');
+            return rest.get(1..).unwrap_or_default();
+        }
+        first = false;
+        let class = rest.get(..close).and_then(|t| t.strip_prefix(b"[:"));
+        if class.is_some_and(|name| name.ends_with(b":")) {
+            let (class, after) = split(rest, close.saturating_add(1));
+            out.extend_from_slice(class);
+            rest = after;
+            continue;
+        }
+        let one = member_len(rest);
+        let range = rest
+            .get(one..)
+            .and_then(|t| t.strip_prefix(b"-"))
+            .filter(|t| t.first().is_some_and(|&b| b != b']'));
+        match range {
+            Some(tail) => {
+                let ends = one.saturating_add(1).saturating_add(member_len(tail));
+                let (member, after) = split(rest, ends);
+                out.extend_from_slice(member);
+                rest = after;
+            }
+            None => {
+                let (member, after) = split(rest, one);
+                out.extend(member.iter().map(u8::to_ascii_lowercase));
+                rest = after;
+            }
+        }
+    }
+}
+
+fn split(text: &[u8], at: usize) -> (&[u8], &[u8]) {
+    text.split_at_checked(at).unwrap_or((text, &[]))
+}
+
+/// How many bytes the member at the start of a `[…]`'s text takes: two after a `\`.
+fn member_len(text: &[u8]) -> usize {
+    match text {
+        [b'\\', _, ..] => 2,
+        [] => 0,
+        _ => 1,
     }
 }
 
@@ -684,7 +764,7 @@ mod tests {
         })
     }
 
-    /// Whether `pattern`'s rule matches `path`.
+    /// Whether a rule of `patterns` matches `path`.
     fn matches(patterns: &[&str], path: &str) -> bool {
         !matcher(&[(patterns, Some(false))]).conflict_markers(path)
     }
@@ -729,6 +809,50 @@ mod tests {
         assert!(matches(&["*.unity"], "MAIN.UNITY"));
         assert!(matches(&["Assets/"], "assets/a.txt"));
         assert!(!matches(&["\u{c9}.txt"], "\u{e9}.txt"));
+    }
+
+    #[test]
+    fn letters_in_escapes_and_brackets_take_either_case() {
+        for path in ["Main.unity", "main.unity", "MAIN.UNITY"] {
+            for pattern in [
+                "\\Main.unity",
+                "\\main.unity",
+                "[M]ain.unity",
+                "[m]ain.unity",
+            ] {
+                assert!(matches(&[pattern], path), "{pattern} {path}");
+            }
+            for pattern in ["[A-Z]*.unity", "[a-z]*.unity", "[[:upper:]]*", "[!x]ain.*"] {
+                assert!(matches(&[pattern], path), "{pattern} {path}");
+            }
+        }
+        assert!(!matches(&["[!M]ain.unity"], "main.unity"));
+        // Range ends and class names are kept as written: `[A-z]` still takes `_`.
+        assert!(matches(&["[A-z]x"], "_x"));
+        assert!(matches(&["[Z-a]x"], "_x"));
+        assert!(!matches(&["[[:UPPER:]]x"], "ax"));
+    }
+
+    #[test]
+    fn each_entry_is_a_pattern_never_a_comment() {
+        assert!(matches(&["#notes"], "#notes"));
+        assert!(matches(&["#notes"], "a/#NOTES"));
+        assert!(!matches(&["#notes"], "notes"));
+        assert!(!matches(&["#keep*", "!#keep"], "#keep"));
+        assert!(matches(&["#keep*", "!#keep"], "#keep2"));
+        // A byte-order mark is part of the pattern wherever it stands.
+        for patterns in [&["\u{feff}*.unity", "x"][..], &["x", "\u{feff}*.unity"]] {
+            assert!(!matches(patterns, "a.unity"), "{patterns:?}");
+            assert!(matches(patterns, "\u{feff}a.unity"), "{patterns:?}");
+        }
+    }
+
+    #[test]
+    fn a_rule_of_only_reincluding_patterns_matches_nothing() {
+        let m = matcher(&[(&["!*.unity", "!keep/"], Some(false))]);
+        for path in ["a.unity", "keep/a.txt", "a.txt"] {
+            assert!(m.conflict_markers(path), "{path}");
+        }
     }
 
     #[test]
