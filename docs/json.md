@@ -34,6 +34,7 @@
 | `author` | person | Who wrote the change. |
 | `saver` | person | Who made the save. |
 | `line` | string or `null` | The line the save was made on. `null` if the save doesn't say. |
+| `parents` | list of string | The fingerprints of the saves it was made after (64 hex digits each), in order: the first is the one its changes are compared with, and a combined save has one more for each line or save it brought in ([decision 169](decisions/169-saves-reached-through-a-combine.md)). Empty for a first save. |
 
 **A person** (`author`, `saver`): `name` (string), `email` (string), `time_ms` (integer: milliseconds since 1970-01-01 UTC) and `tz_offset_min` (integer: minutes east of UTC in the person's time zone; negative is west).
 
@@ -519,7 +520,8 @@ A step that stops it fails it with exit code 1, and its document is the error do
 |---|---|---|
 | `opalro_json` | number | `1` |
 | `position` | object | Where the project is, as in `status`: `{"line": …}`, or `{"save": …}` (64 hex digits) when it is at a save instead of on a line. |
-| `saves` | list of save | The saves of the line, newest first, following first parents back to the start. |
+| `from` | string or `null` | `opalro history <from>` lists from another line, a tag or a save, read as `opalro show` reads its argument: the fingerprint of the save it lists from (64 hex digits). `null` when no place was given. |
+| `saves` | list of save | The saves of the line, newest first, following first parents back to the start; with a place given, the saves from it back, the same way. A save listed from anywhere but the line the project is on has the first 12 letters of its change ID as `change_id_short`, since shortening them to be unique would mean reading the whole list first. |
 | `tags` | list | Every tag at a listed save, in name order, each `{"name": …, "save": …}`: the tag's name as it is, and its save's fingerprint (64 hex digits). |
 | `warnings` | list | See §4. |
 

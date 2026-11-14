@@ -35,7 +35,8 @@ use opal_core::diary::{Action, DiaryEntry, Position, is_plain};
 use opal_core::diff::{count_changes, for_each_change};
 use opal_core::fsio::fault_point;
 use opal_core::history::{
-    LineIds, ResolveError, current_save, for_each_on_line, id_for_command, resolve, short_change_id,
+    LineIds, ResolveError, current_save, for_each_from, for_each_on_line, id_for_command, resolve,
+    short_change_id,
 };
 use opal_core::id::{ChangeId, Id};
 use opal_core::import::{ImportError, ImportPass, ImportRequest, import_git};
@@ -114,7 +115,11 @@ enum Command {
         paths: Vec<PathBuf>,
     },
     /// List the saves on this line.
-    History,
+    History {
+        /// List from this line, tag or save instead: by line name, line@server, tag, change ID or
+        /// fingerprint.
+        from: Option<String>,
+    },
     /// Show one save.
     Show {
         /// The save, by line name, line@server, tag, change ID or fingerprint; the one you're at
@@ -1385,14 +1390,35 @@ fn changes_command(
     output::listed(result, || warnings().0)
 }
 
-fn history(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
+fn history(json: bool, from: Option<&str>, opened: &mut Option<Repository>) -> Result<(), Failure> {
     let repo: &Repository = opened.insert(with_users_key(Repository::discover(
         &std::env::current_dir()?,
     )?));
+    let from = match from {
+        Some(text) => Some(history_start(repo, text)?),
+        None => None,
+    };
     let unfinished = unfinished_warning(repo);
     let mut out = output::Stdout::new();
-    let done = history_to(&mut out, repo, json, unfinished.clone());
+    let done = history_to(&mut out, repo, json, from, unfinished.clone());
     output::listed(done, || so_far(unfinished, repo))
+}
+
+/// Where `opalro history <text>` lists from: the save `text` names, and whether it named the line
+/// the project is on, which is listed as `opalro history` lists it.
+fn history_start(repo: &Repository, text: &str) -> Result<(Id, bool), Failure> {
+    let target = resolve_target(repo, text)?;
+    let (_, entry) = repo.current()?;
+    Ok(match target {
+        lines::Target::Line(name) => {
+            let own = matches!(&entry.state.position, Position::OnLine(on) if *on == name);
+            match entry.state.lines.get(&name) {
+                Some(tip) => (*tip, own),
+                None => return Err(ResolveError::NotFound(text.to_owned()).into()),
+            }
+        }
+        lines::Target::ServerLine { save, .. } | lines::Target::Save(save) => (save, false),
+    })
 }
 
 /// The warnings of a listing stdout stopped: `unfinished`, found before it began, and the store's.
@@ -1406,20 +1432,30 @@ fn history_to(
     out: &mut output::Stdout,
     repo: &Repository,
     json: bool,
+    from: Option<(Id, bool)>,
     unfinished: Option<Warning>,
 ) -> Result<Vec<Warning>, Failure> {
     let (_, entry) = repo.current()?;
     // Each save's tags, found once: an import can bring thousands.
     let mut tags_at = tags::by_save(repo, &entry.state)?;
+    // Another place is listed with 12-letter IDs; the line the project is on with its own.
+    let elsewhere = from.and_then(|(tip, own)| (!own).then_some(tip));
+    let walk = |each: &mut dyn FnMut(&Id, &Save, &str) -> Result<(), Failure>| match elsewhere {
+        Some(tip) => for_each_from(repo, tip, each),
+        None => for_each_on_line(repo, each),
+    };
     if json {
         let position = output::position_json(&entry.state.position);
+        let from = serde_json::Value::from(from.map(|(tip, _)| tip.to_hex()));
         let listed_tags: RefCell<Vec<(String, Id)>> = RefCell::default();
         // The document `json!` would make, in pieces and in alphabetical key order, as in `show`.
         return output::stream_document(
             out,
-            &format!("{{\"opalro_json\":{OPALRO_JSON},\"position\":{position},\"saves\":["),
+            &format!(
+                "{{\"from\":{from},\"opalro_json\":{OPALRO_JSON},\"position\":{position},\"saves\":["
+            ),
             |each| {
-                for_each_on_line(repo, |id, save, short| {
+                walk(&mut |id, save, short| {
                     if let Some(names) = tags_at.remove(id) {
                         let mut listed = listed_tags.borrow_mut();
                         listed.extend(names.into_iter().map(|name| (name, *id)));
@@ -1440,16 +1476,18 @@ fn history_to(
         );
     }
     let now = now_ms();
-    let mut listed = history_output::History::new(match &entry.state.position {
-        Position::OnLine(line) => Some(escape(line, false)),
-        Position::AtSave(_) => None,
+    let here = current_save(repo)?;
+    let mut listed = history_output::History::new(match (&entry.state.position, elsewhere) {
+        (_, Some(_)) => history_output::Listed::From,
+        (Position::OnLine(line), None) => history_output::Listed::Line(escape(line, false)),
+        (Position::AtSave(_), None) => history_output::Listed::AtSave,
     });
     // Each save's lines, found once: an import can bring thousands.
     let mut heads: HashMap<Id, Vec<String>> = HashMap::new();
     for (name, tip) in &entry.state.lines {
         heads.entry(*tip).or_default().push(escape(name, false));
     }
-    let walked = for_each_on_line(repo, |id, s, short| {
+    let walked = walk(&mut |id, s, short| {
         let row = history_output::SaveRow {
             short: short.to_owned(),
             when: output::relative_time(s.author.time_ms, s.author.tz_offset_min, now),
@@ -1459,9 +1497,11 @@ fn history_to(
             tags: (tags_at.remove(id).unwrap_or_default().iter())
                 .map(|name| tags::shown_name(name))
                 .collect(),
+            combined: s.parents.iter().skip(1).map(Id::short_hex).collect(),
+            here: *id == here,
         };
         listed.add(out, row)?;
-        Ok::<(), Failure>(())
+        Ok(())
     });
     // What was read before a damaged save is still shown, before the error, which is the one
     // told even if that writing fails too.
@@ -1496,6 +1536,11 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
         }
         None => (None, String::new()),
     };
+    // The others are only named: one that can't be read is named without its message.
+    let other_titles: Vec<Option<String>> = (save.parents.iter().skip(1))
+        .filter(|_| !json)
+        .map(|p| (store.save(p, repo.signatures_allowed()).ok()).map(|s| output::quoted_title(&s)))
+        .collect();
     // Counting first holds the saves to the limits and reads them for damage before anything is
     // printed, so a save that can't be listed prints only the error. It also sets the table's
     // columns. The changes are then printed as the walk finds them, and none is kept.
@@ -1544,6 +1589,7 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
             save: &save,
             short: &short,
             parent_title: &parent_title,
+            other_titles: &other_titles,
             tags: &tags,
         };
         show_output::write_head(&mut out, &head, count, now_ms())?;
@@ -3005,7 +3051,7 @@ fn main() -> ExitCode {
         Command::Changes { save, paths } => {
             changes_command(cli.json, save.as_deref(), &paths, &mut opened)
         }
-        Command::History => history(cli.json, &mut opened),
+        Command::History { from } => history(cli.json, from.as_deref(), &mut opened),
         Command::Show { save } => show(cli.json, save.as_deref(), &mut opened),
         Command::Goto { target } => goto_command(cli.json, &target, &mut opened),
         Command::Combine { target, message } => {

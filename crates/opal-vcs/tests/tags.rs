@@ -404,10 +404,14 @@ fn an_imported_tags_questions_are_escaped() {
 }
 
 /// Names no line could have, each able to forge its own end unquoted, and how each is shown.
-const ODD: [(&str, &str); 7] = [
+const ODD: [(&str, &str); 8] = [
     ("v1 b", "\"v1 b\""),
     ("v9]  [main", "\"v9\\]  \\[main\""),
     ("x]  [main]  [tag y", "\"x\\]  \\[main\\]  \\[tag y\""),
+    (
+        "x]  [combined 0123456789ab",
+        "\"x\\]  \\[combined 0123456789ab\"",
+    ),
     ("a, b", "\"a, b\""),
     ("say \"hi\"", "\"say \\\"hi\\\"\""),
     ("a\\b", "\"a\\\\b\""),
@@ -427,6 +431,8 @@ fn an_odd_tags_name_is_shown_between_quotes() {
         let (history, _) = run(&env, &["history"], 0);
         assert!(history.contains(&format!("  [tag {shown}]")), "{history}");
         assert!(history.contains("  [tag v1.0]"), "{history}");
+        // No save here has two parents, and no name can pose as the mark of one.
+        assert!(!history.contains("  [combined "), "{history}");
         let (shown_save, _) = run(&env, &["show"], 0);
         let row = shown_save.lines().find(|l| l.contains("Tags ")).unwrap();
         assert!(row.contains(shown), "{row}");

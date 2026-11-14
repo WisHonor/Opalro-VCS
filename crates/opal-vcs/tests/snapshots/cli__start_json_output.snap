@@ -26,6 +26,7 @@ expression: json
     "id": "[redacted]",
     "line": "main",
     "message": "Start project",
+    "parents": [],
     "saver": {
       "email": "test@example.com",
       "name": "Test",

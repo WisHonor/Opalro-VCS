@@ -3,6 +3,7 @@ source: crates/opal-vcs/tests/cli.rs
 expression: history
 ---
 {
+  "from": null,
   "opalro_json": 1,
   "position": {
     "line": "main"
@@ -20,6 +21,9 @@ expression: history
       "id": "[redacted]",
       "line": "main",
       "message": "two",
+      "parents": [
+        "[redacted]"
+      ],
       "saver": {
         "email": "test@example.com",
         "name": "Test",
@@ -39,6 +43,9 @@ expression: history
       "id": "[redacted]",
       "line": "main",
       "message": "one",
+      "parents": [
+        "[redacted]"
+      ],
       "saver": {
         "email": "test@example.com",
         "name": "Test",
@@ -58,6 +65,7 @@ expression: history
       "id": "[redacted]",
       "line": "main",
       "message": "Start project",
+      "parents": [],
       "saver": {
         "email": "test@example.com",
         "name": "Test",

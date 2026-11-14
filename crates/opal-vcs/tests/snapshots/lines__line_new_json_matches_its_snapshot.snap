@@ -17,6 +17,9 @@ expression: "json_of(&env, &[\"line\", \"new\", \"wall-run\"])"
     "id": "[redacted]",
     "line": "main",
     "message": "A",
+    "parents": [
+      "[redacted]"
+    ],
     "saver": {
       "email": "test@example.com",
       "name": "Test",

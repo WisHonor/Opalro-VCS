@@ -432,3 +432,122 @@ fn a_combine_of_many_large_text_files_stays_within_memory() {
         );
     }
 }
+
+/// `main` and `side` apart, `side`'s save tagged `v1.0`, then `side` combined into `main`.
+fn combined(env: &Env) {
+    apart(
+        env,
+        "one\n2\n3\n4\n5\n6\n7\n8\n",
+        "1\n2\n3\n4\n5\n6\n7\neight\n",
+    );
+    run(env, &["tag", "v1.0", "--save", "side"], 0);
+    run(env, &["combine", "side"], 0);
+}
+
+#[test]
+fn history_marks_a_combined_save() {
+    let env = project();
+    combined(&env);
+    let side = tip(&env, "side").to_hex();
+    let (shown, _) = run(&env, &["history"], 0);
+    let rows: Vec<&str> = shown.lines().skip(2).collect();
+    assert!(
+        rows[0].ends_with(&format!(
+            "Combine side into main  [main]  [combined {}]",
+            &side[..12]
+        )),
+        "{shown}"
+    );
+    // The line's own saves only: what side made is behind the mark.
+    assert_eq!(rows.len(), 4, "{shown}");
+    assert!(!shown.contains("On side"), "{shown}");
+}
+
+#[test]
+fn history_from_a_line_a_tag_or_a_save_lists_from_there() {
+    let env = project();
+    combined(&env);
+    let side = tip(&env, "side");
+    let letters = |at: usize| {
+        let doc = json(&env, &["history", "side"], 0);
+        doc["saves"][at]["change_id"].as_str().unwrap()[..12].to_owned()
+    };
+    let (first, second) = (letters(0), letters(1));
+    for from in ["side", "v1.0", &side.to_hex()[..12]] {
+        let (shown, _) = run(&env, &["history", from], 0);
+        assert!(
+            shown.starts_with(&format!(
+                "Saves back from save {first} \"On side\", newest first:\n\n  {first}  "
+            )),
+            "{from}: {shown}"
+        );
+        let rows: Vec<&str> = shown.lines().skip(2).collect();
+        assert_eq!(rows.len(), 3, "{from}: {shown}");
+        assert!(rows[0].ends_with("On side  [side]  [tag v1.0]"), "{shown}");
+        assert!(rows[1].starts_with(&format!("  {second}  ")), "{shown}");
+        // The project is on main, which this listing doesn't reach.
+        assert!(!shown.contains('>'), "{shown}");
+        let doc = json(&env, &["history", from], 0);
+        assert_eq!(doc["from"], side.to_hex(), "{doc}");
+        assert_eq!(doc["saves"][0]["change_id_short"], first, "{doc}");
+        assert_eq!(doc["saves"].as_array().unwrap().len(), 3, "{doc}");
+    }
+    // The line the project is on is listed as plain history lists it.
+    assert_eq!(
+        run(&env, &["history", "main"], 0),
+        run(&env, &["history"], 0)
+    );
+    assert_eq!(json(&env, &["history"], 0)["from"], serde_json::Value::Null);
+    // The place marker is on the save the project is at, wherever it is listed.
+    run(&env, &["goto", "side"], 0);
+    let (shown, _) = run(&env, &["history", "v1.0"], 0);
+    assert!(shown.contains(&format!("\n> {first}  ")), "{shown}");
+    // Read as show reads it: refused alike.
+    let (_, said) = run(&env, &["history", "nothing-here"], 1);
+    let (_, show_said) = run(&env, &["show", "nothing-here"], 1);
+    assert_eq!(said, show_said);
+}
+
+#[test]
+fn show_names_the_other_parent_on_a_combined_row() {
+    let env = project();
+    combined(&env);
+    let (main, side) = {
+        let (repo, state) = env.state();
+        let made = repo.store().save(&state.lines["main"], false).unwrap();
+        (made.parents[0].to_hex(), made.parents[1].to_hex())
+    };
+    let (shown, _) = run(&env, &["show"], 0);
+    assert!(
+        shown.contains(&format!(
+            "\n    After        {} \"On main\"\n    Combined     {} \"On side\"\n    Fingerprint  ",
+            &main[..12],
+            &side[..12]
+        )),
+        "{shown}"
+    );
+}
+
+#[test]
+fn every_save_object_has_its_parents() {
+    let env = project();
+    combined(&env);
+    let (main, side) = {
+        let (repo, state) = env.state();
+        let made = repo.store().save(&state.lines["main"], false).unwrap();
+        (made.parents[0].to_hex(), made.parents[1].to_hex())
+    };
+    let history = json(&env, &["history"], 0);
+    assert_eq!(
+        history["saves"][0]["parents"],
+        serde_json::json!([main, side])
+    );
+    let saves = history["saves"].as_array().unwrap();
+    assert_eq!(saves.last().unwrap()["parents"], serde_json::json!([]));
+    let shown = json(&env, &["show"], 0);
+    assert_eq!(shown["save"]["parents"], serde_json::json!([main, side]));
+    // side was made after A, the third save on main from the newest.
+    let a = saves[2]["id"].as_str().unwrap().to_owned();
+    let went = json(&env, &["goto", "side"], 0);
+    assert_eq!(went["save"]["parents"], serde_json::json!([a]), "{went}");
+}

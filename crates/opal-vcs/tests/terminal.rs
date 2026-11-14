@@ -606,6 +606,32 @@ fn history_keeps_tag_marks_whole_and_cuts_the_message() {
     assert!(shown.lines().all(|l| l.len() <= 60), "{shown}");
 }
 
+#[cfg(feature = "fault-injection")]
+#[test]
+fn history_keeps_combined_marks_whole_and_cuts_the_message() {
+    let env = started();
+    put(&env, "a.txt", "a\n");
+    run_at(&env, None, &["save", "A"]);
+    run_at(&env, None, &["line", "new", "side"]);
+    put(&env, "b.txt", "b\n");
+    run_at(&env, None, &["save", "B"]);
+    let side = env.state().1.lines["side"].to_hex();
+    run_at(&env, None, &["goto", "main"]);
+    put(&env, "c.txt", "c\n");
+    run_at(&env, None, &["save", "C"]);
+    run_at(
+        &env,
+        None,
+        &["combine", "side", "word ".repeat(30).trim_end()],
+    );
+    let (shown, _) = run_at(&env, Some(70), &["history"]);
+    let row = shown.lines().nth(2).unwrap();
+    let marks = format!("...  [main]  [combined {}]", &side[..12]);
+    assert!(row.ends_with(&marks), "{shown}");
+    assert!(row.contains("  word"), "{shown}");
+    assert!(shown.lines().all(|l| l.len() <= 70), "{shown}");
+}
+
 #[test]
 fn show_lists_what_a_save_changed_with_sizes_in_1024_units() {
     let env = started();
@@ -1801,6 +1827,16 @@ fn project_text_is_escaped_with_colour_on() {
     }
     let said = same_with_colour_on(&env, &["show"], 0);
     for part in [shown_name, shown_message, author, shown_tag] {
+        assert!(said.contains(part), "{part}: {said}");
+    }
+    // Listed from a save, its message is in the heading too.
+    let tip = support::main_tip(&env).to_hex();
+    let said = same_with_colour_on(&env, &["history", &tip[..12]], 0);
+    assert!(
+        said.contains(&format!("\"{shown_message}\", newest first:")),
+        "{said}"
+    );
+    for part in [author, shown_tag] {
         assert!(said.contains(part), "{part}: {said}");
     }
     let said = same_with_colour_on(&env, &["undo", "--list"], 0);

@@ -23,6 +23,10 @@ expression: "support::masked(nothing)"
     "id": "[redacted]",
     "line": "main",
     "message": "Combine side into main",
+    "parents": [
+      "[redacted]",
+      "[redacted]"
+    ],
     "saver": {
       "email": "test@example.com",
       "name": "Test",

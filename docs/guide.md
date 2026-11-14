@@ -543,7 +543,18 @@ Saves on line main, newest first:
   kxqmr  5 days ago  Ben Okafor  Add rock textures
 ```
 
-Each row is the change ID, when the save was made, who made it, and the first line of its message. The `▸` marks the save you are at.
+Each row is the change ID, when the save was made, who made it, and the first line of its message. The `▸` marks the save you are at. A row ends with the lines whose newest save it is (`[main]`) and its tags (`[tag v1.0]`). A combined save, made by `opalro combine`, is one row that ends with `[combined 3f9a0c2e7b04]`: the first 12 digits of the fingerprint of the save it brought in. The saves made on the other line aren't listed one by one; to see them, list from that save.
+
+Name a line, a tag or a save, as `opalro goto` takes them, to list from there instead. `opalro history 3f9a0c2e7b04` gives, for example:
+
+```text
+Saves back from save kxqmzrtwvnlp "Climb walls", newest first:
+
+  kxqmzrtwvnlp  1 day ago   Ben Okafor  Climb walls
+  kxqmrlpsoqkt  5 days ago  Ben Okafor  Add rock textures
+```
+
+Listed from anywhere but your own line, the change IDs are 12 letters long, so each of them can be typed back into `opalro show` or `opalro goto` from where you are.
 
 ### `opalro goto`
 
@@ -839,7 +850,7 @@ Save ptvz "Add double jump"
 Next: see its lines with: opalro changes --save ptvz
 ```
 
-The **fingerprint** is a save's full, permanent name, worked out from everything in it. `After` names the save before this one by the first 12 digits of its fingerprint, and its message. `opalro show` and `opalro goto` take those digits back whenever the history of one of your lines, server lines or tags leads back to that save, which is nearly always. Only some saves brought in from Git are out of reach: the other side of a Git merge whose branch was gone before the import, or the save before one where the import left you away from every line.
+The **fingerprint** is a save's full, permanent name, worked out from everything in it. `After` names the save before this one by the first 12 digits of its fingerprint, and its message. A combined save has a `Combined` row under it for each save it brought in, named the same way; its changes are shown against the save on `After`. `opalro show` and `opalro goto` take those digits back whenever the history of one of your lines, server lines or tags, or of the save you're at, leads back to that save, through the saves a combine brought in too, which is nearly always: only a save that nothing but a shelf or an undone step holds is out of reach.
 
 ### `opalro start`
 
@@ -1176,7 +1187,7 @@ Moved main forward to climbing: save qwnt "Climb walls".
 Changed your mind? opalro undo
 ```
 
-Here `main` had no save of its own since `climbing` started, so it only moved forward. Had it moved on too, `opalro combine` would have made a combined save, as in [`opalro combine`](#opalro-combine). `opalro history` on `main` follows the first save before each save, so after a combined save it lists that save, not the other line's saves one by one.
+Here `main` had no save of its own since `climbing` started, so it only moved forward. Had it moved on too, `opalro combine` would have made a combined save, as in [`opalro combine`](#opalro-combine). `opalro history` on `main` follows the first save before each save, so after a combined save it lists that save, not the other line's saves one by one; its row ends with `[combined <id>]`, and `opalro history <id>` lists the other line's saves from there, even once that line is deleted.
 
 ## 9. Coming from Git
 

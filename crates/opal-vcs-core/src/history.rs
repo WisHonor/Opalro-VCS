@@ -347,6 +347,24 @@ pub fn for_each_on_line<E: From<RepoError>>(
     Ok(())
 }
 
+/// How many letters of a change ID a listing from another place shows: shortening them to be
+/// unique would mean reading the whole list first.
+const FROM_LETTERS: usize = 12;
+
+/// Calls `each` with every save from `tip` back along first parents, newest first, each with
+/// the first 12 letters of its change ID. Nothing is cached.
+pub fn for_each_from<E: From<RepoError>>(
+    repo: &Repository,
+    tip: Id,
+    mut each: impl FnMut(&Id, &Save, &str) -> Result<(), E>,
+) -> Result<(), E> {
+    for step in chain(repo, tip) {
+        let (id, save) = step?;
+        each(&id, &save, &save.change_id.to_letters()[..FROM_LETTERS])?;
+    }
+    Ok(())
+}
+
 fn one_of(text: &str, mut found: Vec<(Id, String)>) -> Result<Id, ResolveError> {
     found.sort_by(|a, b| a.1.cmp(&b.1));
     found.dedup();

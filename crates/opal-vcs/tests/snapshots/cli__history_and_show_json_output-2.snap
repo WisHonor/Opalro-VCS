@@ -25,6 +25,9 @@ expression: show
     "id": "[redacted]",
     "line": "main",
     "message": "two",
+    "parents": [
+      "[redacted]"
+    ],
     "saver": {
       "email": "test@example.com",
       "name": "Test",

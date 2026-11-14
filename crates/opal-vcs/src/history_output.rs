@@ -6,7 +6,8 @@ use std::io::{self, Write};
 use crate::style::{self, Role, Sym};
 
 /// A save as `opalro history` lists it, each piece escaped: its change ID, when it was written, by
-/// whom, its message's first line, the lines whose newest save it is, and its tags.
+/// whom, its message's first line, the lines whose newest save it is, its tags, and the first 12
+/// hex digits of each parent after its first; `here` when it is the save the project is at.
 pub struct SaveRow {
     pub short: String,
     pub when: String,
@@ -14,14 +15,28 @@ pub struct SaveRow {
     pub title: String,
     pub lines: Vec<String>,
     pub tags: Vec<String>,
+    pub combined: Vec<String>,
+    pub here: bool,
 }
 
 impl SaveRow {
     /// The bytes of text it holds.
     fn size(&self) -> usize {
-        let named: usize = self.lines.iter().chain(&self.tags).map(String::len).sum();
+        let named: usize = (self.lines.iter().chain(&self.tags).chain(&self.combined))
+            .map(String::len)
+            .sum();
         self.short.len() + self.when.len() + self.author.len() + self.title.len() + named
     }
+}
+
+/// What `opalro history` lists, which its heading says.
+pub enum Listed {
+    /// The line the project is on, its name escaped.
+    Line(String),
+    /// The saves back from the one the project is at, not on a line.
+    AtSave,
+    /// The saves back from one named, the first row's.
+    From,
 }
 
 /// `opalro history` holds rows to set its columns, but never a whole line: it stops at this many
@@ -32,22 +47,19 @@ const HELD_BYTES: usize = 1 << 20;
 
 /// `opalro history`'s list, written as its rows come.
 pub struct History {
-    /// The line the project is on, escaped; `None` at a save.
-    line: Option<String>,
+    listed: Listed,
     held: Vec<SaveRow>,
     held_bytes: usize,
     widths: Option<[usize; 3]>,
-    written: usize,
 }
 
 impl History {
-    pub fn new(line: Option<String>) -> History {
+    pub fn new(listed: Listed) -> History {
         History {
-            line,
+            listed,
             held: Vec::new(),
             held_bytes: 0,
             widths: None,
-            written: 0,
         }
     }
 
@@ -84,15 +96,22 @@ impl History {
         self.widths = Some(widths);
         let held = std::mem::take(&mut self.held);
         self.held_bytes = 0;
-        // Only called with a row held, the save you're at, which the heading names.
+        // Only called with a row held, the save the listing starts at, which the heading names.
         let Some(first) = held.first() else {
             return Ok(());
         };
-        let heading = match &self.line {
-            Some(line) => format!("Saves on line {}, newest first:", s.paint(Role::Line, line)),
-            None => format!(
+        let heading = match &self.listed {
+            Listed::Line(line) => {
+                format!("Saves on line {}, newest first:", s.paint(Role::Line, line))
+            }
+            Listed::AtSave => format!(
                 "At save {}, not on a line. Saves back from it, newest first:",
                 s.paint(Role::ChangeId, &first.short)
+            ),
+            Listed::From => format!(
+                "Saves back from save {} \"{}\", newest first:",
+                s.paint(Role::ChangeId, &first.short),
+                first.title
             ),
         };
         writeln!(out, "{heading}\n")?;
@@ -102,20 +121,15 @@ impl History {
         Ok(())
     }
 
-    /// A row: the place marker on the first, the save you're at; the message cut at its end on a
-    /// terminal, so that the row and its lines' and tags' names fit.
-    fn write_row(
-        &mut self,
-        out: &mut dyn Write,
-        row: &SaveRow,
-        widths: [usize; 3],
-    ) -> io::Result<()> {
+    /// A row: the place marker on the save you're at; the message cut at its end on a terminal,
+    /// so that the row and its marks fit.
+    fn write_row(&self, out: &mut dyn Write, row: &SaveRow, widths: [usize; 3]) -> io::Result<()> {
         let s = style::out();
-        let marker = match self.written {
-            0 => s.paint(Role::Bold, s.sym(Sym::Marker)),
-            _ => " ".to_owned(),
+        let marker = if row.here {
+            s.paint(Role::Bold, s.sym(Sym::Marker))
+        } else {
+            " ".to_owned()
         };
-        self.written += 1;
         let pad = |text: &str, width: usize| " ".repeat(width.saturating_sub(style::columns(text)));
         let lead = 2 + widths[0] + 2 + widths[1] + 2 + widths[2] + 2;
         let named: usize = row
@@ -127,6 +141,11 @@ impl History {
                 .tags
                 .iter()
                 .map(|t| 8 + style::columns(t))
+                .sum::<usize>()
+            + row
+                .combined
+                .iter()
+                .map(|c| 13 + style::columns(c))
                 .sum::<usize>();
         let room = s
             .width
@@ -147,6 +166,46 @@ impl History {
         for tag in &row.tags {
             let _ = write!(text, "  [tag {}]", s.paint(Role::Line, tag));
         }
+        for parent in &row.combined {
+            let _ = write!(text, "  [combined {}]", s.paint(Role::Fingerprint, parent));
+        }
         writeln!(out, "{}", text.trim_end())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used)]
+    use super::*;
+
+    /// A save may have up to 1,024 parents: every other one is marked, as every tag is, and the
+    /// marks count towards what the rows held hold.
+    #[test]
+    fn a_save_with_the_most_parents_marks_every_other_one() {
+        let combined: Vec<String> = (1..1024).map(|n| format!("{n:012x}")).collect();
+        let row = SaveRow {
+            short: "kxqm".to_owned(),
+            when: "now".to_owned(),
+            author: "Ada".to_owned(),
+            title: "Octopus".to_owned(),
+            lines: vec!["main".to_owned()],
+            tags: Vec::new(),
+            combined: combined.clone(),
+            here: true,
+        };
+        assert!(row.size() >= 1023 * 12);
+        let mut history = History::new(Listed::Line("main".to_owned()));
+        let mut out = Vec::new();
+        history.add(&mut out, row).unwrap();
+        history.finish(&mut out).unwrap();
+        let shown = String::from_utf8(out).unwrap();
+        let marks: String = combined
+            .iter()
+            .map(|c| format!("  [combined {c}]"))
+            .collect();
+        assert!(
+            shown.ends_with(&format!("Octopus  [main]{marks}\n")),
+            "{shown}"
+        );
     }
 }

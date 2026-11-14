@@ -113,10 +113,16 @@ pub fn examples(command: &str) -> &'static [(&'static str, &'static str)] {
                 "What the newest save on main changed",
             ),
         ],
-        "history" => &[(
-            "opalro history",
-            "List the saves on your line, newest first",
-        )],
+        "history" => &[
+            (
+                "opalro history",
+                "List the saves on your line, newest first",
+            ),
+            (
+                "opalro history wall-run",
+                "List from another line, a tag or a save",
+            ),
+        ],
         "goto" => &[
             ("opalro goto main", "Go to the line main"),
             ("opalro goto kxqmz", "Go to a save, by its change ID"),

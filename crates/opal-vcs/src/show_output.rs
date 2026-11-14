@@ -11,12 +11,14 @@ use crate::output;
 use crate::style::{self, Role};
 
 /// The save `opalro show` shows: `id`, shown as `short`, with its first parent's message's first
-/// line quoted as `parent_title`, and the names of its tags, in order and not yet escaped.
+/// line quoted as `parent_title`, its other parents' alike as `other_titles` (`None` for one that
+/// can't be read), and the names of its tags, in order and not yet escaped.
 pub struct Head<'a> {
     pub id: &'a Id,
     pub save: &'a Save,
     pub short: &'a str,
     pub parent_title: &'a str,
+    pub other_titles: &'a [Option<String>],
     pub tags: &'a [String],
 }
 
@@ -28,6 +30,7 @@ pub fn write_head(out: &mut dyn Write, head: &Head, count: usize, now: i64) -> i
         save,
         short,
         parent_title,
+        other_titles,
         tags,
     } = *head;
     let s = style::out();
@@ -59,15 +62,21 @@ pub fn write_head(out: &mut dyn Write, head: &Head, count: usize, now: i64) -> i
             .collect();
         writeln!(out, "    Tags         {}", names.join(", "))?;
     }
-    // By fingerprint: shortening a change ID for it could read the whole line.
-    // A merge brought in from Git has more than one; the first is the one compared with.
-    let mut named = save
-        .parents
-        .iter()
-        .map(|p| s.paint(Role::Fingerprint, &p.short_hex()));
-    if let Some(first) = named.next() {
-        let others: String = named.map(|p| format!(", {p}")).collect();
-        writeln!(out, "    After        {first} {parent_title}{others}")?;
+    // By fingerprint: shortening a change ID for it could read the whole line. The first parent
+    // is the one compared with; a combined save has a row for each other one.
+    let mut parents = save.parents.iter();
+    if let Some(first) = parents.next() {
+        let first = s.paint(Role::Fingerprint, &first.short_hex());
+        writeln!(out, "    After        {first} {parent_title}")?;
+    }
+    for (at, (parent, title)) in parents.zip(other_titles).enumerate() {
+        let label = if at == 0 { "Combined" } else { "" };
+        let id = s.paint(Role::Fingerprint, &parent.short_hex());
+        let line = format!(
+            "    {label:<13}{id} {}",
+            title.as_deref().unwrap_or_default()
+        );
+        writeln!(out, "{}", line.trim_end())?;
     }
     writeln!(
         out,
