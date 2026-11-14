@@ -3,25 +3,32 @@
 
 use std::collections::HashMap;
 
-use crate::diff::for_each_entry_change_in;
+use crate::diff::{file_change, for_each_entry_change_in};
 use crate::id::Id;
 use crate::listing::{Entry, EntryKind, Listing};
 use crate::names::validate_path;
 use crate::save::MoveNote;
 use crate::store::{Store, StoreError};
 
-/// Where files with one contents left and arrived: `None` once a second one does.
-#[derive(Default)]
-struct Places {
-    left: Option<Option<String>>,
-    arrived: Option<Option<String>>,
+/// At most this many bytes of paths in one save's notes, both paths of each note counted, so that
+/// the notes never make a save's record too large to store.
+pub(crate) const MAX_NOTED_BYTES: usize = 16 << 20;
+
+#[cfg(test)]
+thread_local! {
+    /// How many files that arrived the comparisons on this thread kept.
+    pub(crate) static ARRIVALS_KEPT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-fn seen(place: &mut Option<Option<String>>, path: &str) {
-    *place = match place {
-        None => Some(Some(path.to_owned())),
-        Some(_) => Some(None),
-    };
+/// The path that files with one contents left (or arrived at), by contents: `None` once a
+/// second one does.
+type Places = HashMap<Id, Option<String>>;
+
+fn seen(places: &mut Places, id: Id, path: &str) {
+    places
+        .entry(id)
+        .and_modify(|p| *p = None)
+        .or_insert_with(|| Some(path.to_owned()));
 }
 
 /// A file with contents worth pairing: a link is never a move, and every empty file is alike.
@@ -33,47 +40,93 @@ fn file(e: Option<&Entry>) -> Option<&Entry> {
 /// same non-empty contents, no other file that left and none that arrived holding those
 /// contents; sorted by where they went. A path that left holds nothing at `to_root`, and one
 /// that arrived held nothing at `from_root`. Either side's listings may be in `unstored`.
+#[allow(
+    dead_code,
+    reason = "a save takes its count too; a combine needs only the moves"
+)]
 pub(crate) fn same_contents(
     store: &Store,
     unstored: &HashMap<Id, Listing>,
     from_root: Id,
     to_root: Id,
 ) -> Result<Vec<MoveNote>, StoreError> {
-    // Only files that came or went are kept, by what they hold; no file is read.
-    let mut by_contents: HashMap<Id, Places> = HashMap::new();
+    count_and_moves(store, unstored, from_root, to_root).map(|(_, notes)| notes)
+}
+
+/// How many files differ between the two roots, counted as [`crate::diff::count_changes`]
+/// counts them, and [`same_contents`]' moves. The folders that differ are walked once, and again
+/// only if a file left with contents no other file that left has.
+pub(crate) fn count_and_moves(
+    store: &Store,
+    unstored: &HashMap<Id, Listing>,
+    from_root: Id,
+    to_root: Id,
+) -> Result<(usize, Vec<MoveNote>), StoreError> {
+    // The files that left first: arrivals are worth keeping only for the contents of one, and a
+    // save that adds a great deal often has none.
+    let (mut changed, mut left) = (0, Places::new());
     for_each_entry_change_in(
         store,
         unstored,
         Some(from_root),
         to_root,
         |path, old, new| {
-            match (old, new) {
-                (Some(_), None) => {
-                    if let Some(f) = file(old) {
-                        seen(&mut by_contents.entry(f.id).or_default().left, path);
-                    }
-                }
-                (None, Some(_)) => {
-                    if let Some(f) = file(new) {
-                        seen(&mut by_contents.entry(f.id).or_default().arrived, path);
-                    }
-                }
-                _ => {}
+            changed += usize::from(file_change(old, new).is_some());
+            if let (Some(f), None) = (file(old), new) {
+                seen(&mut left, f.id, path);
             }
             Ok::<(), StoreError>(())
         },
     )?;
-    let mut notes: Vec<MoveNote> = by_contents
-        .into_values()
-        .filter_map(|p| match (p.left, p.arrived) {
-            (Some(Some(from)), Some(Some(to))) => Some(MoveNote { from, to }),
-            _ => None,
+    left.retain(|_, from| from.is_some());
+    if left.is_empty() {
+        return Ok((changed, vec![]));
+    }
+    let mut arrived = Places::new();
+    for_each_entry_change_in(
+        store,
+        unstored,
+        Some(from_root),
+        to_root,
+        |path, old, new| {
+            if let (None, Some(f)) = (old, file(new))
+                && left.contains_key(&f.id)
+            {
+                #[cfg(test)]
+                ARRIVALS_KEPT.set(ARRIVALS_KEPT.get() + 1);
+                seen(&mut arrived, f.id, path);
+            }
+            Ok::<(), StoreError>(())
+        },
+    )?;
+    let mut notes: Vec<MoveNote> = arrived
+        .into_iter()
+        .filter_map(|(id, to)| {
+            Some(MoveNote {
+                from: left.remove(&id)??,
+                to: to?,
+            })
         })
         // A path a save can't hold can't be noted either.
         .filter(|n| validate_path(&n.from).is_ok() && validate_path(&n.to).is_ok())
         .collect();
     notes.sort_unstable_by(|a, b| a.to.cmp(&b.to));
-    Ok(notes)
+    Ok((changed, notes))
+}
+
+/// The first of `notes`, sorted by where the file went, that a save keeps: at most `most`, and at
+/// most `most_bytes` of paths in all.
+pub(crate) fn first_that_fit(notes: &mut Vec<MoveNote>, most: usize, most_bytes: usize) {
+    let mut bytes = 0usize;
+    let fit = notes
+        .iter()
+        .take(most)
+        .take_while(|n| {
+            bytes = bytes.saturating_add(n.from.len() + n.to.len());
+            bytes <= most_bytes
+        })
+        .count();
+    notes.truncate(fit);
 }
 
 #[cfg(test)]
@@ -162,6 +215,118 @@ mod tests {
             &[("bin/run", Executable, b"go")],
         );
         assert_eq!(got, [pair("run", "bin/run")]);
+    }
+
+    #[test]
+    fn a_move_that_flips_the_executable_mark_is_a_move() {
+        // The mark isn't contents.
+        let got = moves(&[("run", File, b"go")], &[("bin/run", Executable, b"go")]);
+        assert_eq!(got, [pair("run", "bin/run")]);
+        let got = moves(&[("run", Executable, b"go")], &[("run.sh", File, b"go")]);
+        assert_eq!(got, [pair("run", "run.sh")]);
+    }
+
+    #[test]
+    fn a_comparison_where_nothing_left_keeps_no_arrivals() {
+        ARRIVALS_KEPT.set(0);
+        let added: Vec<(String, Vec<u8>)> = (0..50)
+            .map(|i| (format!("new/{i}"), format!("{i}").into_bytes()))
+            .collect();
+        let mut to: Vec<(&str, EntryKind, &[u8])> = vec![("a", File, b"edited")];
+        to.extend(added.iter().map(|(p, b)| (p.as_str(), File, b.as_slice())));
+        let got = moves(&[("a", File, b"a")], &to);
+        assert!(got.is_empty());
+        assert_eq!(ARRIVALS_KEPT.get(), 0);
+        // Nor any but those with the contents of a file that left.
+        let mut to = to.clone();
+        to.retain(|(p, ..)| *p != "a");
+        to.push(("b", File, b"edited"));
+        let got = moves(&[("a", File, b"edited")], &to);
+        assert_eq!(got, [pair("a", "b")]);
+        assert_eq!(ARRIVALS_KEPT.get(), 1);
+    }
+
+    #[test]
+    fn the_count_is_the_one_count_changes_gives() {
+        type Files<'a> = &'a [(&'a str, EntryKind, &'a [u8])];
+        let cases: [(Files, Files); 3] = [
+            (
+                &[("a", File, b"a"), ("b", File, b"b"), ("l", Symlink, b"t")],
+                &[
+                    ("c/a", File, b"a"),
+                    ("b", Executable, b"b"),
+                    ("l", Symlink, b"u"),
+                ],
+            ),
+            (
+                &[("a", File, b"a")],
+                &[("a/b", File, b"a"), ("e", Folder, b"")],
+            ),
+            (
+                &[("x/y/z", File, b"z"), ("e", File, b"")],
+                &[("x", File, b"z")],
+            ),
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        for (from, to) in cases {
+            let mut unstored = HashMap::new();
+            let (a, b) = (tree(&mut unstored, from), tree(&mut unstored, to));
+            let mut want = 0;
+            crate::diff::for_each_change_in(&store, &unstored, Some(a), b, |_| {
+                want += 1;
+                Ok::<(), StoreError>(())
+            })
+            .unwrap();
+            let (got, _) = count_and_moves(&store, &unstored, a, b).unwrap();
+            assert_eq!(got, want, "{from:?} -> {to:?}");
+        }
+    }
+
+    #[test]
+    fn a_save_keeps_the_first_notes_that_fit_16_mib_of_paths() {
+        use crate::save::{MAX_MOVE_NOTES, Person, Save};
+        // 2,100 notes of two 4,000-byte paths is past 16 MiB: the first 2,097 fit.
+        let mut notes: Vec<MoveNote> = (0..2_100)
+            .map(|i| MoveNote {
+                from: format!("{i:05}{}", "a".repeat(3_995)),
+                to: format!("{i:05}{}", "b".repeat(3_995)),
+            })
+            .collect();
+        let all = notes.clone();
+        first_that_fit(
+            &mut notes,
+            usize::try_from(MAX_MOVE_NOTES).unwrap(),
+            MAX_NOTED_BYTES,
+        );
+        assert_eq!(notes.len(), MAX_NOTED_BYTES / 8_000);
+        assert_eq!(notes[..], all[..notes.len()]);
+        // And the save that holds them is written and read back.
+        let who = Person {
+            name: "A".into(),
+            email: "a@b".into(),
+            time_ms: 0,
+            tz_offset_min: 0,
+        };
+        let save = Save {
+            root: Id([0; 32]),
+            parents: vec![],
+            author: who.clone(),
+            saver: who,
+            message: "m".into(),
+            change_id: crate::id::ChangeId([0; 16]),
+            move_notes: notes.clone(),
+            signature: vec![],
+            extra: BTreeMap::new(),
+        };
+        assert_eq!(
+            Save::decode(&save.encode(), false).unwrap().move_notes,
+            notes
+        );
+        // The count bounds them too.
+        let mut notes = all;
+        first_that_fit(&mut notes, 3, MAX_NOTED_BYTES);
+        assert_eq!(notes.len(), 3);
     }
 
     #[test]

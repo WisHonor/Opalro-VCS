@@ -70,12 +70,8 @@ fn walk_files<E: From<StoreError>>(
 ) -> Result<(), E> {
     let files = |path: &str, o: Option<&Entry>, n: Option<&Entry>| {
         let (fo, fnew) = (file(o), file(n));
-        let change = match (fo, fnew) {
-            (Some(_), None) => ChangeKind::Removed,
-            (None, Some(_)) => ChangeKind::Added,
-            (Some(a), Some(b)) if a.kind != b.kind => ChangeKind::KindChanged,
-            (Some(a), Some(b)) if a.id != b.id => ChangeKind::Modified,
-            _ => return Ok(()),
+        let Some(change) = file_change(o, n) else {
+            return Ok(());
         };
         let Some(shown) = fnew.or(fo) else {
             return Ok(());
@@ -92,6 +88,18 @@ fn walk_files<E: From<StoreError>>(
         })
     };
     walk(store, unstored, old_root, new_root, max_entries, files)
+}
+
+/// How the file at a path changed between two entries [`for_each_entry_change_in`] handed out,
+/// if it is a change [`for_each_change`] counts.
+pub(crate) fn file_change(o: Option<&Entry>, n: Option<&Entry>) -> Option<ChangeKind> {
+    match (file(o), file(n)) {
+        (Some(_), None) => Some(ChangeKind::Removed),
+        (None, Some(_)) => Some(ChangeKind::Added),
+        (Some(a), Some(b)) if a.kind != b.kind => Some(ChangeKind::KindChanged),
+        (Some(a), Some(b)) if a.id != b.id => Some(ChangeKind::Modified),
+        _ => None,
+    }
 }
 
 /// Hands `each` every path whose entries differ between two saves, with the entry on each side:
