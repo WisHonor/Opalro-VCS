@@ -225,11 +225,12 @@ fn show_finds_a_save_a_deleted_line_left_behind_a_combine() {
         "1\n2\n3\n4\n5\n6\n7\neight\n",
     );
     let side = tip(&env, "side").to_hex();
+    run(&env, &["combine", "side"], 0);
+    // Shortened against main as it is after the combine, so no save on it shares the start.
     let short = json(&env, &["show", &side[..12]], 0)["save"]["change_id_short"]
         .as_str()
         .unwrap()
         .to_owned();
-    run(&env, &["combine", "side"], 0);
     run(&env, &["line", "delete", "side", "--yes"], 0);
     // Only the combined save's second parent reaches it now.
     let doc = json(&env, &["show", &short], 0);

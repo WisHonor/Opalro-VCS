@@ -520,7 +520,8 @@ fn by_fingerprint_prefix(
 #[must_use]
 pub fn id_for_command(repo: &Repository, id: &Id) -> Option<String> {
     let reaches = |text: &String| matches!(resolve(repo, text), Ok(found) if found == *id);
-    // Off the line a change ID is found only by reading every save, too dear for a hint.
+    // A save off the line is named by its fingerprint: its short change ID is made unique only
+    // among the line's saves.
     let on_line = |text: &String| {
         let found = repo
             .current()
@@ -650,7 +651,8 @@ fn others_by_id(
     text: &str,
     own: Id,
 ) -> Result<Vec<String>, ResolveError> {
-    // Damage is passed over here: a save that can't be read can't be gone to either.
+    // A save the wider walk couldn't read doesn't refuse the name: it can't be gone to either.
+    // Any other failure still does.
     let mut saves: Vec<String> = (by_id(repo, entry, tags, text)?.0)
         .into_iter()
         .filter(|(id, _)| *id != own)
@@ -768,24 +770,35 @@ mod tests {
 
     /// Commits a save with the given parents and change ID, and points `line` at it if given.
     fn plant(repo: &mut Repository, parents: &[Id], start: &str, line: Option<&str>) -> Id {
-        let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
-        let (head, entry) = repo.current().unwrap();
+        let save = save_of(repo, parents, start, "m");
+        plant_save(repo, &save, line)
+    }
+
+    /// A save with the given parents, change ID and message, holding main's folder.
+    fn save_of(repo: &Repository, parents: &[Id], start: &str, message: &str) -> Save {
+        let (_, entry) = repo.current().unwrap();
         let root = repo
             .store()
             .save(&entry.state.lines["main"], false)
             .unwrap()
             .root;
-        let save = Save {
+        Save {
             root,
             parents: parents.to_vec(),
             author: who(),
             saver: who(),
-            message: "m".into(),
+            message: message.into(),
             change_id: change(start),
             move_notes: vec![],
             signature: vec![],
             extra: BTreeMap::from([(EXTRA_LINE.to_owned(), b"main".to_vec())]),
-        };
+        }
+    }
+
+    /// Commits `save`, and points `line` at it if given.
+    fn plant_save(repo: &mut Repository, save: &Save, line: Option<&str>) -> Id {
+        let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
+        let (head, entry) = repo.current().unwrap();
         let mut packs = repo.new_packs().unwrap();
         let id = packs.add_record(ObjectKind::Save, &save.encode()).unwrap();
         let mut state = entry.state.clone();
@@ -1244,6 +1257,52 @@ mod tests {
                 "{text}"
             );
         }
+    }
+
+    #[test]
+    fn a_save_only_an_undone_step_holds_is_not_found() {
+        let (_dir, mut repo, ids) = project_with(&["kkkk"]);
+        let undone = plant(&mut repo, &[ids[1]], "mnopqr", Some("main"));
+        move_line(&mut repo, "main", ids[1]);
+        for text in ["mnopqr".to_owned(), undone.to_hex()[..8].to_owned()] {
+            assert!(
+                matches!(resolve(&repo, &text), Err(ResolveError::NotFound(_))),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_first_parents_come_first_for_a_fingerprint_too() {
+        use crate::id::{Flavor, hash_record};
+        let (_dir, mut repo, ids) = project_with(&["kkkk"]);
+        // Two saves whose fingerprints share 8 hex digits, found by trying messages.
+        let mut tried = std::collections::HashMap::new();
+        let base = save_of(&repo, &[ids[0]], "mnop", "");
+        let save = |n: u32| Save {
+            message: n.to_string(),
+            ..base.clone()
+        };
+        let (one, two) = (0u32..)
+            .find_map(|n| {
+                let id = hash_record(Flavor::Save, &save(n).encode());
+                let start = u32::from_be_bytes(id.0[..4].try_into().unwrap());
+                tried
+                    .insert(start, n)
+                    .map(|earlier| (save(earlier), save(n)))
+            })
+            .unwrap();
+        let on_side = plant_save(&mut repo, &one, Some("side"));
+        let lone = plant_save(&mut repo, &two, None);
+        plant(&mut repo, &[ids[1], lone], "nopq", Some("main"));
+        let start = on_side.to_hex()[..8].to_owned();
+        assert_eq!(lone.to_hex()[..8], start);
+        assert_eq!(resolve(&repo, &start).unwrap(), on_side);
+        // Past the first step, both are there.
+        let (_, entry) = repo.current().unwrap();
+        let tags = repo.tag_list(&entry.state).unwrap();
+        let (found, _) = through_every_parent(&repo, &entry, &tags, &start).unwrap();
+        assert_eq!(found.len(), 2);
     }
 
     #[test]
@@ -1788,19 +1847,21 @@ mod tests {
     #[test]
     fn a_list_with_another_line_s_save_changes_no_answer() {
         let (dir, mut repo, ids) = project_with(&["klmnopl", "klmnopk", "mmmm"]);
-        let side = plant(&mut repo, &[ids[1]], "nopqrs", Some("side"));
+        // Saves on no line, so only a believed list could find them.
+        let stray = plant(&mut repo, &[ids[1]], "nopqrs", None);
         let mut lie = true_line(&repo);
-        lie[1] = (side, change("nopqrs"));
+        lie[1] = (stray, change("nopqrs"));
         let (cached, cold) = resolved(dir.path(), &repo, &lie, "nopqr");
         assert_eq!(cached, cold);
-        // A line name that another line's save's change ID starts with is refused, list or not.
-        let work = plant(&mut repo, &[ids[0]], "workkk", Some("elsewhere"));
+        assert!(cold.starts_with("Err(NotFound"), "{cold}");
+        // A line name that a listed stray's change ID starts with still names the line.
+        let work = plant(&mut repo, &[ids[0]], "workkk", None);
         name_line(&mut repo, "work", ids[1]);
         let mut lie = true_line(&repo);
         lie[1] = (work, change("workkk"));
         let (cached, cold) = resolved(dir.path(), &repo, &lie, "work");
         assert_eq!(cached, cold);
-        assert!(cold.starts_with("Err(LineOrSave"), "{cold}");
+        assert_eq!(cold, format!("{:?}", Ok::<Id, ()>(ids[1])));
     }
 
     #[test]
