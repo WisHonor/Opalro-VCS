@@ -6,7 +6,7 @@ use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use super::{Clash, CombineError, Conflict, NotMerged, Side, Text, Which, merge_text};
+use super::{Clash, CombineError, Conflict, Names, NotMerged, Side, Text, Which, merge_text};
 use crate::changes::{self, stored};
 use crate::diff::again;
 use crate::id::Id;
@@ -27,7 +27,7 @@ pub(super) const MAX_NAMED: usize = 100;
 /// What a combine has built that a later merge of the same combine may read, before anything
 /// is stored. Every object it built is in the combine's `PackSet` too.
 #[derive(Debug)]
-pub struct Made {
+pub(crate) struct Made {
     pub listings: HashMap<Id, Listing>,
     /// Texts merged by inner combines only: a made-up version a later merge reads holds them.
     pub texts: HashMap<Id, Vec<u8>>,
@@ -37,6 +37,8 @@ pub struct Made {
     /// The most bytes of paths of files that left a side held to follow them by contents
     /// (`moves::MAX_LEFT_BYTES`; tests lower it).
     pub max_left_bytes: usize,
+    /// How long each file's comparison may take (`changes::deadline()`; tests lower it).
+    pub deadline: Duration,
 }
 
 impl Default for Made {
@@ -47,12 +49,13 @@ impl Default for Made {
             held: 0,
             max_held: MAX_HELD_TEXT,
             max_left_bytes: crate::moves::MAX_LEFT_BYTES,
+            deadline: changes::deadline(),
         }
     }
 }
 
 #[derive(Debug)]
-pub struct Merged {
+pub(crate) struct Merged {
     /// The merged root listing, in `packs` and `made`; meaningless when there are conflicts.
     pub root: Id,
     /// Files merged line by line, in path order.
@@ -71,7 +74,7 @@ const WHICH: Three<Which> = [Which::Start, Which::Ours, Which::Theirs];
 /// Merges `ours` and `theirs` against `start`, all root listings. `inner`: this merge makes a
 /// made-up starting point, whose merged texts a later merge reads.
 #[allow(clippy::too_many_arguments)]
-pub fn merge_trees(
+pub(crate) fn merge_trees(
     store: &Store,
     packs: &mut PackSet,
     made: &mut Made,
@@ -406,7 +409,9 @@ impl Walk<'_> {
         if self.inner && !self.made.texts.contains_key(&id) {
             let held = self.made.held.saturating_add(size);
             if held > self.made.max_held {
-                return Err(CombineError::HeldTooMuch);
+                return Err(CombineError::HeldTooMuch {
+                    names: Names::default(),
+                });
             }
             self.made.held = held;
             self.made.texts.insert(id, bytes);
@@ -435,8 +440,9 @@ impl Walk<'_> {
         }
         if let Some(problem) = unheld_clash(&folder) {
             return Err(CombineError::NamesClash {
+                names: Names::default(),
                 folder: folder.path,
-                problem,
+                problem: Box::new(problem),
             });
         }
         let listing = Listing::new(folder.entries).map_err(StoreError::from)?;
@@ -563,6 +569,7 @@ fn bytes<'a>(
 
 fn past(v: usize) -> impl Fn(String) -> CombineError {
     move |detail| CombineError::Past {
+        names: Names::default(),
         which: WHICH[v],
         detail,
     }

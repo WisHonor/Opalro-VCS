@@ -22,7 +22,7 @@ use crate::presets::{Engine, Found, Preset, opal_toml};
 use crate::repo::{ChangeLock, Repository};
 use crate::rules::{RuleMatcher, Rules};
 use crate::save::{MoveNote, Person, Save};
-use crate::snapshot::{SaveRequest, save_folder, store_listing};
+use crate::snapshot::{SaveOutcome, SaveRequest, save_folder, store_listing};
 use crate::store::{Store, counted};
 
 /// What a test puts at a path.
@@ -564,7 +564,7 @@ fn an_outer_merge_keeps_no_text_and_an_inner_one_keeps_its_own() {
         ..Made::default()
     };
     let err = fx.merge_with(ids, &rules, true, &mut made).unwrap_err();
-    assert!(matches!(err, CombineError::HeldTooMuch), "{err:?}");
+    assert!(matches!(err, CombineError::HeldTooMuch { .. }), "{err:?}");
 }
 
 #[test]
@@ -667,12 +667,15 @@ fn names_two_sides_bring_that_clash_stop_the_combine() {
             &tree(&[(theirs, f("t"))]),
         );
         let err = fx.merge(ids).unwrap_err();
-        let CombineError::NamesClash { folder, problem } = &err else {
+        let CombineError::NamesClash {
+            folder, problem, ..
+        } = &err
+        else {
             panic!("{err:?}");
         };
         assert_eq!(folder, "");
         let (PortabilityProblem::CaseCollision { a, b }
-        | PortabilityProblem::NormalizationCollision { a, b }) = problem
+        | PortabilityProblem::NormalizationCollision { a, b }) = &**problem
         else {
             panic!("{problem:?}");
         };
@@ -711,7 +714,7 @@ fn clashing(err: &CombineError) -> BTreeSet<String> {
         panic!("{err:?}");
     };
     let (PortabilityProblem::CaseCollision { a, b }
-    | PortabilityProblem::NormalizationCollision { a, b }) = problem
+    | PortabilityProblem::NormalizationCollision { a, b }) = &**problem
     else {
         panic!("{problem:?}");
     };
@@ -820,7 +823,7 @@ fn a_version_past_the_limits_is_refused_naming_it() {
     let deep = chain(&mut fx, 4097, &[("f", "3")]);
     let t = top(&mut fx, &[("x", deep), ("y", deep)]);
     let err = fx.merge([s, o, t]).unwrap_err();
-    let CombineError::Past { which, detail } = &err else {
+    let CombineError::Past { which, detail, .. } = &err else {
         panic!("{err:?}");
     };
     assert_eq!(*which, Which::Theirs);
@@ -868,7 +871,7 @@ fn a_path_past_the_limit_is_refused() {
             continue;
         }
         let err = merged.unwrap_err();
-        let CombineError::Past { which, detail } = &err else {
+        let CombineError::Past { which, detail, .. } = &err else {
             panic!("{err:?}");
         };
         assert_eq!(*which, Which::Ours);
@@ -1345,6 +1348,32 @@ impl Hist {
             s.lines.insert(line.to_owned(), parent);
             s.position = Position::OnLine(line.to_owned());
         });
+        self.write(t);
+        assert!(matches!(
+            self.save_now("Change things"),
+            SaveOutcome::Saved { .. }
+        ));
+        self.repo.current().unwrap().1.state.lines[line]
+    }
+
+    /// Saves the folder as it is on the line the project is on.
+    fn save_now(&mut self, message: &str) -> SaveOutcome {
+        let who = ada();
+        let req = SaveRequest {
+            message: Some(message),
+            who: &who,
+            command: "save",
+            accept_crlf: false,
+            git_excludes: None,
+            new_line: None,
+            only: None,
+            amend: false,
+        };
+        save_folder(&mut self.repo, &req, &mut |_| {}, &mut |_| true).unwrap()
+    }
+
+    /// Makes the folder hold exactly `t`.
+    fn write(&self, t: &Tree) {
         let root = self.dir.path();
         for e in fs::read_dir(root).unwrap() {
             let e = e.unwrap();
@@ -1368,19 +1397,6 @@ impl Hist {
                 other => panic!("{other:?}"),
             }
         }
-        let who = ada();
-        let req = SaveRequest {
-            message: Some("Change things"),
-            who: &who,
-            command: "save",
-            accept_crlf: false,
-            git_excludes: None,
-            new_line: None,
-            only: None,
-            amend: false,
-        };
-        save_folder(&mut self.repo, &req, &mut |_| {}, &mut |_| true).unwrap();
-        self.repo.current().unwrap().1.state.lines[line]
     }
 
     /// Stores a save of `t` after `parents` noting `notes`, or what `save` would note against
@@ -2356,4 +2372,809 @@ fn following_moves_agrees_with_a_model() {
             Ok(())
         })
         .unwrap();
+}
+
+fn bounds() -> Bounds {
+    Bounds {
+        max_inner: MAX_INNER,
+        max_held: MAX_HELD_TEXT,
+        deadline: DEADLINE,
+        limits: SaveLimits::default(),
+    }
+}
+
+/// Combines `target`, named as typed, into the line the project is on.
+fn combine_in(h: &mut Hist, target: &str) -> Result<CombineOutcome, CombineError> {
+    combine_by(h, target, None, bounds())
+}
+
+fn combine_by(
+    h: &mut Hist,
+    target: &str,
+    message: Option<&str>,
+    bounds: Bounds,
+) -> Result<CombineOutcome, CombineError> {
+    let to = crate::lines::resolve_target(&h.repo, target).unwrap();
+    let named = Named {
+        raw: target.to_owned(),
+        shown: escape(target, false),
+    };
+    let who = ada();
+    let asked = Asked {
+        target: &to,
+        named: &named,
+        message,
+        who: &who,
+        git_excludes: None,
+    };
+    combine_with(&mut h.repo, &asked, &mut |_| {}, bounds)
+}
+
+impl Hist {
+    /// Puts the project on `line`, its folder holding `t`.
+    fn on(&mut self, line: &str, t: &Tree) {
+        self.set(|s| s.position = Position::OnLine(line.to_owned()));
+        self.write(t);
+    }
+
+    fn entry(&self) -> (Id, DiaryEntry) {
+        self.repo.current().unwrap()
+    }
+
+    fn save_of(&self, id: Id) -> Save {
+        self.repo.store().save(&id, false).unwrap()
+    }
+
+    /// The files of the folder.
+    fn folder(&self) -> Tree {
+        let mut t = Tree::new();
+        let mut todo = vec![self.dir.path().to_path_buf()];
+        while let Some(at) = todo.pop() {
+            for e in fs::read_dir(&at).unwrap() {
+                let e = e.unwrap();
+                if e.file_name() == ".opalro" {
+                    continue;
+                }
+                if e.file_type().unwrap().is_dir() {
+                    todo.push(e.path());
+                    continue;
+                }
+                let path = e.path();
+                let rel = path.strip_prefix(self.dir.path()).unwrap();
+                let rel = rel.to_string_lossy().replace('\\', "/");
+                t.insert(rel, V::File(fs::read(&path).unwrap(), false));
+            }
+        }
+        t
+    }
+
+    fn tmp_files(&self) -> Vec<std::ffi::OsString> {
+        let tmp = self.dir.path().join(".opalro").join("tmp");
+        fs::read_dir(tmp)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect()
+    }
+
+    /// Everything a refused combine leaves as it was.
+    fn untouched(&self) -> Untouched {
+        let state_dir = self.dir.path().join(".opalro").join("state");
+        let mut state_files: Vec<(std::ffi::OsString, Vec<u8>)> = fs::read_dir(state_dir)
+            .unwrap()
+            .map(|e| e.unwrap())
+            // The lock says who last took it.
+            .filter(|e| e.file_type().unwrap().is_file() && e.file_name() != "lock-info")
+            .map(|e| (e.file_name(), fs::read(e.path()).unwrap()))
+            .collect();
+        state_files.sort();
+        let (head, entry) = self.entry();
+        Untouched {
+            head,
+            state: entry.state,
+            folder: self.folder(),
+            packs: self.repo.store().pack_count(),
+            state_files,
+            tmp: self.tmp_files(),
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct Untouched {
+    head: Id,
+    state: State,
+    folder: Tree,
+    packs: usize,
+    state_files: Vec<(std::ffi::OsString, Vec<u8>)>,
+    tmp: Vec<std::ffi::OsString>,
+}
+
+/// Checks that `h` is as `before`, with nothing left in `tmp`.
+fn assert_untouched(h: &Hist, before: &Untouched) {
+    let now = h.untouched();
+    assert_eq!(&now, before);
+    assert!(now.tmp.is_empty(), "{:?}", now.tmp);
+}
+
+fn base_tree() -> Tree {
+    tree(&[("a.txt", f(BODY)), ("b.txt", f("b\n"))])
+}
+
+/// `main` and `side` each changed one file since `base`, `side`'s first; the project is on
+/// `main`. Gives `base`, `main` and `side`.
+fn diverged(h: &mut Hist) -> (Id, Id, Id) {
+    let first = h.first;
+    let base = h.save("main", first, &base_tree());
+    let side = h.save("side", base, &side_tree());
+    let main = h.save("main", base, &main_tree());
+    (base, main, side)
+}
+
+fn side_tree() -> Tree {
+    tree(&[("a.txt", edit(0, "side")), ("b.txt", f("b\n"))])
+}
+
+fn main_tree() -> Tree {
+    tree(&[("a.txt", f(BODY)), ("b.txt", f("main b\n"))])
+}
+
+fn both_tree() -> Tree {
+    tree(&[("a.txt", edit(0, "side")), ("b.txt", f("main b\n"))])
+}
+
+#[test]
+fn nothing_to_combine_makes_no_step() {
+    let mut h = Hist::new();
+    let first = h.first;
+    let base = h.save("main", first, &base_tree());
+    h.set(|s| {
+        s.lines.insert("side".into(), base);
+    });
+    let main = h.save("main", base, &main_tree());
+    let (head, _) = h.entry();
+    for target in ["side", "main"] {
+        let done = combine_in(&mut h, target).unwrap();
+        assert_eq!(done.result, Combined::Nothing);
+        assert_eq!((done.save, done.line.as_str()), (main, "main"));
+        assert_eq!(done.applied, Applied::default());
+        assert_eq!(h.entry().0, head);
+    }
+    assert_eq!(combine_in(&mut h, "side").unwrap().with, base);
+}
+
+#[test]
+fn a_line_that_hasnt_moved_is_moved_forward() {
+    let mut h = Hist::new();
+    let first = h.first;
+    let base = h.save("main", first, &base_tree());
+    let side = h.save("side", base, &side_tree());
+    h.on("main", &base_tree());
+    let (head, _) = h.entry();
+    let done = combine_in(&mut h, "side").unwrap();
+    assert_eq!(done.result, Combined::Forward);
+    assert_eq!((done.save, done.with), (side, side));
+    let (_, entry) = h.entry();
+    assert_eq!(entry.state.lines["main"], side);
+    assert_eq!(entry.state.position, Position::OnLine("main".into()));
+    assert_eq!(entry.parent, Some(head));
+    assert_eq!(entry.command, "combine");
+    assert!(entry.folder_change.is_some());
+    assert_eq!(h.folder(), side_tree());
+}
+
+#[test]
+fn a_combined_save_has_both_parents_and_says_what_it_combined() {
+    let mut h = Hist::new();
+    let (base, main, side) = diverged(&mut h);
+    let (head, _) = h.entry();
+    let done = combine_in(&mut h, "side").unwrap();
+    assert_eq!(
+        done.result,
+        Combined::Made {
+            starts: vec![base],
+            merged_files: vec![],
+        }
+    );
+    assert_eq!(done.with, side);
+    let save = h.save_of(done.save);
+    assert_eq!(save.parents, [main, side]);
+    assert_eq!(save.message, "Combine side into main");
+    assert_eq!(save.line(), Some("main"));
+    assert_eq!((&save.author, &save.saver), (&ada(), &ada()));
+    for other in [h.first, base, main, side] {
+        assert_ne!(save.change_id, h.save_of(other).change_id);
+    }
+    assert!(save.move_notes.is_empty());
+    let (_, entry) = h.entry();
+    assert_eq!(entry.state.lines["main"], done.save);
+    assert_eq!(entry.parent, Some(head));
+    assert_eq!(entry.command, "combine");
+    assert_eq!(h.folder(), both_tree());
+}
+
+#[test]
+fn a_combined_save_notes_the_moves_it_brought_in() {
+    let mut h = Hist::new();
+    let s = player(&mut h);
+    h.save("side", s, &moved_to("src/Player.cs", f(BODY)));
+    let main_t = tree(&[("Player.cs", f(BODY)), ("Other.cs", f("other, changed\n"))]);
+    h.save("main", s, &main_t);
+    let done = combine_in(&mut h, "side").unwrap();
+    let save = h.save_of(done.save);
+    let note = MoveNote {
+        from: "Player.cs".into(),
+        to: "src/Player.cs".into(),
+    };
+    assert_eq!(save.move_notes, [note]);
+    let want = tree(&[
+        ("src/Player.cs", f(BODY)),
+        ("Other.cs", f("other, changed\n")),
+    ]);
+    assert_eq!(h.folder(), want);
+}
+
+#[test]
+fn a_message_given_is_the_saves() {
+    let mut h = Hist::new();
+    diverged(&mut h);
+    let done = combine_by(&mut h, "side", Some("Bring in side"), bounds()).unwrap();
+    assert_eq!(h.save_of(done.save).message, "Bring in side");
+}
+
+#[test]
+fn at_a_save_combine_is_refused() {
+    let mut h = Hist::new();
+    let (base, ..) = diverged(&mut h);
+    h.set(|s| s.position = Position::AtSave(base));
+    let before = h.untouched();
+    let err = combine_in(&mut h, "side").unwrap_err();
+    assert!(matches!(err, CombineError::NotOnALine), "{err:?}");
+    assert_eq!(
+        err.to_string(),
+        "You're at a save, not on a line, so there is no line to combine into."
+    );
+    assert_eq!(
+        err.hint().unwrap(),
+        "Go to a line first (opalro goto <line>), or start one here: opalro line new <name>"
+    );
+    assert_untouched(&h, &before);
+}
+
+#[test]
+fn unrelated_histories_are_refused() {
+    let mut h = Hist::new();
+    let first = h.first;
+    h.save("main", first, &base_tree());
+    let alone = h.plant(&[], &tree(&[("z.txt", f("z\n"))]), Some(&[]));
+    h.set(|s| {
+        s.lines.insert("side".into(), alone);
+    });
+    let before = h.untouched();
+    let err = combine_in(&mut h, "side").unwrap_err();
+    assert!(matches!(err, CombineError::Unrelated { .. }), "{err:?}");
+    assert_eq!(
+        err.to_string(),
+        "main and side have no save in common, so there is no starting point to combine them \
+         from, and nothing was changed."
+    );
+    assert_eq!(
+        err.hint().unwrap(),
+        "Opalro combines only lines that share some history."
+    );
+    assert_untouched(&h, &before);
+}
+
+/// `main` and `side` changed the same line of `a.txt`, and `b.txt` far apart, so the merge
+/// builds something before it stops; the project is on `main`.
+fn in_conflict(h: &mut Hist) {
+    let first = h.first;
+    let base = h.save(
+        "main",
+        first,
+        &tree(&[("a.txt", f(BODY)), ("b.txt", f(BODY))]),
+    );
+    let b = |n: usize, to: &str| ("b.txt", edit(n, to));
+    let side = tree(&[("a.txt", edit(2, "side")), b(0, "side")]);
+    let main = tree(&[("a.txt", edit(2, "main")), b(4, "main")]);
+    h.save("side", base, &side);
+    h.save("main", base, &main);
+}
+
+#[test]
+fn a_conflict_stops_and_stores_nothing() {
+    let mut h = Hist::new();
+    in_conflict(&mut h);
+    let before = h.untouched();
+    let err = combine_in(&mut h, "side").unwrap_err();
+    assert!(matches!(err, CombineError::Conflicts { .. }), "{err:?}");
+    assert_eq!(
+        err.to_string(),
+        "Combining side into main would leave 1 file in conflict, which Opalro can't keep yet, \
+         so nothing was changed:\n  a.txt: changed on both lines, in the same place"
+    );
+    assert_eq!(
+        err.hint().unwrap(),
+        "For each of these files, make the two lines agree and save; then run opalro combine \
+         again."
+    );
+    assert_untouched(&h, &before);
+}
+
+#[test]
+fn a_refused_combine_leaves_nothing_in_tmp() {
+    let mut h = Hist::new();
+    in_conflict(&mut h);
+    assert!(combine_in(&mut h, "side").is_err());
+    assert_eq!(h.tmp_files(), Vec::<std::ffi::OsString>::new());
+}
+
+#[test]
+fn the_words_name_the_line_and_the_target() {
+    let names = || Names {
+        line: "main".into(),
+        target: "\"v\\x1b1\"".into(),
+    };
+    let clash = |folder: &str| CombineError::NamesClash {
+        names: names(),
+        folder: folder.into(),
+        problem: Box::new(PortabilityProblem::ReservedName("con".into())),
+    };
+    assert_eq!(
+        clash("").to_string(),
+        "Combining \"v\\x1b1\" into main would put two names in one folder that clash, so \
+         nothing was changed:\n  in the top folder: \"con\" is a reserved device name on Windows"
+    );
+    assert!(clash("a\u{1b}b").to_string().contains("\n  in a\\x1bb/: "));
+    let past = |which| {
+        let detail = "its folders nest more than 4096 levels deep".to_owned();
+        let names = names();
+        CombineError::Past {
+            names,
+            which,
+            detail,
+        }
+        .to_string()
+    };
+    let rest = " is past Opalro's limits for a save (its folders nest more than 4096 levels \
+                deep), so nothing was changed.";
+    let start = "The save where main and \"v\\x1b1\" parted";
+    assert_eq!(past(Which::Start), format!("{start}{rest}"));
+    assert_eq!(past(Which::Ours), format!("Line main's newest save{rest}"));
+    assert_eq!(past(Which::Theirs), format!("\"v\\x1b1\"{rest}"));
+}
+
+#[test]
+fn many_conflicts_are_counted_after_the_first_100() {
+    let names = Names {
+        line: "main".into(),
+        target: "side".into(),
+    };
+    let conflict = |path: &str| Conflict {
+        path: path.into(),
+        clash: Clash::BothAdded,
+    };
+    let err = CombineError::Conflicts {
+        names,
+        conflicts: vec![conflict("a"), conflict("b")],
+        more: 1_234,
+    };
+    assert_eq!(
+        err.to_string(),
+        "Combining side into main would leave 1,236 files in conflict, which Opalro can't keep \
+         yet, so nothing was changed:\n  a: added on both lines, differently\n  b: added on both \
+         lines, differently\n  … and 1,234 more"
+    );
+}
+
+#[test]
+fn unsaved_work_where_the_combine_writes_stops_it() {
+    let mut h = Hist::new();
+    let (_, main, _) = diverged(&mut h);
+    fs::write(h.dir.path().join("a.txt"), "mine\n").unwrap();
+    let err = combine_in(&mut h, "side").unwrap_err();
+    let CombineError::Collisions { paths } = &err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(paths, &["a.txt"]);
+    assert_eq!(
+        err.to_string(),
+        "Your unsaved changes, or files Opalro ignores, are in the way of the combine, so nothing \
+         was changed:\n  a.txt"
+    );
+    assert!(
+        err.hint()
+            .unwrap()
+            .ends_with("then run opalro combine again.")
+    );
+    assert_eq!(h.entry().1.state.lines["main"], main);
+    assert_eq!(fs::read(h.dir.path().join("a.txt")).unwrap(), b"mine\n");
+}
+
+#[test]
+fn unsaved_work_elsewhere_comes_along() {
+    let mut h = Hist::new();
+    diverged(&mut h);
+    fs::write(h.dir.path().join("b.txt"), "mine\n").unwrap();
+    let done = combine_in(&mut h, "side").unwrap();
+    assert_eq!(done.carried, 1);
+    let mut want = both_tree();
+    want.insert("b.txt".into(), f("mine\n"));
+    assert_eq!(h.folder(), want);
+}
+
+/// Saves after one of `base` on `main`, one for each of `starts`, each on a line of its own,
+/// then a save of `both` after all of them and another after them in the opposite order: two
+/// tips that share every one of them as a common starting point.
+fn crossed(h: &mut Hist, base: &Tree, starts: &[Tree], both: &Tree) -> (Id, Id) {
+    let first = h.first;
+    let o = h.save("main", first, base);
+    let ids: Vec<Id> = starts
+        .iter()
+        .enumerate()
+        .map(|(i, t)| h.save(&format!("start{i}"), o, t))
+        .collect();
+    let back: Vec<Id> = ids.iter().rev().copied().collect();
+    (h.plant(&ids, both, None), h.plant(&back, both, None))
+}
+
+/// From the two tips, `side` saves `side_t` and then `main` saves `main_t`, the project on it.
+fn tips(h: &mut Hist, (m, s): (Id, Id), main_t: &Tree, side_t: &Tree) {
+    h.save("side", s, side_t);
+    h.save("main", m, main_t);
+}
+
+fn with(t: &Tree, items: &[(&str, V)]) -> Tree {
+    let mut t = t.clone();
+    t.extend(tree(items));
+    t
+}
+
+#[test]
+fn a_criss_cross_keeps_a_revert_that_one_starting_point_would_lose() {
+    let old = tree(&[("f.txt", f("old\n"))]);
+    let b1 = with(&old, &[("one.txt", f("1\n"))]);
+    let b2 = tree(&[("f.txt", f("new\n"))]);
+    let both = tree(&[("f.txt", f("new\n")), ("one.txt", f("1\n"))]);
+    // Built until the starting point that would lose the revert comes first in ID order, so a
+    // combine that took the first alone would lose it every time.
+    let (mut h, crossed) = loop {
+        let mut h = Hist::new();
+        let crossed = crossed(&mut h, &old, &[b1.clone(), b2.clone()], &both);
+        let lines = h.entry().1.state.lines;
+        if lines["start0"] < lines["start1"] {
+            break (h, crossed);
+        }
+    };
+    // `main` takes the change back; `side` adds a file.
+    let reverted = with(&both, &[("f.txt", f("old\n"))]);
+    tips(
+        &mut h,
+        crossed,
+        &reverted,
+        &with(&both, &[("s.txt", f("s\n"))]),
+    );
+    let done = combine_in(&mut h, "side").unwrap();
+    let Combined::Made { starts, .. } = &done.result else {
+        panic!("{done:?}");
+    };
+    assert_eq!(starts.len(), 2);
+    assert_eq!(h.folder(), with(&reverted, &[("s.txt", f("s\n"))]));
+}
+
+#[test]
+fn starting_points_that_conflict_stop_the_combine() {
+    let mut h = Hist::new();
+    let base = tree(&[("f.txt", f(BODY))]);
+    // A file that merges, so the inner combine builds something before it stops.
+    let b1 = tree(&[("f.txt", edit(2, "one")), ("one.txt", f("1\n"))]);
+    let b2 = tree(&[("f.txt", edit(2, "two"))]);
+    let both = tree(&[("f.txt", f("settled\n")), ("one.txt", f("1\n"))]);
+    let crossed = crossed(&mut h, &base, &[b1, b2], &both);
+    tips(
+        &mut h,
+        crossed,
+        &with(&both, &[("m.txt", f("m\n"))]),
+        &with(&both, &[("s.txt", f("s\n"))]),
+    );
+    let before = h.untouched();
+    let err = combine_in(&mut h, "side").unwrap_err();
+    assert!(
+        matches!(err, CombineError::StartsConflict { .. }),
+        "{err:?}"
+    );
+    assert_eq!(
+        err.to_string(),
+        "Combining side into main needs their common starting points combined first, and those \
+         conflict with each other, which Opalro can't keep yet, so nothing was changed."
+    );
+    assert_eq!(err.hint(), None);
+    assert_untouched(&h, &before);
+}
+
+/// `n` common starting points, each adding a file of its own, then a file on each line.
+fn many_starts(h: &mut Hist, n: usize) {
+    let base = tree(&[("base.txt", f("base\n"))]);
+    let starts: Vec<Tree> = (0..n)
+        .map(|i| with(&base, &[(&format!("{i}.txt"), f("i\n"))]))
+        .collect();
+    let mut both = base.clone();
+    for t in &starts {
+        both.extend(t.clone());
+    }
+    let crossed = crossed(h, &base, &starts, &both);
+    tips(
+        h,
+        crossed,
+        &with(&both, &[("m.txt", f("m\n"))]),
+        &with(&both, &[("s.txt", f("s\n"))]),
+    );
+}
+
+#[test]
+fn seventeen_starting_points_are_refused() {
+    let mut h = Hist::new();
+    many_starts(&mut h, 17);
+    let before = h.untouched();
+    let err = combine_in(&mut h, "side").unwrap_err();
+    assert!(matches!(err, CombineError::Tangled { .. }), "{err:?}");
+    assert_eq!(
+        err.to_string(),
+        "The histories of main and side cross each other too many times for Opalro to combine \
+         them, so nothing was changed."
+    );
+    assert_eq!(err.hint(), None);
+    assert_untouched(&h, &before);
+}
+
+#[test]
+fn the_budget_of_inner_combines_is_kept() {
+    let mut h = Hist::new();
+    many_starts(&mut h, 3);
+    let before = h.untouched();
+    let tight = Bounds {
+        max_inner: 1,
+        ..bounds()
+    };
+    let err = combine_by(&mut h, "side", None, tight).unwrap_err();
+    assert!(matches!(err, CombineError::Tangled { .. }), "{err:?}");
+    assert_untouched(&h, &before);
+    let done = combine_in(&mut h, "side").unwrap();
+    let Combined::Made { starts, .. } = &done.result else {
+        panic!("{done:?}");
+    };
+    assert_eq!(starts.len(), 3);
+    assert_eq!(h.folder().len(), 6);
+}
+
+#[test]
+fn inner_text_past_what_is_held_is_refused() {
+    let mut h = Hist::new();
+    let text = |first: &str, last: &str| {
+        let mut lines: Vec<String> = (0..10).map(|i| format!("text {i:04}\n")).collect();
+        lines[0] = format!("{first}\n");
+        lines[9] = format!("{last}\n");
+        f(&lines.concat())
+    };
+    let base = tree(&[("t.txt", text("text 0000", "text 0009"))]);
+    let b1 = tree(&[("t.txt", text("first 000", "text 0009"))]);
+    let b2 = tree(&[("t.txt", text("text 0000", "second 00"))]);
+    let both = tree(&[("t.txt", text("first 000", "second 00"))]);
+    let crossed = crossed(&mut h, &base, &[b1, b2], &both);
+    tips(
+        &mut h,
+        crossed,
+        &with(&both, &[("m.txt", f("m\n"))]),
+        &with(&both, &[("s.txt", f("s\n"))]),
+    );
+    let before = h.untouched();
+    let tight = Bounds {
+        max_held: 10,
+        ..bounds()
+    };
+    let err = combine_by(&mut h, "side", None, tight).unwrap_err();
+    assert!(matches!(err, CombineError::HeldTooMuch { .. }), "{err:?}");
+    assert_eq!(
+        err.to_string(),
+        "Combining side into main needs their common starting points combined first, and that \
+         merges more than 256 MiB of text, more than Opalro holds in memory for it, so nothing \
+         was changed."
+    );
+    assert_untouched(&h, &before);
+    let done = combine_in(&mut h, "side").unwrap();
+    assert!(matches!(done.result, Combined::Made { .. }), "{done:?}");
+}
+
+#[test]
+fn a_result_past_the_limits_is_refused() {
+    let mut h = Hist::new();
+    let first = h.first;
+    let six = |side: &str| -> Tree {
+        (0..6)
+            .map(|i| (format!("{side}{i}.txt"), f("x\n")))
+            .collect()
+    };
+    h.save("side", first, &six("s"));
+    h.save("main", first, &six("m"));
+    let before = h.untouched();
+    let tight = Bounds {
+        limits: SaveLimits::new(crate::listing::MAX_SAVE_DEPTH, 10),
+        ..bounds()
+    };
+    let err = combine_by(&mut h, "side", None, tight).unwrap_err();
+    let CombineError::TooBig { detail } = &err else {
+        panic!("{err:?}");
+    };
+    assert_eq!(detail, "it has more than 10 files and folders in total");
+    assert_eq!(
+        err.to_string(),
+        "The combined save would be past Opalro's limits for a save (it has more than 10 files \
+         and folders in total), so nothing was changed."
+    );
+    assert_untouched(&h, &before);
+}
+
+#[test]
+fn the_folders_rules_decide() {
+    let mut h = Hist::new();
+    let first = h.first;
+    let lines: String = (0..20).map(|i| format!("line {i}\n")).collect();
+    let unity = |from: &str, to: &str| tree(&[("Main.unity", f(&lines.replace(from, to)))]);
+    let base = h.save("main", first, &unity("", ""));
+    h.save("side", base, &unity("line 18\n", "theirs\n"));
+    h.save("main", base, &unity("line 1\n", "ours\n"));
+    let rules = "[[rule]]\nfiles = [\"*.unity\"]\nconflict-markers = false\n";
+    fs::write(h.dir.path().join("opalro.toml"), rules).unwrap();
+    let err = combine_in(&mut h, "side").unwrap_err();
+    let CombineError::Conflicts { conflicts, .. } = &err else {
+        panic!("{err:?}");
+    };
+    let want = Conflict {
+        path: "Main.unity".into(),
+        clash: Clash::BothChanged(NotMerged::NoMarkers),
+    };
+    assert_eq!(conflicts, &[want]);
+    // Without the rule, the same file merges.
+    fs::remove_file(h.dir.path().join("opalro.toml")).unwrap();
+    let done = combine_in(&mut h, "side").unwrap();
+    let Combined::Made { merged_files, .. } = &done.result else {
+        panic!("{done:?}");
+    };
+    assert_eq!(merged_files, &["Main.unity"]);
+}
+
+#[test]
+fn a_slow_comparison_is_told() {
+    let mut h = Hist::new();
+    let first = h.first;
+    let lines: String = (0..2000).map(|i| format!("line {i}\n")).collect();
+    let big = |from: &str, to: &str| tree(&[("big.txt", f(&lines.replace(from, to)))]);
+    let base = h.save("main", first, &big("", ""));
+    h.save("side", base, &big("line 1990\n", "theirs\n"));
+    h.save("main", base, &big("line 10\n", "ours\n"));
+    let hurried = Bounds {
+        deadline: std::time::Duration::ZERO,
+        ..bounds()
+    };
+    let done = combine_by(&mut h, "side", None, hurried).unwrap();
+    let told: Vec<&Warning> = done
+        .applied
+        .warnings
+        .iter()
+        .filter(|w| w.kind == warning::MERGE_TIMED_OUT)
+        .collect();
+    assert_eq!(told.len(), 1, "{:?}", done.applied.warnings);
+    assert_eq!(
+        told[0].message,
+        "Comparing the versions of big.txt took over 2 seconds, so Opalro compared them roughly; \
+         a closer look might have merged them."
+    );
+}
+
+#[test]
+fn undo_takes_a_combine_back_and_redo_brings_it_again() {
+    use crate::undo::{StepRequest, redo, undo};
+    let mut h = Hist::new();
+    let (_, main, _) = diverged(&mut h);
+    let done = combine_in(&mut h, "side").unwrap();
+    let who = ada();
+    let req = StepRequest {
+        n: 1,
+        shelve: false,
+        who: &who,
+        git_excludes: None,
+    };
+    undo(&mut h.repo, &req, &mut |_| {}).unwrap();
+    assert_eq!(h.entry().1.state.lines["main"], main);
+    assert_eq!(h.folder(), main_tree());
+    redo(&mut h.repo, &req, &mut |_| {}).unwrap();
+    assert_eq!(h.entry().1.state.lines["main"], done.save);
+    assert_eq!(h.folder(), both_tree());
+}
+
+/// `h` opened again, as the next command would open it.
+#[cfg(feature = "fault-injection")]
+fn reopened(h: Hist) -> Hist {
+    let Hist { dir, repo, first } = h;
+    drop(repo);
+    let repo = Repository::open(dir.path()).unwrap();
+    Hist { dir, repo, first }
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn a_combine_stopped_at_every_step_is_finished_or_never_happened() {
+    use crate::fsio::fault;
+    use crate::journal::Journal;
+    use crate::test_support::after_head;
+    let mut finished_later = 0;
+    for n in 1.. {
+        assert!(n < 200, "the combine never finished");
+        let mut h = Hist::new();
+        let (_, main, _) = diverged(&mut h);
+        fault::arm(n);
+        let result = combine_in(&mut h, "side");
+        fault::disarm();
+        let went_on = after_head(&h.repo);
+        let mut h = reopened(h);
+        // The next command finishes what was started, so the folder is the line's save, whole.
+        let outcome = h.save_now("Anything");
+        assert!(
+            matches!(outcome, SaveOutcome::NothingChanged { .. }),
+            "fault {n}: the folder was half switched"
+        );
+        let (_, entry) = h.entry();
+        assert_eq!(entry.state.position, Position::OnLine("main".into()));
+        assert_eq!(Journal::read(&h.repo).unwrap(), None, "fault {n}");
+        let combined = entry.state.lines["main"] != main;
+        let want = if combined { both_tree() } else { main_tree() };
+        assert_eq!(h.folder(), want, "fault {n}");
+        if combined {
+            let again = combine_in(&mut h, "side").unwrap();
+            assert_eq!(again.result, Combined::Nothing, "fault {n}");
+        }
+        if result.is_err() && combined {
+            finished_later += 1;
+        }
+        if result.is_ok() && !went_on {
+            assert!(combined);
+            assert!(finished_later >= 3, "only {finished_later} finished later");
+            break;
+        }
+    }
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn a_combine_after_a_stopped_goto_finishes_it_first() {
+    use crate::fsio::fault;
+    use crate::journal::Journal;
+    use crate::lines::Target;
+    use crate::switch::goto;
+    for n in 1..100 {
+        let mut h = Hist::new();
+        let (_, main, side) = diverged(&mut h);
+        fault::arm(n);
+        let to = Target::Line("side".into());
+        let stopped = goto(&mut h.repo, &to, &ada(), "goto", None, &mut |_| {});
+        fault::disarm();
+        let mut h = reopened(h);
+        let journal = Journal::read(&h.repo).unwrap();
+        // Only a stop between the journal and the head leaves a switch to finish.
+        if !journal.is_some_and(|j| j.target != h.repo.head().unwrap()) {
+            continue;
+        }
+        assert!(stopped.is_err(), "fault {n}");
+        // Finishing the goto puts the project on `side`, which `main` is then combined into.
+        let done = combine_in(&mut h, "main").unwrap();
+        let told = h.repo.store().warnings();
+        assert!(
+            told.iter().any(|w| w.kind == warning::SWITCH_FINISHED),
+            "{told:?}"
+        );
+        assert_eq!(done.line, "side");
+        assert_eq!(h.save_of(done.save).parents, [side, main]);
+        assert_eq!(h.folder(), both_tree());
+        return;
+    }
+    panic!("no goto stopped between its journal and its head");
 }

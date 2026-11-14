@@ -81,7 +81,7 @@ const RULE_DRIVE: Drive = Drive {
 
 /// The project's `[[rule]]` tables, each turned into a matcher once.
 #[derive(Debug)]
-pub struct RuleMatcher {
+pub(crate) struct RuleMatcher {
     rules: Vec<(Matcher, Option<bool>)>,
 }
 

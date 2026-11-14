@@ -618,25 +618,7 @@ fn go(
 ) -> Result<GotoOutcome, SwitchError> {
     let (head, entry) = repo.current()?;
     let from = tip_of(&entry)?;
-    // Read again under the lock: another command may have moved the line.
-    let (position, to) = match target {
-        Target::Line(line) => match entry.state.lines.get(line) {
-            Some(save) => (Position::OnLine(line.clone()), *save),
-            None => return Err(ResolveError::NotFound(line.clone()).into()),
-        },
-        Target::ServerLine { server, line, .. } => {
-            let servers = repo.server_lines(&entry.state)?;
-            match servers
-                .servers
-                .get(server)
-                .and_then(|lines| lines.get(line))
-            {
-                Some(save) => (Position::AtSave(*save), *save),
-                None => return Err(ResolveError::NotFound(format!("{line}@{server}")).into()),
-            }
-        }
-        Target::Save(save) => (Position::AtSave(*save), *save),
-    };
+    let (position, to) = landing(repo, &entry.state, target)?;
     let drive = drive::probe(repo.tmp_folder()).map_err(RepoError::from)?;
     let plan = writeout::plan(repo, from, to, None, false, drive, git_excludes)?;
     if !plan.collisions.is_empty() {
@@ -679,6 +661,33 @@ fn go(
         safety_copies,
         carried,
         recorded: true,
+    })
+}
+
+/// Where `target` leads now, read under the lock: the position and the save.
+pub(crate) fn landing(
+    repo: &Repository,
+    state: &State,
+    target: &Target,
+) -> Result<(Position, Id), SwitchError> {
+    // Read again under the lock: another command may have moved the line.
+    Ok(match target {
+        Target::Line(line) => match state.lines.get(line) {
+            Some(save) => (Position::OnLine(line.clone()), *save),
+            None => return Err(ResolveError::NotFound(line.clone()).into()),
+        },
+        Target::ServerLine { server, line, .. } => {
+            let servers = repo.server_lines(state)?;
+            match servers
+                .servers
+                .get(server)
+                .and_then(|lines| lines.get(line))
+            {
+                Some(save) => (Position::AtSave(*save), *save),
+                None => return Err(ResolveError::NotFound(format!("{line}@{server}")).into()),
+            }
+        }
+        Target::Save(save) => (Position::AtSave(*save), *save),
     })
 }
 
