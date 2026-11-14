@@ -3,6 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-10-31
 - **Agenda topic:** 7
+- **Refined by:** [decision 166](166-merging-two-versions-of-the-project.md) (what counts as a conflict, entry by entry); [decision 167](167-merging-text-line-by-line.md) (which files are merged as text; a file whose rule says no markers is never merged automatically)
 
 ## Context
 

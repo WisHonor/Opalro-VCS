@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-10-31
 - **Agenda topic:** 6
-- **Refined by:** [decision 032](032-exact-repeatable-commit-import.md) (a save imported from Git takes its change ID from its commit); [decision 122](122-change-ids-in-jujutsus-letters.md) (change IDs are written in Jujutsu's letters); [decision 105](105-the-change-id-cache-keeps-each-lines-saves-in-order.md) (a change ID is shortened from a cache that keeps each line's saves in order)
+- **Refined by:** [decision 032](032-exact-repeatable-commit-import.md) (a save imported from Git takes its change ID from its commit); [decision 122](122-change-ids-in-jujutsus-letters.md) (change IDs are written in Jujutsu's letters); [decision 105](105-the-change-id-cache-keeps-each-lines-saves-in-order.md) (a change ID is shortened from a cache that keeps each line's saves in order); [decision 165](165-combine-the-command.md) (a combined save's parents, author and message); [decision 168](168-moves-in-saves-and-in-combines.md) (when a save notes a move, and how a combine follows the notes)
 
 ## Context
 
