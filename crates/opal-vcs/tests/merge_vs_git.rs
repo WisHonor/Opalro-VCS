@@ -4,12 +4,18 @@
 mod support;
 
 use std::cell::RefCell;
+use std::collections::BTreeMap;
+use std::path::Path;
+use std::time::Instant;
 
 use opal_core::changes::DEADLINE;
 use opal_core::combine::{Text, merge_text};
+use opal_core::listing::EntryKind;
+use opal_core::repo::Repository;
 use proptest::prelude::*;
+use proptest::sample::Index;
 use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
-use support::git_with_input;
+use support::{Env, files, git, git_with_input, text};
 
 const ALPHABET: &[&str] = &["a\n", "b\n", "c\n", "d\n"];
 
@@ -252,4 +258,558 @@ fn text_merge_and_git_merge_file_on_repeating_lines() {
         counts.iter().zip(ceilings).all(|(n, most)| *n <= most),
         "{KINDS:?}: {counts:?}, at most {ceilings:?}"
     );
+}
+
+// Whole combines against `git merge`.
+
+const FOLDERS: [&str; 4] = ["", "src/", "src/deep/", "doc/"];
+const NAMES: [&str; 8] = [
+    "a.txt", "b.txt", "c.txt", "d.txt", "e.txt", "f.txt", "g.sh", "h.md",
+];
+
+/// Every path a generated history may use; no folder is named like a file.
+fn all_paths() -> Vec<String> {
+    FOLDERS
+        .iter()
+        .flat_map(|f| NAMES.iter().map(move |n| format!("{f}{n}")))
+        .collect()
+}
+
+/// One change in a commit; each `Index` picks among what is there when the commit is made.
+#[derive(Clone, Debug)]
+enum Step {
+    /// Replace (0), remove (1) or insert (2) a run of 1 to 3 lines, in one file.
+    Edit(Index, Vec<(u8, Index, usize)>),
+    /// A new file at a free path: its number of lines, and whether it is executable.
+    Add(Index, usize, bool),
+    Remove(Index),
+    FlipMark(Index),
+}
+
+#[derive(Clone, Debug)]
+enum Commit {
+    Changes(Vec<Step>),
+    /// One file moved to a free path, with nothing else changed.
+    Move(Index, Index),
+}
+
+#[derive(Clone, Debug)]
+struct History {
+    /// The first commit's files: path, number of lines, executable.
+    first: Vec<(String, usize, bool)>,
+    main: Vec<Commit>,
+    side: Vec<Commit>,
+}
+
+#[derive(Clone, Debug)]
+struct File {
+    lines: Vec<String>,
+    exec: bool,
+    /// Where the file was in the first commit, if it was there.
+    origin: Option<String>,
+    /// Moved on this branch.
+    moved: bool,
+    /// Edited on this branch before it moved, and after.
+    edited: [bool; 2],
+}
+
+type Tree = BTreeMap<String, File>;
+
+fn step() -> impl Strategy<Value = Step> {
+    let edits = prop::collection::vec((0..3u8, any::<Index>(), 1..=3usize), 1..=3);
+    prop_oneof![
+        4 => (any::<Index>(), edits).prop_map(|(f, e)| Step::Edit(f, e)),
+        1 => (any::<Index>(), 1..=8usize, prop::bool::weighted(0.25))
+            .prop_map(|(at, n, x)| Step::Add(at, n, x)),
+        1 => any::<Index>().prop_map(Step::Remove),
+        1 => any::<Index>().prop_map(Step::FlipMark),
+    ]
+}
+
+fn commits() -> impl Strategy<Value = Vec<Commit>> {
+    let commit = prop_oneof![
+        3 => prop::collection::vec(step(), 1..=3).prop_map(Commit::Changes),
+        2 => (any::<Index>(), any::<Index>()).prop_map(|(f, t)| Commit::Move(f, t)),
+    ];
+    prop::collection::vec(commit, 1..=4)
+}
+
+fn history() -> impl Strategy<Value = History> {
+    let sizes = prop::collection::vec((3..=12usize, prop::bool::weighted(0.25)), 12);
+    let first =
+        (prop::sample::subsequence(all_paths(), 3..=12), sizes).prop_map(|(paths, sizes)| {
+            paths
+                .into_iter()
+                .zip(sizes)
+                .map(|(p, (n, x))| (p, n, x))
+                .collect()
+        });
+    (first, commits(), commits()).prop_map(|(first, main, side)| History { first, main, side })
+}
+
+fn free_path(tree: &Tree, at: &Index) -> Option<String> {
+    let free: Vec<String> = all_paths()
+        .into_iter()
+        .filter(|p| !tree.contains_key(p))
+        .collect();
+    (!free.is_empty()).then(|| free[at.index(free.len())].clone())
+}
+
+fn nth_path(tree: &Tree, at: &Index) -> Option<String> {
+    (!tree.is_empty()).then(|| tree.keys().nth(at.index(tree.len())).unwrap().clone())
+}
+
+/// Makes `commit` on `tree`. New lines are `<who> <n>`, unique in the whole history, so no file
+/// ever holds a line twice and no two files share one.
+fn make(tree: &mut Tree, commit: &Commit, who: &str, fresh: &mut usize) {
+    let mut new_line = || {
+        *fresh += 1;
+        format!("{who} {fresh}\n")
+    };
+    let steps = match commit {
+        Commit::Move(from, to) => {
+            if let (Some(from), Some(to)) = (nth_path(tree, from), free_path(tree, to)) {
+                let mut file = tree.remove(&from).unwrap();
+                file.moved = true;
+                tree.insert(to, file);
+            }
+            return;
+        }
+        Commit::Changes(steps) => steps,
+    };
+    for step in steps {
+        match step {
+            Step::Edit(at, edits) => {
+                let Some(path) = nth_path(tree, at) else {
+                    continue;
+                };
+                let file = tree.get_mut(&path).unwrap();
+                let was = file.lines.clone();
+                for (kind, at, count) in edits {
+                    let lines = &mut file.lines;
+                    let at = at.index(lines.len() + 1);
+                    let gone = (*count).min(lines.len() - at);
+                    match kind {
+                        0 => {
+                            let new: Vec<String> = (0..*count).map(|_| new_line()).collect();
+                            lines.splice(at..at + gone, new);
+                        }
+                        // Never the last line: an empty file has no contents to follow.
+                        1 => {
+                            let gone = gone.min(lines.len() - 1);
+                            lines.drain(at..at + gone);
+                        }
+                        _ => {
+                            let new: Vec<String> = (0..*count).map(|_| new_line()).collect();
+                            lines.splice(at..at, new);
+                        }
+                    }
+                }
+                if file.lines != was {
+                    file.edited[usize::from(file.moved)] = true;
+                }
+            }
+            Step::Add(at, n, exec) => {
+                let Some(path) = free_path(tree, at) else {
+                    continue;
+                };
+                let lines = (0..*n).map(|_| new_line()).collect();
+                let file = File {
+                    lines,
+                    exec: *exec,
+                    origin: None,
+                    moved: false,
+                    edited: [false; 2],
+                };
+                tree.insert(path, file);
+            }
+            Step::Remove(at) => {
+                if let Some(path) = nth_path(tree, at) {
+                    tree.remove(&path);
+                }
+            }
+            Step::FlipMark(at) => {
+                if let Some(path) = nth_path(tree, at) {
+                    let file = tree.get_mut(&path).unwrap();
+                    file.exec = !file.exec;
+                }
+            }
+        }
+    }
+}
+
+/// A commit for `git fast-import`, from what changed between `before` and `after`.
+fn commit_text(branch: &str, mark: u32, from: Option<u32>, before: &Tree, after: &Tree) -> String {
+    // Commits share seconds, as imported histories often do.
+    let who = format!("Ada <ada@example.com> {} +0000", 1_700_000_000 + mark / 2);
+    let mut out = format!(
+        "commit refs/heads/{branch}\nmark :{mark}\nauthor {who}\ncommitter {who}\ndata 3\nc{}\n",
+        mark % 10
+    );
+    if let Some(from) = from {
+        out += &format!("from :{from}\n");
+    }
+    for path in before.keys().filter(|p| !after.contains_key(*p)) {
+        out += &format!("D {path}\n");
+    }
+    for (path, file) in after {
+        let same = before
+            .get(path)
+            .is_some_and(|b| b.lines == file.lines && b.exec == file.exec);
+        if !same {
+            let mode = if file.exec { "100755" } else { "100644" };
+            let data = file.lines.concat();
+            out += &format!("M {mode} inline {path}\ndata {}\n{data}\n", data.len());
+        }
+    }
+    out
+}
+
+/// Files of the first commit moved on a branch and still there at its end, as `[contents as they
+/// were, edited only before the move, edited after it]`, each with how many of them the other
+/// branch edited.
+type MoveCounts = [(usize, usize); 3];
+
+/// The history as a `git fast-import` stream, with how many files each branch moved.
+fn stream(h: &History) -> (String, MoveCounts) {
+    let mut fresh = 0;
+    let first: Tree = h
+        .first
+        .iter()
+        .enumerate()
+        .map(|(i, (path, n, exec))| {
+            let lines = (0..*n).map(|j| format!("file {i} line {j}\n")).collect();
+            let file = File {
+                lines,
+                exec: *exec,
+                origin: Some(path.clone()),
+                moved: false,
+                edited: [false; 2],
+            };
+            (path.clone(), file)
+        })
+        .collect();
+    let mut out = commit_text("main", 1, None, &Tree::new(), &first);
+    let mut mark = 1;
+    let mut ends = Vec::new();
+    for (branch, commits) in [("side", &h.side), ("main", &h.main)] {
+        let mut tree = first.clone();
+        for (i, commit) in commits.iter().enumerate() {
+            let before = tree.clone();
+            make(&mut tree, commit, branch, &mut fresh);
+            mark += 1;
+            out += &commit_text(branch, mark, (i == 0).then_some(1), &before, &tree);
+        }
+        ends.push(tree);
+    }
+    let edited = |tree: &Tree, origin: &String| {
+        tree.values()
+            .any(|f| f.origin.as_ref() == Some(origin) && f.lines != first[origin].lines)
+    };
+    let mut counts = MoveCounts::default();
+    for (mine, other) in [(&ends[0], &ends[1]), (&ends[1], &ends[0])] {
+        for file in mine.values() {
+            if let (Some(origin), true) = (&file.origin, file.moved) {
+                let c = &mut counts[match file.edited {
+                    [_, true] => 2,
+                    [true, false] => 1,
+                    [false, false] => 0,
+                }];
+                c.0 += 1;
+                c.1 += usize::from(edited(other, origin));
+            }
+        }
+    }
+    (out, counts)
+}
+
+/// Every file of the save `main` is at, with whether it is executable.
+fn opalro_marks(root: &Path) -> BTreeMap<String, bool> {
+    let repo = Repository::open(root).unwrap();
+    let store = repo.store();
+    let save = repo.current().unwrap().1.state.lines["main"];
+    let mut found = BTreeMap::new();
+    let mut folders = vec![(store.save(&save, false).unwrap().root, String::new())];
+    while let Some((id, rel)) = folders.pop() {
+        for e in store.listing(&id).unwrap().entries() {
+            let path = if rel.is_empty() {
+                e.name.clone()
+            } else {
+                format!("{rel}/{}", e.name)
+            };
+            if e.kind == EntryKind::Folder {
+                folders.push((e.id, path));
+            } else {
+                found.insert(path, e.kind == EntryKind::Executable);
+            }
+        }
+    }
+    found
+}
+
+/// Every file of Git's `HEAD` in `dir`, with whether it is executable.
+fn git_marks(dir: &Path) -> BTreeMap<String, bool> {
+    let listed = git(dir, &["ls-tree", "-r", "-z", "HEAD"]);
+    listed
+        .split(|&b| b == 0)
+        .filter(|entry| !entry.is_empty())
+        .map(|entry| {
+            let entry = text(entry);
+            let (head, path) = entry.split_once('\t').unwrap();
+            (path.to_owned(), head.starts_with("100755"))
+        })
+        .collect()
+}
+
+/// Generated histories of two branches, combined by both programs. Where both combine cleanly,
+/// they give the same files and marks. Git pairs a file moved and edited with its old self by
+/// likeness, which Opalro never guesses: so Git alone may merge, and where the other branch removed
+/// the file, Opalro alone keeps it where Git asks (rename/delete, modify/delete, and nothing else).
+/// The seed is fixed and both counts kept under ceilings.
+#[test]
+fn combine_matches_git_merge() {
+    const KINDS: [&str; 4] = [
+        "both clean",
+        "both conflict",
+        "Opalro clean only",
+        "Git clean only",
+    ];
+    let counts = RefCell::new([0usize; 4]);
+    let moves = RefCell::new(MoveCounts::default());
+    let git_only = RefCell::new(Vec::new());
+    let opalro_only = RefCell::new(Vec::new());
+    let started = Instant::now();
+    let rng = TestRng::deterministic_rng(RngAlgorithm::ChaCha);
+    let config = Config {
+        cases: 64,
+        failure_persistence: None,
+        ..Config::default()
+    };
+    TestRunner::new_with_rng(config, rng)
+        .run(&history(), |h| {
+            let (fast_import, moved) = stream(&h);
+            let env = Env::new();
+            let made = git_with_input(
+                env.root(),
+                &["fast-import", "--quiet"],
+                fast_import.as_bytes(),
+            );
+            assert!(made.status.success(), "{}", text(&made.stderr));
+            // The import takes the folder as it finds it.
+            env.git(&["reset", "-q", "--hard"]);
+            env.import();
+            let clone = tempfile::tempdir().unwrap();
+            git(
+                env.root(),
+                &["clone", "-q", ".", clone.path().to_str().unwrap()],
+            );
+
+            let ours = env.opalro().args(["combine", "side"]).output().unwrap();
+            let ours_code = ours.status.code().unwrap();
+            prop_assert!(ours_code <= 1, "{}", text(&ours.stderr));
+            let theirs = git_with_input(
+                clone.path(),
+                &[
+                    "-c",
+                    "merge.directoryRenames=false",
+                    "-c",
+                    "merge.renames=true",
+                    "merge",
+                    "--no-edit",
+                    "origin/side",
+                ],
+                b"",
+            );
+            let theirs_code = theirs.status.code().unwrap();
+            prop_assert!(theirs_code <= 1, "{}", text(&theirs.stderr));
+
+            let kind = match (ours_code == 0, theirs_code == 0) {
+                (true, true) => 0,
+                (false, false) => 1,
+                (true, false) => 2,
+                (false, true) => 3,
+            };
+            if kind == 0 {
+                prop_assert_eq!(files(env.root()), files(clone.path()), "{}", fast_import);
+                prop_assert_eq!(
+                    opalro_marks(env.root()),
+                    git_marks(clone.path()),
+                    "{}",
+                    fast_import
+                );
+            }
+            if kind == 2 {
+                let said = text(&theirs.stdout);
+                let conflicts: Vec<&str> = said
+                    .lines()
+                    .filter_map(|l| l.strip_prefix("CONFLICT ("))
+                    .collect();
+                let allowed = !conflicts.is_empty()
+                    && conflicts.iter().all(|c| {
+                        c.starts_with("rename/delete): ") || c.starts_with("modify/delete): ")
+                    });
+                prop_assert!(
+                    allowed,
+                    "Opalro combined cleanly where Git didn't:\n{said}\n{fast_import}"
+                );
+                // Git leaves the kept file in its folder and every other file merged.
+                prop_assert_eq!(files(env.root()), files(clone.path()), "{}", fast_import);
+                prop_assert_eq!(
+                    opalro_marks(env.root()),
+                    git_left_marks(clone.path()),
+                    "{}",
+                    fast_import
+                );
+                for c in &conflicts {
+                    if let Some(moved) = c.strip_prefix("rename/delete): ") {
+                        let (from, rest) = moved.split_once(" renamed to ").unwrap();
+                        let to = rest.split_once(" in ").unwrap().0;
+                        let ours = opalro_marks(env.root());
+                        prop_assert!(ours.contains_key(to) && !ours.contains_key(from), "{c}");
+                    }
+                }
+                opalro_only.borrow_mut().push(conflicts.join(" | "));
+            }
+            if kind == 3 {
+                let said = text(&ours.stderr);
+                let why: Vec<&str> = said.lines().filter(|l| l.starts_with("  ")).collect();
+                git_only
+                    .borrow_mut()
+                    .push(format!("{} (moves {moved:?})", why.join(";")));
+            }
+            counts.borrow_mut()[kind] += 1;
+            let mut m = moves.borrow_mut();
+            for (total, case) in m.iter_mut().zip(moved) {
+                total.0 += case.0;
+                total.1 += case.1;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let counts = counts.into_inner();
+    for (kind, n) in KINDS.iter().zip(counts) {
+        println!("{kind}: {n}");
+    }
+    let [pure, before, after] = moves.into_inner();
+    println!(
+        "files moved (in brackets, edited on the other branch): as they were {} ({}), edited before the move {} ({}), edited after it {} ({})",
+        pure.0, pure.1, before.0, before.1, after.0, after.1
+    );
+    for why in opalro_only.into_inner() {
+        println!("Opalro clean only, Git said: {why}");
+    }
+    for why in git_only.into_inner() {
+        println!("Git clean only: {why}");
+    }
+    println!("took {:.1?}", started.elapsed());
+    // Ceilings, not exact counts: another Git may pair files its own way.
+    assert!(
+        counts[0] >= 16 && counts[2] <= 6 && counts[3] <= 8,
+        "{KINDS:?}: {counts:?}"
+    );
+}
+
+/// Every file Git's stopped merge in `dir` left in its folder, with whether it is executable: the
+/// merged entry, or for a file one branch removed, the other's.
+fn git_left_marks(dir: &Path) -> BTreeMap<String, bool> {
+    let listed = git(dir, &["ls-files", "-s", "-z"]);
+    let mut found = BTreeMap::new();
+    for entry in listed.split(|&b| b == 0).filter(|e| !e.is_empty()) {
+        let entry = text(entry);
+        let (head, path) = entry.split_once('\t').unwrap();
+        // `<mode> <id> <stage>`; stage 1 is the starting point's.
+        if !head.ends_with(" 1") {
+            let earlier = found.insert(path.to_owned(), head.starts_with("100755"));
+            assert!(earlier.is_none(), "both branches hold {path}: {entry}");
+        }
+    }
+    found
+}
+
+/// `opalro args` in `env`, which must exit with `code`; what it said on stderr.
+fn opalro(env: &Env, args: &[&str], code: i32) -> String {
+    let out = env.opalro().args(args).output().unwrap();
+    let said = text(&out.stderr);
+    assert_eq!(out.status.code(), Some(code), "{args:?}: {said}");
+    said
+}
+
+/// A file moved and edited on one line and removed on the other: from Git's history, Opalro sees
+/// an old file both lines removed and a new file, and keeps it; Git pairs the two and asks.
+#[test]
+fn a_file_moved_and_changed_and_removed_on_the_other_line_is_kept_where_git_asks() {
+    let env = Env::new();
+    env.commit("a.txt", "1\n2\n3\n", "First");
+    env.git(&["checkout", "-q", "-b", "side"]);
+    env.git(&["rm", "-q", "a.txt"]);
+    env.git(&["commit", "-q", "-m", "Side removes a.txt"]);
+    env.git(&["checkout", "-q", "main"]);
+    env.git(&["mv", "a.txt", "b.txt"]);
+    env.git(&["commit", "-q", "-m", "Main moves a.txt"]);
+    env.commit("b.txt", "one\n2\n3\n", "Main edits b.txt");
+    env.import();
+    let clone = tempfile::tempdir().unwrap();
+    git(
+        env.root(),
+        &["clone", "-q", ".", clone.path().to_str().unwrap()],
+    );
+
+    opalro(&env, &["combine", "side"], 0);
+    assert_eq!(
+        files(env.root()),
+        support::holding(&[("b.txt", "one\n2\n3\n")])
+    );
+    let theirs = git_with_input(
+        clone.path(),
+        &[
+            "-c",
+            "merge.renames=true",
+            "merge",
+            "--no-edit",
+            "origin/side",
+        ],
+        b"",
+    );
+    assert_eq!(theirs.status.code(), Some(1));
+    assert!(
+        text(&theirs.stdout).contains("CONFLICT (rename/delete): a.txt renamed to b.txt in HEAD"),
+        "{}",
+        text(&theirs.stdout)
+    );
+}
+
+/// The same made in Opalro: a move saved by itself is noted, and the combine stops as Git does; a
+/// move saved with an edit has no note, and the edited file is kept.
+#[test]
+fn a_move_saved_by_itself_is_followed_and_one_saved_with_an_edit_is_not() {
+    for apart in [true, false] {
+        let env = Env::empty();
+        opalro(&env, &["start", "--preset", "custom"], 0);
+        env.overwrite("a.txt", "1\n2\n3\n");
+        opalro(&env, &["save", "First"], 0);
+        opalro(&env, &["line", "new", "side"], 0);
+        std::fs::remove_file(env.root().join("a.txt")).unwrap();
+        opalro(&env, &["save", "Side removes a.txt"], 0);
+        opalro(&env, &["goto", "main"], 0);
+        std::fs::rename(env.root().join("a.txt"), env.root().join("b.txt")).unwrap();
+        if apart {
+            opalro(&env, &["save", "Main moves a.txt"], 0);
+        }
+        env.overwrite("b.txt", "one\n2\n3\n");
+        opalro(&env, &["save", "Main edits b.txt"], 0);
+        if apart {
+            let said = opalro(&env, &["combine", "side"], 1);
+            assert!(
+                said.contains("\n  a.txt: moved to b.txt on main, removed on side"),
+                "{said}"
+            );
+        } else {
+            opalro(&env, &["combine", "side"], 0);
+            assert!(!env.root().join("a.txt").exists());
+            assert_eq!(
+                std::fs::read(env.root().join("b.txt")).unwrap(),
+                b"one\n2\n3\n"
+            );
+        }
+    }
 }
