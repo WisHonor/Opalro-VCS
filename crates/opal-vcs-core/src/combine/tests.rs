@@ -15,7 +15,7 @@ use crate::id::{ChangeId, Flavor, Id, hash_record};
 use crate::kept::overlay;
 use crate::link::ProjectLink;
 use crate::listing::{Entry, EntryKind, Listing};
-use crate::moves::{MAX_LEFT_BYTES, Version, followed, same_contents};
+use crate::moves::{HELD_PER_LEFT, MAX_LEFT_BYTES, Version, followed, same_contents};
 use crate::names::PortabilityProblem;
 use crate::pack::{ObjectKind, PackSet};
 use crate::presets::{Engine, Found, Preset, opal_toml};
@@ -1184,18 +1184,20 @@ fn model_entry(path: &str, s: &Node, o: &Node, t: &Node, m: &mut Model) -> bool 
             return m.files.len() > before;
         }
         (Node::Leaf(V::File(sc, sx)), Node::Leaf(V::File(oc, ox)), Node::Leaf(V::File(tc, tx))) => {
-            // One-line files: contents both sides changed always conflict.
+            // Contents both sides changed are merged line by line, which the text merge's own
+            // tests check; one-line files always conflict.
             let mark = if ox == tx || ox == sx { *tx } else { *ox };
             let contents = if oc == tc || oc == sc {
-                tc
+                tc.clone()
             } else if tc == sc {
-                oc
+                oc.clone()
+            } else if let (Text::Merged(both), _) = merge_text(sc, oc, tc, DEADLINE) {
+                both
             } else {
                 m.conflicts.insert(path.to_owned());
                 return false;
             };
-            m.files
-                .insert(path.to_owned(), V::File(contents.clone(), mark));
+            m.files.insert(path.to_owned(), V::File(contents, mark));
             return true;
         }
         _ => {}
@@ -1424,6 +1426,7 @@ impl Hist {
                     root,
                     MAX_LEFT_BYTES,
                 )
+                .unwrap()
                 .unwrap()
             }
         };
@@ -1794,6 +1797,88 @@ fn a_file_moved_in_by_notes_where_one_was_removed_counts_as_removed() {
     );
 }
 
+/// On `line` after `s`, which holds `start`: `Player.cs` removed and saved, then `from` moved
+/// where it was and saved, so that the second save notes it.
+fn moved_in(h: &mut Hist, line: &str, s: Id, start: &Tree, from: &str) -> Id {
+    let mut t = start.clone();
+    t.remove("Player.cs");
+    let gone = h.save(line, s, &t);
+    let v = t.remove(from).unwrap();
+    t.insert("Player.cs".to_owned(), v);
+    h.save(line, gone, &t)
+}
+
+#[test]
+fn a_file_moved_in_where_one_was_removed_is_a_new_file_for_the_whole_merge() {
+    let mut h = Hist::new();
+    let first = h.first;
+    // Files alike but for a line or two, so that, merged line by line, any of them would take
+    // an edit of another without a conflict.
+    let start = tree(&[
+        ("Player.cs", f(BODY)),
+        ("Other.cs", f("ONE\ntwo\nthree\nfour\nFIVE\n")),
+        ("Third.cs", edit(2, "THREE")),
+    ]);
+    let s = h.save("main", first, &start);
+    let o = moved_in(&mut h, "main", s, &start, "Other.cs");
+    let mut want = start.clone();
+    want.remove("Other.cs");
+    want.insert("Player.cs".to_owned(), start["Other.cs"].clone());
+    let both_ways = |h: &mut Hist, t: Id| {
+        [
+            h.outcome(h.version(s), h.version(o), h.version(t)),
+            h.outcome(h.version(s), h.version(t), h.version(o)),
+        ]
+    };
+    // Changed on the other side: changed there, removed here.
+    let mut edited = start.clone();
+    edited.insert("Player.cs".to_owned(), edit(2, "3"));
+    let t = h.save("side", s, &edited);
+    let [a, b] = both_ways(&mut h, t);
+    assert_eq!(a.0, ["Player.cs: changed on side, removed on main"]);
+    assert_eq!(b.0, ["Player.cs: changed on main, removed on side"]);
+    // Untouched there: the file that arrived stands.
+    let mut untouched = start.clone();
+    untouched.insert("Side.cs".to_owned(), f("side\n"));
+    let t = h.save("side", s, &untouched);
+    let mut got = want.clone();
+    got.insert("Side.cs".to_owned(), f("side\n"));
+    assert_eq!(both_ways(&mut h, t), [(vec![], got.clone()), (vec![], got)]);
+    // Removed there too: it stands as well.
+    let mut removed = start.clone();
+    removed.remove("Player.cs");
+    let t = h.save("side", s, &removed);
+    assert_eq!(
+        both_ways(&mut h, t),
+        [(vec![], want.clone()), (vec![], want.clone())]
+    );
+    // Another file brought there: two new files.
+    let t = moved_in(&mut h, "side", s, &start, "Third.cs");
+    let [a, b] = both_ways(&mut h, t);
+    assert_eq!(a.0, ["Player.cs: added on both lines, differently"]);
+    assert_eq!(b.0, a.0);
+    // The same file brought there: taken once.
+    let t = moved_in(&mut h, "side", s, &start, "Other.cs");
+    assert_eq!(
+        both_ways(&mut h, t),
+        [(vec![], want.clone()), (vec![], want)]
+    );
+}
+
+#[test]
+fn a_file_replaced_in_place_without_a_note_is_that_file_changed() {
+    let mut h = Hist::new();
+    let s = player(&mut h);
+    let to = "Characters/Player.cs";
+    let o = h.save("main", s, &moved_to(to, f(BODY)));
+    // In one save, `Player.cs` given `Other.cs`'s contents and `Other.cs` removed: `Player.cs`
+    // never emptied, so nothing notes a move, and it is an edit.
+    let t = h.save("side", s, &tree(&[("Player.cs", f("other\n"))]));
+    let want = with_folders(&tree(&[(to, f("other\n"))]));
+    assert_eq!(h.merged(s, o, t), want);
+    assert_eq!(h.merged(s, t, o), want);
+}
+
 #[test]
 fn a_file_noted_as_gone_to_two_places_is_not_followed() {
     let mut h = Hist::new();
@@ -1833,23 +1918,27 @@ fn following_by_contents_holds_a_bounded_amount() {
         save: None,
         ..h.version(o)
     };
-    // `Player.cs` is the only path that left: 9 bytes.
+    // `Player.cs` is the only file that left, with a path of 9 bytes.
+    let fits = HELD_PER_LEFT + 9;
     let at_most = |n: usize| {
         let made = Made {
             max_left_bytes: n,
             ..Made::default()
         };
-        followed(&h.repo, &made, &h.version(s), &made_up)
-            .unwrap()
-            .went
+        followed(&h.repo, &made, &h.version(s), &made_up).unwrap()
     };
-    assert!(at_most(8).is_empty());
-    assert_eq!(at_most(9).len(), 1);
-    // The merge goes on without the move.
+    let past = at_most(fits - 1);
+    assert!(past.went.is_empty() && past.too_many_left, "{past:?}");
+    let within = at_most(fits);
+    assert!(
+        within.went.len() == 1 && !within.too_many_left,
+        "{within:?}"
+    );
+    // The merge goes on without the move, and says so.
     let t = h.save("side", s, &moved_to("Player.cs", edit(1, "TWO")));
     let mut packs = h.repo.new_packs().unwrap();
     let mut made = Made {
-        max_left_bytes: 8,
+        max_left_bytes: fits - 1,
         ..Made::default()
     };
     let rules = RuleMatcher::new(&Rules::default());
@@ -1864,6 +1953,7 @@ fn following_by_contents_holds_a_bounded_amount() {
         .map(|c| c.describe("main", "side"))
         .collect();
     assert_eq!(got, ["Player.cs: changed on side, removed on main"]);
+    assert_eq!(m.unfollowed, [Side::Ours]);
 }
 
 /// A save's tree and the notes it carries.
@@ -2134,12 +2224,15 @@ fn the_walk_for_notes_is_bounded() {
 /// One side's work on a start of files `s0` to `s5`. First up to 3 moves, each saved alone, by
 /// the index of the file among those there and of where it goes: onto a start file still there
 /// it replaces it unnoted, unless that file is removed in a save of its own first (`true`).
-/// Then up to 2 changes saved together: an edit (0), a removal (1), a new file where a start file
-/// no longer is (2), a start file made a folder (3), or a file `d` (4).
+/// Then up to 2 changes saved together: an edit of a file's middle line (0), a removal (1), a new
+/// file where a start file no longer is (2), a start file made a folder (3), or a file `d` (4).
+/// The side's newest save is merged as a made-up version, followed by contents only, when
+/// `made_up`.
 #[derive(Debug, Clone)]
 struct Work {
     moves: Vec<(usize, usize, bool)>,
     changes: Vec<(usize, u8)>,
+    made_up: bool,
 }
 
 const MOVE_TO: [&str; 8] = ["t0", "t1", "t2", "d/t0", "d/t1", "d/t2", "s0", "s1"];
@@ -2148,8 +2241,13 @@ fn work() -> impl Strategy<Value = Work> {
     (
         prop::collection::vec((0..6usize, 0..MOVE_TO.len(), any::<bool>()), 0..=3),
         prop::collection::vec((0..6usize, 0..5u8), 0..=2),
+        any::<bool>(),
     )
-        .prop_map(|(moves, changes)| Work { moves, changes })
+        .prop_map(|(moves, changes, made_up)| Work {
+            moves,
+            changes,
+            made_up,
+        })
 }
 
 /// Whether `path` can be made in `files`: nothing above it is a file, and nothing is below it.
@@ -2207,7 +2305,20 @@ fn do_work(
                     continue;
                 };
                 if change == 0 {
-                    files.insert(path.clone(), f(&format!("{path} on {line}\n")));
+                    let Some(V::File(was, _)) = files.get(&path) else {
+                        continue;
+                    };
+                    let mut lines: Vec<String> = String::from_utf8(was.clone())
+                        .unwrap()
+                        .lines()
+                        .map(str::to_owned)
+                        .collect();
+                    let mark = format!("{path} on {line}");
+                    match lines.get_mut(2) {
+                        Some(middle) => *middle = mark,
+                        None => lines = vec![mark],
+                    }
+                    files.insert(path.clone(), f(&(lines.join("\n") + "\n")));
                 } else {
                     files.remove(&path);
                 }
@@ -2268,6 +2379,31 @@ fn is_move_clash(c: &Clash) -> bool {
     )
 }
 
+/// The moves found by contents between `start` and `side`: a non-empty file that left a path,
+/// arrived at one where the start held nothing, and is the only one with its contents that did.
+fn by_contents(start: &Tree, side: &Tree) -> Vec<(String, String)> {
+    let gone_from = |a: &Tree, b: &Tree| -> Vec<(Vec<u8>, String)> {
+        a.iter()
+            .filter(|(p, _)| !b.contains_key(*p))
+            .filter_map(|(p, v)| match v {
+                V::File(c, _) if !c.is_empty() => Some((c.clone(), p.clone())),
+                _ => None,
+            })
+            .collect()
+    };
+    let (left, arrived) = (gone_from(start, side), gone_from(side, start));
+    let only = |among: &[(Vec<u8>, String)], c: &[u8]| {
+        let mut with = among.iter().filter(|(x, _)| x == c);
+        match (with.next(), with.next()) {
+            (Some((_, p)), None) => Some(p.clone()),
+            _ => None,
+        }
+    };
+    left.iter()
+        .filter_map(|(c, a)| Some((only(&left, c)?, only(&arrived, c)?)).filter(|(x, _)| x == a))
+        .collect()
+}
+
 #[test]
 fn following_moves_agrees_with_a_model() {
     let h = std::cell::RefCell::new(Hist::new());
@@ -2275,26 +2411,50 @@ fn following_moves_agrees_with_a_model() {
     runner
         .run(&(1..=6usize, work(), work()), |(n, ours, theirs)| {
             let mut h = h.borrow_mut();
+            // Alike but for their first and last lines, so that an edit of one merges cleanly
+            // into another's contents.
             let files: Tree = (0..n)
-                .map(|i| (format!("s{i}"), f(&format!("start {i}\n"))))
+                .map(|i| {
+                    let text = format!("start {i}\nmid\nmid\nmid\nend {i}\n");
+                    (format!("s{i}"), f(&text))
+                })
                 .collect();
             let first = h.first;
             let s = h.save("main", first, &files);
-            let (o, noted_o) = do_work(&mut h, "main", s, &files, &ours);
-            let (t, noted_t) = do_work(&mut h, "side", s, &files, &theirs);
-            let [vs, vo, vt] = [s, o, t].map(|x| h.version(x));
+            let (o, mut noted_o) = do_work(&mut h, "main", s, &files, &ours);
+            let (t, mut noted_t) = do_work(&mut h, "side", s, &files, &theirs);
+            let [vs, mut vo, mut vt] = [s, o, t].map(|x| h.version(x));
+            for (work, v, noted) in [
+                (&ours, &mut vo, &mut noted_o),
+                (&theirs, &mut vt, &mut noted_t),
+            ] {
+                if work.made_up {
+                    v.save = None;
+                    noted.clear();
+                }
+            }
             let store = h.repo.store();
             let read = |v: Version| read_tree(store, v.root, &HashMap::new());
             let three = [read(vs), read(vo), read(vt)];
-            // What each side's notes say, checked against the start and the side.
+            // What each side's notes say, then its contents, checked against the start and the
+            // side.
             let went: [BTreeMap<String, String>; 2] =
                 [(&noted_o, 1), (&noted_t, 2)].map(|(n, v)| {
-                    n.iter()
-                        .filter(|(a, x)| {
-                            file_at(&three[0], a) && room(&three[0], x) && file_at(&three[v], x)
-                        })
+                    let fits = |a: &str, x: &str| {
+                        file_at(&three[0], a) && room(&three[0], x) && file_at(&three[v], x)
+                    };
+                    let mut went: BTreeMap<String, String> = n
+                        .iter()
+                        .filter(|(a, x)| fits(a, x))
                         .map(|(a, x)| (a.clone(), x.clone()))
-                        .collect()
+                        .collect();
+                    let taken: BTreeSet<String> = went.values().cloned().collect();
+                    for (a, x) in by_contents(&three[0], &three[v]) {
+                        if !went.contains_key(&a) && !taken.contains(&x) && fits(&a, &x) {
+                            went.insert(a, x);
+                        }
+                    }
+                    went
                 });
             let replaced: [BTreeSet<&String>; 2] =
                 [&noted_o, &noted_t].map(|n| n.values().collect());
@@ -2344,7 +2504,38 @@ fn following_moves_agrees_with_a_model() {
                 };
                 clashes.insert(a.clone(), clash);
             }
-            // A move's conflict is the only one at its old place.
+            // A start file where a side's notes brought another is gone on that side.
+            let arrived: BTreeSet<&String> = replaced[0].union(&replaced[1]).copied().collect();
+            for at in arrived {
+                let moved = went.iter().any(|w| w.contains_key(at));
+                if !file_at(&three[0], at) || moved {
+                    continue;
+                }
+                let clash = match [0, 1].map(|i| replaced[i].contains(at)) {
+                    [true, true] => None,
+                    [on_ours, _] => {
+                        let (removed_on, other) = if on_ours {
+                            (Side::Ours, 2)
+                        } else {
+                            (Side::Theirs, 1)
+                        };
+                        match three[other].get(at) {
+                            None => None,
+                            Some(v) if Some(v) == three[0].get(at) => continue,
+                            Some(_) => Some(Clash::ChangedRemoved { removed_on }),
+                        }
+                    }
+                };
+                match clash {
+                    None => {
+                        was[0].remove(at);
+                    }
+                    Some(clash) => {
+                        clashes.insert(at.clone(), clash);
+                    }
+                }
+            }
+            // A conflict found here is the only one at its place.
             for a in clashes.keys() {
                 let below = format!("{a}/");
                 for v in &mut was {
@@ -2353,6 +2544,7 @@ fn following_moves_agrees_with_a_model() {
             }
             let mut want = model(&was[0], &was[1], &was[2]);
             want.conflicts.extend(clashes.keys().cloned());
+            let lock = h.repo.lock_for_change("test", &mut |_| {}).unwrap();
             let mut packs = h.repo.new_packs().unwrap();
             let mut made = Made::default();
             let rules = RuleMatcher::new(&Rules::default());
@@ -2367,7 +2559,10 @@ fn following_moves_agrees_with_a_model() {
                 }
             }
             if got.is_empty() {
-                prop_assert_eq!(read_tree(store, m.root, &made.listings), want.files);
+                // Texts merged line by line are only in the pack set until it is stored.
+                h.repo.store_packs(&lock, packs).unwrap();
+                let merged = read_tree(h.repo.store(), m.root, &made.listings);
+                prop_assert_eq!(merged, want.files);
             }
             Ok(())
         })
@@ -2379,6 +2574,7 @@ fn bounds() -> Bounds {
         max_inner: MAX_INNER,
         max_held: MAX_HELD_TEXT,
         deadline: DEADLINE,
+        max_left_bytes: MAX_LEFT_BYTES,
         limits: SaveLimits::default(),
     }
 }
@@ -3067,6 +3263,45 @@ fn a_slow_comparison_is_told() {
         told[0].message,
         "Comparing the versions of big.txt took over 2 seconds, so Opalro compared them roughly; \
          a closer look might have merged them."
+    );
+}
+
+#[test]
+fn a_combine_says_when_moves_werent_followed() {
+    let mut h = Hist::new();
+    let s = player(&mut h);
+    let to = "Characters/Player.cs";
+    h.save("side", s, &moved_to("Player.cs", edit(1, "TWO")));
+    h.save("main", s, &moved_to(to, f(BODY)));
+    // Too little to hold even the one file that left main; its note is still followed.
+    let short = Bounds {
+        max_left_bytes: HELD_PER_LEFT,
+        ..bounds()
+    };
+    let done = combine_by(&mut h, "side", None, short).unwrap();
+    assert_eq!(h.folder(), moved_to(to, edit(1, "TWO")));
+    let told: Vec<&Warning> = done
+        .applied
+        .warnings
+        .iter()
+        .filter(|w| w.kind == warning::MOVES_NOT_FOLLOWED)
+        .collect();
+    assert_eq!(told.len(), 1, "{:?}", done.applied.warnings);
+    assert_eq!(
+        told[0].message,
+        "Too many files left their places on main for Opalro to match them by their contents, \
+         so files that moved there without a note were not followed."
+    );
+    // Not with room for it.
+    let mut h = Hist::new();
+    let s = player(&mut h);
+    h.save("side", s, &moved_to("Player.cs", edit(1, "TWO")));
+    h.save("main", s, &moved_to(to, f(BODY)));
+    let done = combine_in(&mut h, "side").unwrap();
+    assert!(
+        done.applied.warnings.is_empty(),
+        "{:?}",
+        done.applied.warnings
     );
 }
 

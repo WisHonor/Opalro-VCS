@@ -34,7 +34,7 @@ pub(crate) struct Made {
     /// Their bytes, and the most allowed (`MAX_HELD_TEXT`; tests lower it).
     pub held: u64,
     pub max_held: u64,
-    /// The most bytes of paths of files that left a side held to follow them by contents
+    /// The most memory taken to hold the files that left a side, to follow them by contents
     /// (`moves::MAX_LEFT_BYTES`; tests lower it).
     pub max_left_bytes: usize,
     /// How long each file's comparison may take (`changes::deadline()`; tests lower it).
@@ -65,6 +65,8 @@ pub(crate) struct Merged {
     pub more: u64,
     /// Files whose comparison ran past its deadline.
     pub timed_out: Vec<String>,
+    /// Sides where too many files left for moves to be followed by their contents.
+    pub unfollowed: Vec<Side>,
 }
 
 /// The three versions' entries, or listings, in the order of `Which`.
@@ -91,6 +93,7 @@ pub(crate) fn merge_trees(
         conflicts: Vec::new(),
         more: 0,
         timed_out: Vec::new(),
+        unfollowed: Vec::new(),
     };
     if let Some(root) = one_sides([start, ours, theirs].map(Some)) {
         merged.root = root.unwrap_or(ours);

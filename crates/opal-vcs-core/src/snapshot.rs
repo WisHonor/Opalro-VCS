@@ -637,7 +637,7 @@ pub fn save_folder(
     // Notes say only what is certain and never stop a save: one that can't be compared with the
     // save before it notes nothing, and is told it couldn't count its files only if it couldn't.
     let (mut move_notes, counted) = match compared {
-        Some(Ok((count, notes))) => (notes.unwrap_or_default(), Some(Ok(count))),
+        Some(Ok((count, notes))) => (notes.ok().flatten().unwrap_or_default(), Some(Ok(count))),
         Some(Err(why)) => (vec![], Some(Err(why))),
         None => (vec![], None),
     };
@@ -3339,7 +3339,7 @@ mod tests {
             fs::remove_file(dir.path().join(name)).unwrap();
         }
         fs::rename(dir.path().join("moved"), dir.path().join("there")).unwrap();
-        // Paths of 20 bytes left, past the 12 it may hold.
+        // Four files left, past the 12 bytes it may hold.
         NOTE_LIMITS.set((MAX_HELD_LISTINGS, moves::MAX_NOTED_BYTES, 12));
         let outcome = save_now(&mut repo).unwrap();
         let SaveOutcome::Saved { warnings, .. } = &outcome else {

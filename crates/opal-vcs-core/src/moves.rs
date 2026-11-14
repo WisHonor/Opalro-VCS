@@ -46,20 +46,27 @@ fn file(e: Option<&Entry>) -> Option<&Entry> {
 /// same non-empty contents, no other file that left and none that arrived holding those
 /// contents; sorted by where they went. A path that left holds nothing at `to_root`, and one
 /// that arrived held nothing at `from_root`. Either side's listings may be in `unstored`. None
-/// when the paths of the files that left come to more than `most_left_bytes`.
+/// when holding the files that left would take more than `most_left_bytes`.
 pub(crate) fn same_contents(
     store: &Store,
     unstored: &HashMap<Id, Listing>,
     from_root: Id,
     to_root: Id,
     most_left_bytes: usize,
-) -> Result<Vec<MoveNote>, StoreError> {
+) -> Moves {
     count_and_moves(store, unstored, from_root, to_root, most_left_bytes)?.1
 }
 
-/// At most this many bytes of paths of files that left a save are held to pair them; past it, a
-/// save notes no moves.
+/// Moves found by contents: none at all when there were too many files that left to hold.
+pub(crate) type Moves = Result<Option<Vec<MoveNote>>, StoreError>;
+
+/// At most this many bytes of memory are taken to hold the files that left, to pair them; past
+/// it, a save notes no moves and a combine follows none by contents.
 pub(crate) const MAX_LEFT_BYTES: usize = 64 << 20;
+
+/// What holding one file that left takes beside its path: its entry in a map that may be half
+/// empty after it grows, and the path's own allocation.
+pub(crate) const HELD_PER_LEFT: usize = 2 * size_of::<(Id, Option<String>)>() + 16;
 
 #[cfg(test)]
 thread_local! {
@@ -68,17 +75,16 @@ thread_local! {
 }
 
 /// How many files differ between the two roots, counted as [`crate::diff::count_changes`]
-/// counts them, and [`same_contents`]' moves: none when the paths of the files that left come
-/// to more than `most_left_bytes`. The folders that differ are walked once, and again only if a
-/// file arrived and a file left with contents no other file that left has. The moves have their
-/// own result, so a second walk that fails leaves the count.
+/// counts them, and [`same_contents`]' moves. The folders that differ are walked once, and again
+/// only if a file arrived and a file left with contents no other file that left has. The moves
+/// have their own result, so a second walk that fails leaves the count.
 pub(crate) fn count_and_moves(
     store: &Store,
     unstored: &HashMap<Id, Listing>,
     from_root: Id,
     to_root: Id,
     most_left_bytes: usize,
-) -> Result<(usize, Result<Vec<MoveNote>, StoreError>), StoreError> {
+) -> Result<(usize, Moves), StoreError> {
     // The files that left first: arrivals are worth keeping only for the contents of one, and a
     // save that adds a great deal often has none.
     let (mut changed, mut left, mut left_bytes, mut arrivals) = (0, Places::new(), 0usize, false);
@@ -93,7 +99,7 @@ pub(crate) fn count_and_moves(
             if let (Some(f), None) = (file(old), new)
                 && left_bytes <= most_left_bytes
             {
-                left_bytes = left_bytes.saturating_add(path.len());
+                left_bytes = left_bytes.saturating_add(HELD_PER_LEFT + path.len());
                 if left_bytes > most_left_bytes {
                     left = Places::new();
                 } else {
@@ -103,11 +109,17 @@ pub(crate) fn count_and_moves(
             Ok::<(), StoreError>(())
         },
     )?;
+    if left_bytes > most_left_bytes {
+        return Ok((changed, Ok(None)));
+    }
     left.retain(|_, from| from.is_some());
     if left.is_empty() || !arrivals {
-        return Ok((changed, Ok(vec![])));
+        return Ok((changed, Ok(Some(vec![]))));
     }
-    Ok((changed, paired(store, unstored, from_root, to_root, left)))
+    Ok((
+        changed,
+        paired(store, unstored, from_root, to_root, left).map(Some),
+    ))
 }
 
 /// The moves of the files in `left` (contents to the one path that left with them), from a
@@ -168,6 +180,8 @@ pub(crate) struct Followed {
     /// Paths where the side's notes show another file arriving: whatever the side holds there,
     /// the start's file at such a path is removed on that side.
     pub replaced: BTreeSet<String>,
+    /// Too many files left on the side to match them by their contents, so only notes count.
+    pub too_many_left: bool,
 }
 
 /// Where the files of `start` went on `side`. Listings in `made` are read before the store's.
@@ -196,7 +210,13 @@ pub(crate) fn followed(
     }
     let taken: HashSet<String> = out.went.values().cloned().collect();
     let left = made.max_left_bytes;
-    for n in same_contents(store, &made.listings, start.root, side.root, left)? {
+    // Only a path that emptied is matched by contents; a file replaced in place was edited.
+    let Some(by_contents) = same_contents(store, &made.listings, start.root, side.root, left)?
+    else {
+        out.too_many_left = true;
+        return Ok(out);
+    };
+    for n in by_contents {
         if !out.went.contains_key(&n.from)
             && !taken.contains(&n.to)
             && fits(&mut at_start, &mut on_side, &n.from, &n.to)?
@@ -399,6 +419,7 @@ mod tests {
         let (a, b) = (tree(&mut unstored, from), tree(&mut unstored, to));
         same_contents(&store, &unstored, a, b, MAX_LEFT_BYTES)
             .unwrap()
+            .unwrap()
             .into_iter()
             .map(|n| (n.from, n.to))
             .collect()
@@ -466,21 +487,39 @@ mod tests {
         let mut unstored = HashMap::new();
         let (a, b) = (tree(&mut unstored, from), tree(&mut unstored, to));
         let (count, notes) = count_and_moves(&store, &unstored, a, b, most_left_bytes).unwrap();
-        let notes = notes.unwrap().into_iter().map(|n| (n.from, n.to)).collect();
+        let notes = notes.unwrap().unwrap_or_default();
+        let notes = notes.into_iter().map(|n| (n.from, n.to)).collect();
         (count, notes)
     }
 
     #[test]
-    fn past_the_bytes_of_paths_left_nothing_is_paired_and_all_is_counted() {
+    fn past_what_the_files_that_left_take_nothing_is_paired_and_all_is_counted() {
         let from: &[(&str, EntryKind, &[u8])] = &[
             ("gone1", File, b"1"),
             ("gone2", File, b"2"),
             ("moved", File, b"m"),
         ];
         let to: &[(&str, EntryKind, &[u8])] = &[("there", File, b"m")];
-        // 15 bytes of paths left: they fit in 15, not in 14.
-        assert_eq!(counted(from, to, 15), (4, vec![pair("moved", "there")]));
-        assert_eq!(counted(from, to, 14), (4, vec![]));
+        // Three files with 15 bytes of paths left.
+        let all = 3 * HELD_PER_LEFT + 15;
+        assert_eq!(counted(from, to, all), (4, vec![pair("moved", "there")]));
+        assert_eq!(counted(from, to, all - 1), (4, vec![]));
+    }
+
+    #[test]
+    fn many_short_paths_that_left_are_bounded_by_their_count() {
+        let names: Vec<String> = (0..9).map(|i| i.to_string()).collect();
+        let mut from: Vec<(&str, EntryKind, &[u8])> = names
+            .iter()
+            .map(|n| (n.as_str(), File, n.as_bytes()))
+            .collect();
+        from.push(("m", File, b"moved"));
+        let to: &[(&str, EntryKind, &[u8])] = &[("x", File, b"moved")];
+        // Ten paths of one byte each: 10 bytes, but ten entries held.
+        let all = 10 * (HELD_PER_LEFT + 1);
+        assert_eq!(counted(&from, to, all), (11, vec![pair("m", "x")]));
+        assert_eq!(counted(&from, to, all - 1), (11, vec![]));
+        assert_eq!(counted(&from, to, 1_000), (11, vec![]));
     }
 
     #[test]

@@ -24,7 +24,8 @@ use crate::kept::{self, EXACT, Put, overlay_with};
 use crate::lines::Target;
 use crate::listing::{Listing, SaveLimits};
 use crate::moves::{
-    MAX_NOTED_BYTES, Version, first_that_fit, followed, is_file, room_at, same_contents,
+    MAX_LEFT_BYTES, MAX_NOTED_BYTES, Version, first_that_fit, followed, is_file, room_at,
+    same_contents,
 };
 use crate::names::PortabilityProblem;
 use crate::pack::{ObjectKind, PackSet};
@@ -466,17 +467,42 @@ pub(crate) fn merge_three(
                     }
                 }
             };
-            // What any version holds there, a new file a mover made included, is part of this
-            // conflict, not one of its own; a new folder there goes too, as the combine stops.
-            for (tree, puts) in trees.iter_mut().zip(&mut puts) {
-                if tree.entry(from)?.is_some() {
-                    puts.insert(from.clone(), None);
-                }
+            clash_at(&mut trees, &mut puts, &mut clashes, from, clash)?;
+        }
+        // Where a side's notes show another file arriving at a start file's place, the start's
+        // file is gone on that side for the whole merge, never changed into the one that came.
+        let arrived: BTreeSet<&String> = went[0].replaced.iter().chain(&went[1].replaced).collect();
+        for at in arrived {
+            let was = trees[0].entry(at)?;
+            let Some(was) = was.filter(is_file) else {
+                continue;
+            };
+            if went.iter().any(|w| w.went.contains_key(at)) {
+                continue;
             }
-            clashes.push(Conflict {
-                path: from.clone(),
-                clash,
-            });
+            let on = went.each_ref().map(|w| w.replaced.contains(at));
+            let clash = match on {
+                [true, true] => None,
+                [gone_on_ours, _] => {
+                    let (removed_on, other) = if gone_on_ours {
+                        (Side::Ours, 2)
+                    } else {
+                        (Side::Theirs, 1)
+                    };
+                    match trees[other].entry(at)? {
+                        None => None,
+                        Some(e) if (e.kind, e.id) == (was.kind, was.id) => continue,
+                        Some(_) => Some(Clash::ChangedRemoved { removed_on }),
+                    }
+                }
+            };
+            match clash {
+                // The start holds nothing there, so what the sides hold there is new.
+                None => {
+                    puts[0].insert(at.clone(), None);
+                }
+                Some(clash) => clash_at(&mut trees, &mut puts, &mut clashes, at, clash)?,
+            }
         }
     }
     let mut roots = [start.root, ours.root, theirs.root];
@@ -495,6 +521,12 @@ pub(crate) fn merge_three(
     let [s, o, t] = roots;
     let time = made.deadline;
     let mut merged = merge_trees(store, packs, made, inner, s, o, t, rules, time)?;
+    merged.unfollowed = [Side::Ours, Side::Theirs]
+        .into_iter()
+        .zip(&went)
+        .filter(|(_, w)| w.too_many_left)
+        .map(|(side, _)| side)
+        .collect();
     if !clashes.is_empty() {
         // Each names a path the tree merge found nothing at, so the two are named together.
         let mut all = std::mem::take(&mut merged.conflicts);
@@ -506,6 +538,27 @@ pub(crate) fn merge_three(
         merged.conflicts = all;
     }
     Ok(merged)
+}
+
+/// Names `clash` at `path`. What any version holds there, a new file a mover made included, is
+/// part of this conflict, not one of its own; a new folder there goes too, as the combine stops.
+fn clash_at(
+    trees: &mut [Tree; 3],
+    puts: &mut [BTreeMap<String, Option<Put>>; 3],
+    clashes: &mut Vec<Conflict>,
+    path: &str,
+    clash: Clash,
+) -> Result<(), StoreError> {
+    for (tree, puts) in trees.iter_mut().zip(puts) {
+        if tree.entry(path)?.is_some() {
+            puts.insert(path.to_owned(), None);
+        }
+    }
+    clashes.push(Conflict {
+        path: path.to_owned(),
+        clash,
+    });
+    Ok(())
 }
 
 /// Sets `to` in `puts` to what `tree` holds at `from`, and `from` to nothing.
@@ -521,12 +574,13 @@ fn move_in(
     Ok(())
 }
 
-/// What one combine may take: inner combines, text they hold, time to compare each file, and
-/// the result's limits.
+/// What one combine may take: inner combines, text they hold, time to compare each file, memory
+/// to follow moves by contents, and the result's limits.
 struct Bounds {
     max_inner: usize,
     max_held: u64,
     deadline: Duration,
+    max_left_bytes: usize,
     limits: SaveLimits,
 }
 
@@ -563,6 +617,7 @@ pub fn combine(
         max_inner: MAX_INNER,
         max_held: MAX_HELD_TEXT,
         deadline: deadline(),
+        max_left_bytes: MAX_LEFT_BYTES,
         limits: SaveLimits::default(),
     };
     combine_with(repo, &asked, on_wait, bounds)
@@ -622,7 +677,7 @@ fn combine_locked(
     }
     let made =
         make_save(repo, lock, asked, &line, from, with, bounds).map_err(|e| e.named(&names))?;
-    let warnings = made
+    let mut warnings: Vec<Warning> = made
         .timed_out
         .iter()
         .map(|path| {
@@ -634,6 +689,18 @@ fn combine_locked(
             Warning::new(warning::MERGE_TIMED_OUT, message)
         })
         .collect();
+    warnings.extend(made.unfollowed.iter().map(|side| {
+        let on = if *side == Side::Ours {
+            &names.line
+        } else {
+            &names.target
+        };
+        let message = format!(
+            "Too many files left their places on {on} for Opalro to match them by their \
+             contents, so files that moved there without a note were not followed."
+        );
+        Warning::new(warning::MOVES_NOT_FOLLOWED, message)
+    }));
     let done = to.switch(repo, lock, earlier, asked, made.save, warnings)?;
     let result = Combined::Made {
         starts: made.starts,
@@ -703,6 +770,7 @@ struct MadeSave {
     starts: Vec<Id>,
     merged_files: Vec<String>,
     timed_out: Vec<String>,
+    unfollowed: Vec<Side>,
 }
 
 /// Merges `with` into `from` and stores the combined save, made on `line`. Everything is built in
@@ -721,6 +789,7 @@ fn make_save(
     let mut made = Made {
         max_held: bounds.max_held,
         deadline: bounds.deadline,
+        max_left_bytes: bounds.max_left_bytes,
         ..Made::default()
     };
     let starts = match common_starts(repo, &[from], &[with])? {
@@ -767,6 +836,8 @@ fn make_save(
         merged.root,
         made.max_left_bytes,
     )
+    .ok()
+    .flatten()
     .unwrap_or_default();
     let most = usize::try_from(MAX_MOVE_NOTES).unwrap_or(usize::MAX);
     first_that_fit(&mut move_notes, most, MAX_NOTED_BYTES);
@@ -800,6 +871,7 @@ fn make_save(
         starts,
         merged_files: merged.merged_files,
         timed_out: merged.timed_out,
+        unfollowed: merged.unfollowed,
     })
 }
 

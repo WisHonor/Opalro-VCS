@@ -74,6 +74,8 @@ pub const SWITCH_DROPPED: &str = "switch_dropped";
 pub const DIFF_TIMED_OUT: &str = "diff_timed_out";
 /// A combine compared a file's versions roughly, its comparison out of time.
 pub const MERGE_TIMED_OUT: &str = "merge_timed_out";
+/// A combine followed no moves by contents on a side that too many files left.
+pub const MOVES_NOT_FOLLOWED: &str = "moves_not_followed";
 /// The project's `opalro.toml` couldn't be used at all, so Opalro's own values apply.
 pub const RULES_FILE_SKIPPED: &str = "rules_file_skipped";
 /// Parts of `opalro.toml` couldn't be used and were passed over; the rest of it counts.
