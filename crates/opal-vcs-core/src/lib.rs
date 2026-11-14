@@ -26,6 +26,7 @@ pub mod lines;
 pub mod link;
 pub mod listing;
 pub mod merge;
+pub(crate) mod moves;
 pub mod names;
 pub mod otherlines;
 pub mod pack;

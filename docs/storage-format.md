@@ -108,6 +108,7 @@ person:
 
 - Parents must be distinct.
 - **Limits:** person name and email at most 4 KiB each; move-note paths (`from`, `to`) at most 4 KiB each; extra-field keys at most 256 bytes; signature at most 64 KiB. Move notes must be strictly sorted by `to` and extra-field keys strictly sorted (so no duplicates); readers reject anything else.
+- A save notes a move from A to B, compared with its first parent, when A held a file there and holds nothing now, B holds a file now and held nothing there, the two files have the same non-empty contents, and no other file that left and none that arrived has those contents. Saves made for safety copies and shelves note none.
 - **Defined extra fields:** `line` holds the name of the line the save was made on, as UTF-8 (decision 012). `git-commit` holds, as hex, the Git commit an imported save came from; `git-original-message` holds the original bytes of a Git message that couldn't be converted to UTF-8 exactly (decision 019); `git-header` holds the original header of a commit that the standard form below can't rebuild: every byte before the empty line that ends the header (decision 032). Readers keep extra fields they don't understand.
 - **Rebuilding a Git commit** (decision 032). A save imported from Git gives back its commit's exact bytes:
   - With `git-header`: that field's bytes, an LF, then the message bytes.
