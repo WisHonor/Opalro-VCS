@@ -8,7 +8,7 @@ use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Stdio};
 use std::time::{Duration, Instant};
 
-use opal_core::ancestry::only_in;
+use opal_core::ancestry::{MAX_STARTS, Starts, common_starts, only_in};
 use opal_core::diary::{MAX_TAG_MESSAGE_BYTES, Position};
 use opal_core::git::{GitId, HashKind, ObjectType, object_id, rebuild_commit};
 use opal_core::id::Id;
@@ -21,7 +21,7 @@ use opal_core::repo::Repository;
 use opal_core::save::{EXTRA_GIT_COMMIT, EXTRA_GIT_HEADER, MAX_PERSON_FIELD_BYTES};
 use tempfile::TempDir;
 
-use super::{git, git_command, spawn, text};
+use super::{git, git_command, git_with_input, spawn, text};
 
 /// Asserts that the project `opalro import` made in `dir` holds what the Git repository there
 /// holds. Each commit `git rev-list --all` lists has exactly one save, which rebuilds to the
@@ -316,43 +316,14 @@ pub fn assert_matches_git_counting(dir: &Path) -> Counted {
 /// had to be equal, and how many of the walk's came out higher.
 pub fn assert_ancestry_matches_git(dir: &Path) -> (usize, bool, usize) {
     let repo = Repository::open(dir).unwrap();
-    let state = repo.current().unwrap().1.state;
-    let servers = repo.server_lines(&state).unwrap().servers;
-    let mut named: Vec<(String, Id)> = state.lines.iter().map(|(n, t)| (n.clone(), *t)).collect();
-    for (server, own) in &servers {
-        named.extend(own.iter().map(|(n, t)| (format!("{server}/{n}"), *t)));
-    }
-    let tips: Vec<(String, Id, String)> = named
-        .into_iter()
-        .map(|(name, tip)| {
-            let save = repo.store().save(&tip, false).unwrap();
-            let Some(commit) = save.extra.get(EXTRA_GIT_COMMIT) else {
-                panic!("the save of {name} records no Git commit");
-            };
-            let commit = std::str::from_utf8(commit).unwrap().to_owned();
-            (name, tip, commit)
-        })
-        .collect();
-    let n = tips.len();
-    // Round the tips: each with its next neighbour, then with the one after, and so on, so every
-    // tip comes first once before the cap. Two tips at one save tell nothing.
-    let pairs: Vec<(usize, usize)> = (1..n)
-        .flat_map(|step| (0..n).map(move |a| (a, (a + step) % n)))
-        .filter(|&(a, b)| tips[a].1 != tips[b].1)
-        .take(64)
-        .collect();
+    let pairs = tip_pairs(&repo);
     if pairs.is_empty() {
         println!("The ancestry walk has no pairs to compare.");
         return (0, true, 0);
     }
-    let compared: Vec<&str> = (0..n)
-        .filter(|&i| pairs.iter().any(|&(a, b)| a == i || b == i))
-        .map(|i| tips[i].2.as_str())
-        .collect();
-    let exact = !dated_before_a_parent(dir, &compared);
+    let exact = !dated_before_a_parent(dir, &compared(&pairs));
     let (mut walking, mut equal) = (Duration::ZERO, 0);
-    for &(a, b) in &pairs {
-        let ((a_name, a_tip, a_commit), (b_name, b_tip, b_commit)) = (&tips[a], &tips[b]);
+    for ((a_name, a_tip, a_commit), (b_name, b_tip, b_commit)) in &pairs {
         let began = Instant::now();
         let ours = only_in(&repo, *a_tip, &[*b_tip]).unwrap();
         walking += began.elapsed();
@@ -382,6 +353,104 @@ pub fn assert_ancestry_matches_git(dir: &Path) -> (usize, bool, usize) {
         );
     }
     (pairs.len(), exact, pairs.len() - equal)
+}
+
+/// Asserts that `common_starts([a], [b])`, as the Git commits its saves record, is what
+/// `git merge-base --all a b` prints, for the pairs `assert_ancestry_matches_git` takes.
+/// Returns how many pairs it compared.
+pub fn assert_starts_match_git(dir: &Path) -> usize {
+    let repo = Repository::open(dir).unwrap();
+    let pairs = tip_pairs(&repo);
+    let mut refused = Vec::new();
+    for ((a_name, a_tip, a_commit), (b_name, b_tip, b_commit)) in &pairs {
+        let ours = common_starts(&repo, &[*a_tip], &[*b_tip]).unwrap();
+        let out = git_with_input(dir, &["merge-base", "--all", a_commit, b_commit], b"");
+        // Git says no common commit by failing quietly.
+        assert!(
+            out.status.success() || (out.status.code() == Some(1) && out.stdout.is_empty()),
+            "git merge-base failed: {}",
+            text(&out.stderr)
+        );
+        let mut theirs: Vec<String> = text(&out.stdout).lines().map(str::to_owned).collect();
+        theirs.sort();
+        let at = format!("common_starts([{a_name}], [{b_name}])");
+        match ours {
+            Starts::Found(saves) => {
+                let mut ours: Vec<String> = saves.iter().map(|s| commit_of(&repo, *s)).collect();
+                ours.sort();
+                assert_eq!(ours, theirs, "{at}, as against git merge-base --all");
+            }
+            Starts::TooMany(_) if theirs.len() > MAX_STARTS => {}
+            Starts::TooMany(n) => {
+                refused.push(format!("{at}: {n} candidates, Git {}", theirs.len()))
+            }
+        }
+    }
+    if !refused.is_empty() {
+        // Only clocks that ran backwards make extra candidates past the cap.
+        assert!(
+            dated_before_a_parent(dir, &compared(&pairs)),
+            "refused though no commit is dated before a parent: {refused:?}"
+        );
+        println!(
+            "Refused where Git finds {MAX_STARTS} or fewer, as a commit is dated before a \
+             parent: {refused:?}"
+        );
+    }
+    println!(
+        "The common starting points match git merge-base --all on {} pairs of tips.",
+        pairs.len() - refused.len()
+    );
+    pairs.len()
+}
+
+/// A tip's name, its save, and the Git commit that save records.
+type Tip = (String, Id, String);
+
+/// Up to 64 ordered pairs of tips: the lines in name order, then the server lines in name order.
+fn tip_pairs(repo: &Repository) -> Vec<(Tip, Tip)> {
+    let state = repo.current().unwrap().1.state;
+    let servers = repo.server_lines(&state).unwrap().servers;
+    let mut named: Vec<(String, Id)> = state.lines.iter().map(|(n, t)| (n.clone(), *t)).collect();
+    for (server, own) in &servers {
+        named.extend(own.iter().map(|(n, t)| (format!("{server}/{n}"), *t)));
+    }
+    let tips: Vec<Tip> = named
+        .into_iter()
+        .map(|(name, tip)| {
+            let commit = commit_of(repo, tip);
+            (name, tip, commit)
+        })
+        .collect();
+    let n = tips.len();
+    // Round the tips: each with its next neighbour, then with the one after, and so on, so every
+    // tip comes first once before the cap. Two tips at one save tell nothing.
+    (1..n)
+        .flat_map(|step| (0..n).map(move |a| (a, (a + step) % n)))
+        .filter(|&(a, b)| tips[a].1 != tips[b].1)
+        .take(64)
+        .map(|(a, b)| (tips[a].clone(), tips[b].clone()))
+        .collect()
+}
+
+/// The commits the pairs name, each once.
+fn compared(pairs: &[(Tip, Tip)]) -> Vec<&str> {
+    let mut commits: Vec<&str> = pairs
+        .iter()
+        .flat_map(|(a, b)| [a.2.as_str(), b.2.as_str()])
+        .collect();
+    commits.sort_unstable();
+    commits.dedup();
+    commits
+}
+
+/// The Git commit a save records.
+fn commit_of(repo: &Repository, id: Id) -> String {
+    let save = repo.store().save(&id, false).unwrap();
+    let Some(commit) = save.extra.get(EXTRA_GIT_COMMIT) else {
+        panic!("save {id:?} records no Git commit");
+    };
+    std::str::from_utf8(commit).unwrap().to_owned()
 }
 
 /// Whether a commit in the history of `tips` has a committer date earlier than a parent's.

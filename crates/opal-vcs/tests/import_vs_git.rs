@@ -14,8 +14,8 @@ use opal_core::names::holdable_here;
 use opal_core::repo::Repository;
 use opal_core::save::Person;
 use support::{
-    Env, assert_ancestry_matches_git, assert_matches_git, assert_matches_git_counting, copy_dir,
-    git, git_with_input, text, top_folder,
+    Env, assert_ancestry_matches_git, assert_matches_git, assert_matches_git_counting,
+    assert_starts_match_git, copy_dir, git, git_with_input, text, top_folder,
 };
 
 /// Writes `bytes` into the repository as a blob, and returns its ID.
@@ -120,6 +120,7 @@ fn everyday_history_matches_git() {
     // Nine lines and three server lines across the merges: held ones, ones that hold some, and
     // ones parted at a fork.
     assert_eq!(assert_ancestry_matches_git(env.root()), (64, true, 0));
+    assert_eq!(assert_starts_match_git(env.root()), 64);
     // The renaming rule, pinned: `+` becomes `-`, and of names alike but for letter case, the
     // later one in byte order takes a suffix.
     let (repo, state) = env.state();
@@ -152,6 +153,7 @@ fn everyday_history_matches_git() {
         .success();
     assert_eq!(assert_matches_git(detached.path()), 0);
     assert_eq!(assert_ancestry_matches_git(detached.path()), (64, true, 0));
+    assert_eq!(assert_starts_match_git(detached.path()), 64);
 }
 
 #[test]
@@ -247,6 +249,7 @@ fn unusual_commits_match_git() {
     env.import();
     let counted = assert_matches_git_counting(env.root());
     assert_eq!(assert_ancestry_matches_git(env.root()), (0, true, 0));
+    assert_eq!(assert_starts_match_git(env.root()), 0);
     // All but the plain two, the one in no encoding and the one without a newline keep their
     // Git header.
     assert_eq!(counted.headers, 8);
@@ -293,6 +296,7 @@ fn packed_and_loose_objects_match_git() {
     env.import();
     assert_eq!(assert_matches_git(env.root()), 0);
     assert_eq!(assert_ancestry_matches_git(env.root()), (2, true, 0));
+    assert_eq!(assert_starts_match_git(env.root()), 2);
 }
 
 #[test]
@@ -341,6 +345,32 @@ fn a_history_dated_backwards_matches_git() {
     // counts 1): the one count that comes out high.
     let (pairs, exact, higher) = assert_ancestry_matches_git(env.root());
     assert_eq!((pairs, exact, higher), (20, false, 1));
+    assert_eq!(assert_starts_match_git(env.root()), 20);
+}
+
+#[test]
+fn a_criss_cross_matches_git() {
+    let env = Env::new();
+    env.commit("a.txt", "a\n", "Base");
+    env.git(&["branch", "left"]);
+    env.git(&["branch", "right"]);
+    env.git(&["checkout", "-q", "left"]);
+    env.commit("l.txt", "l\n", "Left");
+    env.git(&["checkout", "-q", "right"]);
+    env.commit("r.txt", "r\n", "Right");
+    // Each takes the other's first commit, then goes on.
+    env.git(&["merge", "-q", "--no-edit", "left"]);
+    env.git(&["checkout", "-q", "left"]);
+    env.git(&["merge", "-q", "--no-edit", "right~1"]);
+    env.commit("l.txt", "l2\n", "Left again");
+    env.git(&["checkout", "-q", "right"]);
+    env.commit("r.txt", "r2\n", "Right again");
+    let bases = env.git(&["merge-base", "--all", "left", "right"]);
+    assert_eq!(bases.lines().count(), 2, "{bases}");
+    env.import();
+    assert_eq!(assert_matches_git(env.root()), 0);
+    assert_eq!(assert_ancestry_matches_git(env.root()), (6, true, 0));
+    assert_eq!(assert_starts_match_git(env.root()), 6);
 }
 
 #[test]
@@ -384,6 +414,7 @@ fn sha256_repositories_match_git() {
     env.import();
     assert_eq!(assert_matches_git(env.root()), 0);
     assert_eq!(assert_ancestry_matches_git(env.root()), (6, true, 0));
+    assert_eq!(assert_starts_match_git(env.root()), 6);
 }
 
 #[test]
@@ -420,6 +451,7 @@ fn optional_git_files_are_ignored() {
     env.import();
     assert_eq!(assert_matches_git(env.root()), 0);
     assert_eq!(assert_ancestry_matches_git(env.root()), (2, true, 0));
+    assert_eq!(assert_starts_match_git(env.root()), 2);
 }
 
 #[test]
@@ -449,6 +481,7 @@ fn windows_cant_hold_some_names_and_saving_keeps_them() {
     env.import();
     assert_eq!(assert_matches_git(env.root()), 0);
     assert_eq!(assert_ancestry_matches_git(env.root()), (0, true, 0));
+    assert_eq!(assert_starts_match_git(env.root()), 0);
 
     // What Git would write out here: each name this system can hold. Where letter case doesn't
     // count, the second of the twins is written over the first.
@@ -560,6 +593,7 @@ fn a_real_repository_matches_git() {
     );
     // A clone's server lines give the walk tips enough, without a branch of its own beside main.
     let (pairs, ..) = assert_ancestry_matches_git(work.path());
+    assert_eq!(assert_starts_match_git(work.path()), pairs);
     assert!(
         pairs > 0,
         "no pairs of tips to compare the ancestry walk on"
