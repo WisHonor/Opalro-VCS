@@ -4,6 +4,7 @@ use opal_core::diary::Position;
 use opal_core::save::Save;
 use opal_core::switch::GotoOutcome;
 use opal_core::text::{escape, thousands};
+use opal_core::writeout::Applied;
 
 use crate::output;
 use crate::style::{self, Role};
@@ -51,28 +52,14 @@ pub fn switched(
             Position::AtSave(_) => format!("Already at save {at}.\n"),
         };
     }
-    let mut text = match &done.position {
+    let text = match &done.position {
         Position::OnLine(line) => {
             let line = s.paint(Role::Line, &escape(line, false));
             format!("{switched} to line {line} at save {at}.\n")
         }
         Position::AtSave(_) => format!("{switched} to save {at}. You are not on a line.\n"),
     };
-    let (written, removed) = (done.applied.written, done.applied.removed);
-    let mut details = vec![match (written, removed) {
-        (0, 0) => "No file needed changing.".to_owned(),
-        (0, removed) => format!("{} removed.", output::files(removed)),
-        (written, 0) => format!("{} written.", output::files(written)),
-        (written, removed) => format!(
-            "{} written, {} removed.",
-            output::files(written),
-            thousands(removed as u64)
-        ),
-    }];
-    if done.carried > 0 {
-        let carried = output::files(done.carried);
-        details.push(format!("Your unsaved changes in {carried} came along."));
-    }
+    let mut details = written(&done.applied, done.carried);
     if let Position::AtSave(_) = &done.position {
         details.push("Saving here asks for a new line's name.".to_owned());
         match keep {
@@ -94,9 +81,34 @@ pub fn switched(
             None => {}
         }
     }
+    with_details(text, &details)
+}
+
+/// What a switch wrote, as details say it, and the unsaved changes that `carried` came along.
+pub fn written(applied: &Applied, carried: usize) -> Vec<String> {
+    let mut details = vec![match (applied.written, applied.removed) {
+        (0, 0) => "No file needed changing.".to_owned(),
+        (0, removed) => format!("{} removed.", output::files(removed)),
+        (written, 0) => format!("{} written.", output::files(written)),
+        (written, removed) => format!(
+            "{} written, {} removed.",
+            output::files(written),
+            thousands(removed as u64)
+        ),
+    }];
+    if carried > 0 {
+        let carried = output::files(carried);
+        details.push(format!("Your unsaved changes in {carried} came along."));
+    }
+    details
+}
+
+/// `text`, an outcome line, then an empty line and `details`.
+pub fn with_details(mut text: String, details: &[String]) -> String {
+    let s = style::out();
     text.push('\n');
     for detail in details {
-        text += &s.detail(None, &detail);
+        text += &s.detail(None, detail);
         text.push('\n');
     }
     text

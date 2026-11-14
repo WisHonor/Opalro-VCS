@@ -132,6 +132,16 @@ fn every_document() -> Vec<(&'static str, usize, Value)> {
     ));
     docs.push(("`opalro goto --json`", 0, run(&["goto", &first], 0)));
     run(&["goto", "main"], 0);
+    run(&["line", "new", "side"], 0);
+    env.overwrite("b.txt", "b\n");
+    run(&["save", "B"], 0);
+    run(&["goto", "main"], 0);
+    env.overwrite("a.txt", "main\n");
+    run(&["save", "Main"], 0);
+    let combine = "`opalro combine --json`";
+    docs.push((combine, 0, run(&["combine", "side"], 0)));
+    docs.push((combine, 0, run(&["combine", "side"], 0)));
+    docs.push(("5. Errors", 0, run(&["combine", "nowhere"], 1)));
     env.overwrite("a.txt", "three\n");
     docs.push(("`opalro discard --json`", 0, run(&["discard"], 0)));
     env.overwrite("a.txt", "four\n");

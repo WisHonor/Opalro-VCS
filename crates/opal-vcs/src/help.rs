@@ -31,6 +31,7 @@ pub const GROUPS: [(&str, &[Row]); 3] = [
         &[
             ("line", "List, make, rename and delete lines", None),
             ("tag", "Name a save, like v1.0, or list your tags", None),
+            ("combine", "Bring another line's work into yours", None),
             ("shelf", "Set your unsaved changes aside", Some("unshelf")),
             (
                 "discard",
@@ -163,6 +164,16 @@ pub fn examples(command: &str) -> &'static [(&'static str, &'static str)] {
             (
                 "opalro tag --delete v1.0",
                 "Delete a tag; undo brings it back",
+            ),
+        ],
+        "combine" => &[
+            (
+                "opalro combine wall-run",
+                "Bring line wall-run's work into the line you're on",
+            ),
+            (
+                "opalro combine wall-run \"Wall running is in\"",
+                "The same, with your own message",
             ),
         ],
         "shelf" => &[

@@ -382,6 +382,7 @@ undo      Take back your last step   (and: redo)
 Lines, shelves and details
 line      List, make, rename and delete lines
 tag       Name a save, like v1.0, or list your tags
+combine   Bring another line's work into yours
 shelf     Set your unsaved changes aside   (and: unshelf)
 discard   Throw away your unsaved changes; undo brings them back
 show      Show everything about one save
@@ -708,6 +709,39 @@ opalro tag --delete v1.0 --yes
 ```
 
 See [Lines](#8-lines) for more on tags.
+
+### `opalro combine`
+
+Bring another line's work into the line you're on. Start a line, save something on it, then go back to `main` and save something there too:
+
+```sh
+opalro line new wall-run
+echo "run along walls" > wall.txt
+opalro save "Try wall running"
+opalro goto main
+echo "buy milk, eggs and bread" > todo.txt
+opalro save "Bread too"
+opalro combine wall-run
+```
+
+```text
+Combined wall-run into main: save pmzt "Combine wall-run into main".
+
+    1 file written.
+
+Changed your mind? opalro undo
+```
+
+Both lines had work the other lacked, so Opalro made a **combined save**: one that holds both, with two saves before it, `main`'s newest and `wall-run`'s. Give it your own message after the line's name, as in `opalro combine wall-run "Wall running is in"`; otherwise Opalro writes `Combine wall-run into main`.
+
+The target is anything `opalro goto` takes: a line, a server line, a tag, or a save by its ID. Two other things can happen:
+
+- **The line only moves forward.** If `main` had nothing `wall-run` lacks (no save since `wall-run` started), `wall-run`'s newest save already holds everything, so `main` moves forward to it and no save is made: `Moved main forward to wall-run: save …`.
+- **Nothing to combine.** If `main` already has everything `wall-run` has, Opalro says so and changes nothing.
+
+When both lines changed a file, Opalro merges the two versions line by line, and says how many files it merged. Where both changed the same lines, or a file that isn't text, Opalro can't keep both yet: it stops, names each file and what happened to it on the two lines, and changes nothing. Make the two lines agree on those files, save, and combine again.
+
+Your unsaved changes come along, as with `opalro goto`; where the combine would change a file you have unsaved work in, it stops and changes nothing. `opalro undo` takes a combine back: the line goes back to where it was, and your files with it. See [Lines](#8-lines) for combining and then deleting a line.
 
 ### `opalro shelf` and `opalro unshelf`
 
@@ -1122,7 +1156,27 @@ Deleting a line keeps its saves: `opalro undo` brings the line back for as long 
 
 **Tags.** A tag names one save for good, such as the build you shipped: `opalro tag v1.0 "First playable"` tags the save you're at, and `opalro tag` lists the tags. A line moves on with each save; a tag stays put until you move it. Tag names follow the same rules as line names, and a tag can't share a line's name. Naming a tag that is at another save moves it there, and deleting one (`opalro tag --delete <name>`) takes it away; Opalro asks before either (`--yes` answers for you), and `opalro undo` takes each back. Tags a Git import brought in are listed too, with their messages. `opalro history` ends a save's row with `[tag v1.0]` for each tag at it, and `opalro show` names them in a `Tags` row. As long as a tag holds a save, `opalro tidy` keeps it and the saves before it.
 
-**Not yet:** two lines can't be combined into one.
+**Combining a line, then deleting it.** When the work on a line is done, go to the line it should join, combine it in, and delete the line you no longer need. As `main` now holds its saves, the delete asks nothing:
+
+```sh
+opalro line new climbing
+echo "climb walls" > climb.txt
+opalro save "Climb walls"
+opalro goto main
+opalro combine climbing
+opalro line delete climbing
+```
+
+```text
+Moved main forward to climbing: save qwnt "Climb walls".
+
+    main had nothing climbing lacks, so no combined save was needed.
+    1 file written.
+
+Changed your mind? opalro undo
+```
+
+Here `main` had no save of its own since `climbing` started, so it only moved forward. Had it moved on too, `opalro combine` would have made a combined save, as in [`opalro combine`](#opalro-combine). `opalro history` on `main` follows the first save before each save, so after a combined save it lists that save, not the other line's saves one by one.
 
 ## 9. Coming from Git
 
@@ -1208,7 +1262,8 @@ hint: in Opalro, commit is save; it takes new files too: opalro save "message"
 | `git reset` | `opalro undo`, `opalro discard` or `opalro goto <save>` | explained |
 | `git branch <name>`; `git checkout -b`, `git switch -c` with a starting point | `opalro goto <save>`, then `opalro line new <name>` | explained |
 | `git revert` | `opalro reverse`, in v0.3; until then `opalro undo` | explained |
-| `git merge`, `blame` | coming later in v0.2 | explained |
+| `git merge <target>` | `opalro combine <target>` | runs; `merge --abort`, `--no-ff` and `--squash` are explained, and other options refused |
+| `git blame` | not yet; until then `opalro history` | explained |
 | `git rebase`, `cherry-pick` | not yet: moving saves between lines comes after v0.2; until then `opalro save --amend` or `opalro undo` | explained |
 | `git clone`, `fetch`, `pull`, `push`, `remote` | coming in v0.3 | explained |
 | `git clean` | none: Opalro never deletes files it doesn't keep | explained |
@@ -1388,7 +1443,7 @@ The `--json` reference, published on https://opalro.com, describes every documen
 ## 13. What v0.1 doesn't do yet
 
 - **No server, no sharing.** v0.1 is one person on one computer. Opalro can't yet copy a project from a server, or send and get changes (syncing is planned for v0.3).
-- **No merging.** Two lines can't be combined into one yet, and Opalro can't yet show who changed each line of a file (both v0.2).
+- **No keeping conflicts.** `opalro combine` stops when both lines changed the same place in a file, and Opalro can't yet show who changed each line of a file (both v0.2).
 - **No locking.** Rules can mark files lockable, but nothing locks them until syncing arrives (v0.3).
 - **No repair.** `opalro verify` finds damage but can't fix it.
 - **No export to Git yet,** and an import happens once: bringing in Git's newer commits later comes after v0.1.

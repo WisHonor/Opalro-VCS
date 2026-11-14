@@ -173,6 +173,11 @@ fn without_a_terminal_opals_own_words_are_plain() {
     ] {
         run(args);
     }
+    run(&["line", "new", "side"]);
+    std::fs::write(env.root().join("b.txt"), "b\n").unwrap();
+    run(&["save", "on side"]);
+    run(&["goto", "main"]);
+    run(&["combine", "side"]);
     std::fs::write(env.root().join("a.txt"), "abcd\n").unwrap();
     run(&["shelf", "wip"]);
     run(&["shelf", "--list"]);
@@ -1175,8 +1180,14 @@ fn changed_your_mind_shows_only_on_a_terminal() {
     put(&env, "a.txt", "mine\n");
     run_at(&env, None, &["shelf"]);
     assert!(on_terminal(&["unshelf"]).ends_with(offered));
-    // Nothing thrown away is nothing to change your mind about; other commands don't offer it.
     run_at(&env, None, &["discard"]);
+    run_at(&env, None, &["line", "new", "side"]);
+    put(&env, "side.txt", "side\n");
+    run_at(&env, None, &["save", "On side"]);
+    run_at(&env, None, &["goto", "main"]);
+    assert!(on_terminal(&["combine", "side"]).ends_with(offered));
+    // Nothing thrown away is nothing to change your mind about; other commands don't offer it.
+    assert_eq!(on_terminal(&["combine", "side"]), "");
     assert_eq!(on_terminal(&["discard"]), "");
     put(&env, "a.txt", "third\n");
     for args in [&["save", "Third"][..], &["undo"], &["redo"], &["tidy"]] {

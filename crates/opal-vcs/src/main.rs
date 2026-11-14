@@ -1,5 +1,6 @@
 //! The `opalro` command-line tool.
 
+mod combine_output;
 mod git_words;
 mod goto_output;
 mod help;
@@ -25,6 +26,7 @@ use std::process::ExitCode;
 use clap::{CommandFactory, Parser, Subcommand};
 use git_words::Typed;
 use opal_core::changes::{Lines, save_changes, unsaved_changes};
+use opal_core::combine::{self, CombineError, Combined, Named};
 use opal_core::config::{
     ConfigError, Identity, git_excludes_file, git_import_settings, ignored_identity_note,
     ignored_project_identity, load_identity, now_person, undo_window_days,
@@ -147,6 +149,13 @@ enum Command {
     Goto {
         /// The line or save to go to.
         target: String,
+    },
+    /// Bring another line's work into the line you're on.
+    Combine {
+        /// What to combine in: a line, line@server, tag, change ID or fingerprint.
+        target: String,
+        /// The combined save's message; Opalro writes one if you leave it out.
+        message: Option<String>,
     },
     /// Throw away your unsaved changes: in these files and folders, or everywhere. A safety copy
     /// of each changed or new file is kept.
@@ -314,6 +323,16 @@ impl From<ResolveError> for Failure {
 
 impl From<SwitchError> for Failure {
     fn from(e: SwitchError) -> Failure {
+        Failure {
+            hint: e.hint(),
+            message: e.to_string(),
+            printed: false,
+        }
+    }
+}
+
+impl From<CombineError> for Failure {
+    fn from(e: CombineError) -> Failure {
         Failure {
             hint: e.hint(),
             message: e.to_string(),
@@ -881,8 +900,8 @@ fn save(json: bool, args: SaveArgs, opened: &mut Option<Repository>) -> Result<(
         yes,
         amend,
     } = args;
-    // A blank message is none: a save needs one, and an amend then keeps the one it has.
-    let message = message.filter(|m| !m.trim().is_empty());
+    // A save needs a message, and an amend without one keeps the one it has.
+    let message = given_message(message);
     // Before the project is looked for, so it is said first.
     if message.is_none() && !amend {
         return Err(SaveError::NeedsMessage.into());
@@ -2037,6 +2056,123 @@ fn keep_saving(repo: &Repository, line: &str) -> Option<goto_output::KeepSaving>
     }
 }
 
+/// A message as given: one that is empty or only spaces is none.
+fn given_message(message: Option<String>) -> Option<String> {
+    message.filter(|m| !m.trim().is_empty())
+}
+
+fn combine_command(
+    json: bool,
+    text: &str,
+    message: Option<String>,
+    opened: &mut Option<Repository>,
+) -> Result<(), Failure> {
+    let message = given_message(message);
+    let repo = opened.insert(with_users_key(Repository::discover(
+        &std::env::current_dir()?,
+    )?));
+    let who = now_person(&load_identity(Some(repo.root()))?);
+    let git_excludes = git_excludes_file(repo.root())?;
+    let target = resolve_target(repo, text)?;
+    let mut warnings = Vec::new();
+    let (named, by_id) = combine_named(repo, &target, text, &mut warnings)?;
+    let done = {
+        let _working = progress::Working::start("Combining");
+        combine::combine(
+            repo,
+            &target,
+            &named,
+            message.as_deref(),
+            &who,
+            git_excludes.as_deref(),
+            &mut waiting,
+        )
+    }?;
+    warnings.extend(done.applied.warnings.iter().cloned());
+    // The combine has happened, so a save that can't be read back only goes unnamed.
+    let save = repo
+        .store()
+        .save(&done.save, repo.signatures_allowed())
+        .ok();
+    let short = match &save {
+        Some(save) => short_or_whole(repo, &done.save, &save.change_id, &mut warnings),
+        None => done.save.short_hex(),
+    };
+    warnings.extend(repo.store().warnings());
+    let text = if json {
+        let (result, starts, merged_files) = match &done.result {
+            Combined::Nothing => ("nothing", vec![], vec![]),
+            Combined::Forward => ("forward", vec![], vec![]),
+            Combined::Made {
+                starts,
+                merged_files,
+            } => (
+                "combined",
+                starts.iter().map(Id::to_hex).collect(),
+                merged_files.clone(),
+            ),
+        };
+        let document = json!({
+            "opalro_json": OPALRO_JSON,
+            "result": result,
+            "line": done.line,
+            "save": save.map(|s| output::save_json(&done.save, &s, &short)),
+            "with": done.with.to_hex(),
+            "starts": starts,
+            "merged_files": merged_files,
+            "written": done.applied.written,
+            "removed": done.applied.removed,
+            "not_written": done.applied.not_written,
+            "placeholders": done.applied.placeholders,
+            "safety_copies": done.safety_copies,
+            "warnings": output::warnings_json(&warnings),
+        });
+        format!("{document}\n")
+    } else {
+        let given = message.is_some();
+        combine_output::combined(&done, &named.shown, by_id, &short, save.as_ref(), given)
+    };
+    output::print_done(&text, &warnings)?;
+    if !json && done.result != Combined::Nothing {
+        style::changed_your_mind();
+    }
+    Ok(())
+}
+
+/// How a combine names its target: as typed for a line, a server line or a tag (a tag's name as
+/// tags show it), and by the save's short change ID otherwise; and whether it is named by an ID.
+fn combine_named(
+    repo: &Repository,
+    target: &lines::Target,
+    text: &str,
+    warnings: &mut Vec<Warning>,
+) -> Result<(Named, bool), Failure> {
+    let as_typed = |shown| Named {
+        raw: text.to_owned(),
+        shown,
+    };
+    let id = match target {
+        lines::Target::Line(_) | lines::Target::ServerLine { .. } => {
+            return Ok((as_typed(escape(text, false)), false));
+        }
+        lines::Target::Save(id) => id,
+    };
+    // Nothing the resolver gives says a tag was typed, so the tags are asked.
+    let (_, entry) = repo.current()?;
+    if repo.tag_list(&entry.state)?.tags.contains_key(text) {
+        return Ok((as_typed(tags::shown_name(text)), false));
+    }
+    let save = repo.store().save(id, repo.signatures_allowed())?;
+    let short = short_or_whole(repo, id, &save.change_id, warnings);
+    Ok((
+        Named {
+            raw: short.clone(),
+            shown: short,
+        },
+        true,
+    ))
+}
+
 fn discard_command(
     json: bool,
     given: &[PathBuf],
@@ -2869,6 +3005,9 @@ fn main() -> ExitCode {
         Command::History => history(cli.json, &mut opened),
         Command::Show { save } => show(cli.json, save.as_deref(), &mut opened),
         Command::Goto { target } => goto_command(cli.json, &target, &mut opened),
+        Command::Combine { target, message } => {
+            combine_command(cli.json, &target, message, &mut opened)
+        }
         Command::Discard { paths } => discard_command(cli.json, &paths, &mut opened),
         Command::Undo {
             list: true, all, ..
