@@ -599,6 +599,15 @@ fn a_real_repository_matches_git() {
         pairs > 0,
         "no pairs of tips to compare the ancestry walk on"
     );
+    // A change ID no save has reads every save the lines and tags reach, through every parent.
+    let repo = Repository::open(work.path()).unwrap();
+    let began = Instant::now();
+    let missed = opal_core::history::resolve(&repo, "zzzzzzzzzzzzzzzz");
+    assert!(missed.is_err());
+    println!(
+        "A change ID no save has took {:.2} s to look for.",
+        began.elapsed().as_secs_f64()
+    );
 }
 
 /// The most memory this process has held, as Linux reports it (VmHWM). Other systems need a

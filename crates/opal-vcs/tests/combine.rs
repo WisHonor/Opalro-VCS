@@ -217,6 +217,26 @@ fn combine_takes_a_tag_and_an_id() {
 }
 
 #[test]
+fn show_finds_a_save_a_deleted_line_left_behind_a_combine() {
+    let env = project();
+    apart(
+        &env,
+        "one\n2\n3\n4\n5\n6\n7\n8\n",
+        "1\n2\n3\n4\n5\n6\n7\neight\n",
+    );
+    let side = tip(&env, "side").to_hex();
+    let short = json(&env, &["show", &side[..12]], 0)["save"]["change_id_short"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    run(&env, &["combine", "side"], 0);
+    run(&env, &["line", "delete", "side", "--yes"], 0);
+    // Only the combined save's second parent reaches it now.
+    let doc = json(&env, &["show", &short], 0);
+    assert_eq!(doc["save"]["id"], side);
+}
+
+#[test]
 fn unsaved_work_in_the_way_names_combine_in_the_hint() {
     let env = project();
     apart(
