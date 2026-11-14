@@ -429,18 +429,7 @@ impl Walk<'_> {
                 detail: "a folder in it would hold more than 1,000,000 entries".to_owned(),
             });
         }
-        let names: Vec<&str> = folder.entries.iter().map(|e| e.name.as_str()).collect();
-        let held = |l: &Listing, a: &str, b: &str| l.get(a).is_some() && l.get(b).is_some();
-        for problem in folder_problems(&names) {
-            let (PortabilityProblem::CaseCollision { a, b }
-            | PortabilityProblem::NormalizationCollision { a, b }) = &problem
-            else {
-                continue;
-            };
-            // A pair one side already held, as an imported history can, is left as it is.
-            if held(&folder.ours, a, b) || held(&folder.theirs, a, b) {
-                continue;
-            }
+        if let Some(problem) = unheld_clash(&folder) {
             return Err(CombineError::NamesClash {
                 folder: folder.path,
                 problem,
@@ -452,6 +441,57 @@ impl Walk<'_> {
         self.made.listings.insert(id, listing);
         Ok((id, empty))
     }
+}
+
+fn is_clash(p: &PortabilityProblem) -> bool {
+    matches!(
+        p,
+        PortabilityProblem::CaseCollision { .. }
+            | PortabilityProblem::NormalizationCollision { .. }
+    )
+}
+
+/// A pair of alike names in a merged folder that neither ours' folder nor theirs' holds both of;
+/// a pair one side already held, as an imported history can, is left as it is. Every merged name
+/// is in ours' folder or theirs', so a group of alike names has such a pair exactly when one name
+/// is only in ours' and another only in theirs'.
+fn unheld_clash(folder: &Folder) -> Option<PortabilityProblem> {
+    let names: Vec<&str> = folder.entries.iter().map(|e| e.name.as_str()).collect();
+    // Each name alike another, with its group's first name. A pair names an earlier name first,
+    // so that one's group is known by then.
+    let mut group: HashMap<String, String> = HashMap::new();
+    for p in folder_problems(&names) {
+        let (PortabilityProblem::CaseCollision { a, b }
+        | PortabilityProblem::NormalizationCollision { a, b }) = p
+        else {
+            continue;
+        };
+        let first = group.get(&a).cloned().unwrap_or_else(|| a.clone());
+        group.insert(a, first.clone());
+        group.insert(b, first);
+    }
+    // Per group, the first name only ours' folder holds and the first only theirs' does.
+    let mut only: HashMap<&str, (Option<&str>, Option<&str>)> = HashMap::new();
+    for &name in &names {
+        let Some(first) = group.get(name) else {
+            continue;
+        };
+        let (o, t) = (
+            folder.ours.get(name).is_some(),
+            folder.theirs.get(name).is_some(),
+        );
+        let seen = only.entry(first.as_str()).or_default();
+        if o && !t {
+            seen.0.get_or_insert(name);
+        }
+        if t && !o {
+            seen.1.get_or_insert(name);
+        }
+        if let (Some(a), Some(b)) = *seen {
+            return folder_problems(&[a, b]).into_iter().find(is_clash);
+        }
+    }
+    None
 }
 
 /// The folder a name both sides changed is merged as, if it is one: two folders, or a folder

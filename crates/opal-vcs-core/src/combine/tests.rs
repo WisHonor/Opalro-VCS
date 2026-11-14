@@ -8,8 +8,9 @@ use proptest::test_runner::{Config, TestRunner};
 use super::tree::{MAX_HELD_TEXT, Made, Merged, merge_trees};
 use super::*;
 use crate::changes::DEADLINE;
-use crate::id::Id;
+use crate::id::{Flavor, Id, hash_record};
 use crate::kept::overlay;
+use crate::link::ProjectLink;
 use crate::listing::{Entry, EntryKind, Listing};
 use crate::names::PortabilityProblem;
 use crate::pack::{ObjectKind, PackSet};
@@ -27,6 +28,12 @@ enum V {
     File(Vec<u8>, bool),
     Link(String),
     Folder,
+    /// A Git submodule's link to a commit of 20 bytes all `n`.
+    Project(u8),
+}
+
+fn project_link(n: u8) -> ProjectLink {
+    ProjectLink::submodule(&[n; 20])
 }
 
 fn f(text: &str) -> V {
@@ -105,6 +112,11 @@ impl Fixture {
                     target.len() as u64,
                 ),
                 V::Folder => (EntryKind::Folder, Id([0; 32]), 0),
+                V::Project(n) => {
+                    let encoded = project_link(*n).encode();
+                    let id = packs.add_record(ObjectKind::ProjectLink, &encoded).unwrap();
+                    (EntryKind::ProjectLink, id, 0)
+                }
             };
             changes.insert(path.clone(), Some(put));
         }
@@ -168,6 +180,14 @@ impl Fixture {
                     EntryKind::Symlink => {
                         store.copy_content(&e.id, &mut bytes).unwrap();
                         V::Link(String::from_utf8(bytes).unwrap())
+                    }
+                    EntryKind::ProjectLink => {
+                        let n = (0..=u8::MAX)
+                            .find(|&n| {
+                                hash_record(Flavor::ProjectLink, &project_link(n).encode()) == e.id
+                            })
+                            .unwrap();
+                        V::Project(n)
                     }
                     kind => {
                         store.copy_content(&e.id, &mut bytes).unwrap();
@@ -282,16 +302,39 @@ fn a_folder_the_same_on_two_sides_is_not_read() {
     o.insert("b.txt".into(), f("b2"));
     let mut t = s.clone();
     t.insert("a.txt".into(), f("a2"));
-    let ids = fx.three(&s, &o, &t);
-    let before = counted::listings();
-    let m = fx.merge(ids).unwrap();
-    let read = counted::listings() - before;
-    assert!(read <= 6, "{read} listings read");
-    assert!(m.conflicts.is_empty());
-    let got = fx.read(m.root);
+    // The three top listings, nothing in `big`.
+    let got = merged_reading(&mut fx, &s, &o, &t, 3);
     assert_eq!(got["a.txt"], f("a2"));
     assert_eq!(got["b.txt"], f("b2"));
     assert_eq!(got["big/0999/f"], f("f"));
+
+    // Equal on ours and the start only: theirs' `big` is taken whole, unread.
+    let mut t = s.clone();
+    t.insert("big/0500/f".into(), f("t"));
+    let got = merged_reading(&mut fx, &s, &o, &t, 3);
+    assert_eq!(got["big/0500/f"], f("t"));
+
+    // Changed inside on both sides: the top and `big` are read, three versions each; `big/0001`
+    // and `big/0500` changed on one side each, so they are taken whole.
+    let mut o = s.clone();
+    o.insert("big/0001/f".into(), f("o"));
+    let got = merged_reading(&mut fx, &s, &o, &t, 6);
+    assert_eq!(got["big/0001/f"], f("o"));
+    assert_eq!(got["big/0500/f"], f("t"));
+}
+
+/// The merge of three trees, which must read `want` listings from the store, or one more.
+fn merged_reading(fx: &mut Fixture, s: &Tree, o: &Tree, t: &Tree, want: usize) -> Tree {
+    let ids = fx.three(s, o, t);
+    let before = counted::listings();
+    let m = fx.merge(ids).unwrap();
+    let read = counted::listings() - before;
+    assert!(
+        (want..=want + 1).contains(&read),
+        "{read} listings read, not {want}"
+    );
+    assert!(m.conflicts.is_empty());
+    fx.read(m.root)
 }
 
 #[test]
@@ -529,11 +572,16 @@ fn a_later_merge_reads_what_an_earlier_one_made() {
         store, &mut packs, &mut made, true, s, o, t, &rules, DEADLINE,
     )
     .unwrap();
-    // The made-up start against ours with one more line, and theirs with another.
+    // The made text is in no stored pack: only `made` has it.
+    let made_text = made.listings[&inner.root].get("t").unwrap().id;
+    assert!(made.texts.contains_key(&made_text));
+    let stored = fx.repo.store().copy_content(&made_text, &mut Vec::new());
+    assert!(stored.is_err());
+    // Both sides change the made-up start's text, so the merge reads it from `made`.
     let later = fx.three(
         &tree(&[]),
         &tree(&[("t", f("A\nb\nc\nd\nE\nours\n"))]),
-        &tree(&[("t", f("A\nb\nc\nd\nE\n")), ("u", f("u"))]),
+        &tree(&[("t", f("theirs\nA\nb\nc\nd\nE\n")), ("u", f("u"))]),
     );
     let store = fx.repo.store();
     let m = merge_trees(
@@ -541,10 +589,11 @@ fn a_later_merge_reads_what_an_earlier_one_made() {
     )
     .unwrap();
     assert!(m.conflicts.is_empty(), "{:?}", m.conflicts);
+    assert_eq!(m.merged_files, ["t"]);
     fx.repo.store_packs(&fx.lock, packs).unwrap();
     assert_eq!(
         fx.read(m.root),
-        tree(&[("t", f("A\nb\nc\nd\nE\nours\n")), ("u", f("u"))])
+        tree(&[("t", f("theirs\nA\nb\nc\nd\nE\nours\n")), ("u", f("u"))])
     );
 }
 
@@ -640,6 +689,70 @@ fn a_clashing_pair_one_side_already_held_is_kept() {
     assert_eq!(
         got,
         tree(&[("a", f("a")), ("A", f("A")), ("b", f("b2")), ("c", f("c"))])
+    );
+}
+
+/// The two names a `NamesClash` names.
+fn clashing(err: &CombineError) -> BTreeSet<String> {
+    let CombineError::NamesClash { problem, .. } = err else {
+        panic!("{err:?}");
+    };
+    let (PortabilityProblem::CaseCollision { a, b }
+    | PortabilityProblem::NormalizationCollision { a, b }) = problem
+    else {
+        panic!("{problem:?}");
+    };
+    [a.clone(), b.clone()].into()
+}
+
+#[test]
+fn three_names_alike_are_checked_pair_by_pair() {
+    let mut fx = Fixture::new();
+    // Each side holds `README` and one new name: the new names are a pair neither side held.
+    let ids = fx.three(
+        &tree(&[("README", f("r"))]),
+        &tree(&[("README", f("r")), ("Readme", f("o"))]),
+        &tree(&[("README", f("r")), ("readme", f("t"))]),
+    );
+    let err = fx.merge(ids).unwrap_err();
+    assert_eq!(
+        clashing(&err),
+        ["Readme".to_owned(), "readme".to_owned()].into()
+    );
+    // A side that held all three keeps them, whatever the other changed.
+    let all = [("README", f("r")), ("Readme", f("o")), ("readme", f("t"))];
+    let mut t = tree(&all);
+    t.insert("x".into(), f("x"));
+    let got = fx.merged(
+        &tree(&all),
+        &tree(&[("README", f("r2")), ("Readme", f("o"))]),
+        &t,
+    );
+    assert_eq!(
+        got,
+        tree(&[("README", f("r2")), ("Readme", f("o")), ("x", f("x"))])
+    );
+    // Ours brought two of them and holds all three; theirs changed something else.
+    let got = fx.merged(
+        &tree(&[("README", f("r"))]),
+        &tree(&all),
+        &tree(&[("README", f("r")), ("x", f("x"))]),
+    );
+    assert_eq!(got, t);
+}
+
+#[test]
+fn a_names_clash_stops_the_merge_though_files_conflict_too() {
+    let mut fx = Fixture::new();
+    let ids = fx.three(
+        &tree(&[("c", f("1\n"))]),
+        &tree(&[("c", f("2\n")), ("Readme.md", f("o"))]),
+        &tree(&[("c", f("3\n")), ("README.md", f("t"))]),
+    );
+    let err = fx.merge(ids).unwrap_err();
+    assert_eq!(
+        clashing(&err),
+        ["README.md".to_owned(), "Readme.md".to_owned()].into()
     );
 }
 
@@ -823,69 +936,117 @@ fn conflicts_and_merged_files_come_in_path_order() {
 
 #[test]
 fn every_clash_has_its_words() {
+    // A path, a moved-to path and a side's name that need escaping.
     let path = "p\u{1b}[31m";
+    let (ours, theirs) = ("ma\u{7}in", "side");
+    let (o, t) = ("ma\\x07in", "side");
     let c = |clash| Conflict {
         path: path.to_owned(),
         clash,
     };
-    let overlap = |endings_only| Clash::BothChanged(NotMerged::Overlap { endings_only });
+    let both = |why| Clash::BothChanged(why);
     let to = |p: &str| p.to_owned();
     let cases = [
-        (overlap(false), "changed on both lines, in the same place"),
         (
-            overlap(true),
-            "changed on both lines, in the same place; the two differ only in line endings",
+            both(NotMerged::Overlap {
+                endings_only: false,
+            }),
+            "changed on both lines, in the same place".to_owned(),
         ),
         (
-            Clash::BothChanged(NotMerged::TooBig),
-            "changed on both lines, and is over 64 MiB, too big to merge line by line",
+            both(NotMerged::Overlap { endings_only: true }),
+            "changed on both lines, in the same place; the two differ only in line endings"
+                .to_owned(),
         ),
         (
-            Clash::BothChanged(NotMerged::TooManyLines),
-            "changed on both lines, and has over 1,000,000 lines, too many to merge line by line",
+            both(NotMerged::Binary),
+            "changed on both lines, and isn't text, so it can't be merged line by line".to_owned(),
         ),
         (
-            Clash::BothChanged(NotMerged::NoMarkers),
-            "changed on both lines, and opalro.toml says conflict-markers = false for it",
+            both(NotMerged::TooBig),
+            "changed on both lines, and is over 64 MiB, too big to merge line by line".to_owned(),
+        ),
+        (
+            both(NotMerged::TooManyLines),
+            "changed on both lines, and has over 1,000,000 lines, too many to merge line by line"
+                .to_owned(),
+        ),
+        (
+            both(NotMerged::NoMarkers),
+            "changed on both lines, and opalro.toml says conflict-markers = false for it"
+                .to_owned(),
+        ),
+        (
+            both(NotMerged::NotFiles),
+            "changed on both lines, and only files are merged line by line".to_owned(),
         ),
         (
             Clash::ChangedRemoved {
                 removed_on: Side::Theirs,
             },
-            "changed on main, removed on side",
+            format!("changed on {o}, removed on {t}"),
         ),
-        (Clash::BothAdded, "added on both lines, differently"),
+        (
+            Clash::ChangedRemoved {
+                removed_on: Side::Ours,
+            },
+            format!("changed on {t}, removed on {o}"),
+        ),
+        (
+            Clash::BothAdded,
+            "added on both lines, differently".to_owned(),
+        ),
+        (
+            Clash::FileAndFolder {
+                folder_on: Side::Theirs,
+            },
+            format!("a file on {o}, a folder on {t}"),
+        ),
         (
             Clash::FileAndFolder {
                 folder_on: Side::Ours,
             },
-            "a file on side, a folder on main",
+            format!("a file on {t}, a folder on {o}"),
         ),
         (
             Clash::MovedApart {
                 ours_to: to("x\u{7}"),
                 theirs_to: to("y"),
             },
-            "moved to x\\x07 on main, and to y on side",
+            format!("moved to x\\x07 on {o}, and to y on {t}"),
+        ),
+        (
+            Clash::MovedRemoved {
+                moved_on: Side::Ours,
+                to: to("x\u{7}"),
+            },
+            format!("moved to x\\x07 on {o}, removed on {t}"),
         ),
         (
             Clash::MovedRemoved {
                 moved_on: Side::Theirs,
                 to: to("x"),
             },
-            "moved to x on side, removed on main",
+            format!("moved to x on {t}, removed on {o}"),
         ),
         (
             Clash::MovedOnto {
                 moved_on: Side::Ours,
+                to: to("x\u{7}"),
+            },
+            format!("moved to x\\x07 on {o}, where {t} has something else"),
+        ),
+        (
+            Clash::MovedOnto {
+                moved_on: Side::Theirs,
                 to: to("x"),
             },
-            "moved to x on main, where side has something else",
+            format!("moved to x on {t}, where {o} has something else"),
         ),
     ];
     for (clash, words) in cases {
         assert_eq!(
-            c(clash).describe("main", "side"),
+            c(clash).describe(ours, theirs),
             format!("p\\x1b[31m: {words}")
         );
     }
@@ -947,11 +1108,12 @@ fn model_folder(path: &str, s: &Tree, o: &Tree, t: &Tree, keep: bool, m: &mut Mo
             kept_names.insert(name);
         }
     }
-    // Names alike but for letter case, unless one side held both.
+    // Names alike but for letter case or how `é` is written, unless one side held both.
     let held = |x: &Tree, a: &str, b: &str| names(x).contains(a) && names(x).contains(b);
+    let key = |n: &str| n.to_lowercase().replace("e\u{301}", "\u{e9}");
     for a in &kept_names {
         for b in &kept_names {
-            if a < b && a.to_lowercase() == b.to_lowercase() && !held(o, a, b) && !held(t, a, b) {
+            if a < b && key(a) == key(b) && !held(o, a, b) && !held(t, a, b) {
                 m.clash = true;
             }
         }
@@ -1038,7 +1200,11 @@ fn model(s: &Tree, o: &Tree, t: &Tree) -> Model {
     m
 }
 
-const MODEL_PATHS: [&str; 7] = ["a", "A", "b", "d/a", "d/c", "d/e/b", "D/a"];
+/// `d/e` is a file against a folder holding `b`; `é` written two ways and `É` are three names
+/// alike.
+const MODEL_PATHS: [&str; 11] = [
+    "a", "A", "b", "d/a", "d/c", "d/e", "d/e/b", "D/a", "\u{e9}", "e\u{301}", "\u{c9}",
+];
 
 fn value() -> impl Strategy<Value = Option<V>> {
     let text = prop::sample::select(vec!["1\n", "2\n", "3\n", "4\n"]);
@@ -1047,6 +1213,7 @@ fn value() -> impl Strategy<Value = Option<V>> {
         4 => (text, any::<bool>()).prop_map(|(t, exec)| Some(V::File(t.as_bytes().to_vec(), exec))),
         1 => prop::sample::select(vec!["x", "y"]).prop_map(|t| Some(link(t))),
         1 => Just(Some(V::Folder)),
+        1 => (1u8..=2).prop_map(|n| Some(V::Project(n))),
     ]
 }
 
@@ -1055,11 +1222,20 @@ fn three_trees() -> impl Strategy<Value = [Tree; 3]> {
     let values = || prop::collection::vec(value(), MODEL_PATHS.len());
     let changes = || prop::collection::vec(prop::option::weighted(0.4, value()), MODEL_PATHS.len());
     (values(), changes(), changes()).prop_map(|(start, ours, theirs)| {
+        // Nothing below a file, as no stored tree has.
         let build = |vs: &[Option<V>]| -> Tree {
-            MODEL_PATHS
+            let all: Tree = MODEL_PATHS
                 .iter()
                 .zip(vs)
                 .filter_map(|(p, v)| v.clone().map(|v| ((*p).to_owned(), v)))
+                .collect();
+            let under_a_file = |p: &str| {
+                all.iter()
+                    .any(|(up, v)| *v != V::Folder && p.starts_with(&format!("{up}/")))
+            };
+            all.iter()
+                .filter(|(p, _)| !under_a_file(p))
+                .map(|(p, v)| (p.clone(), v.clone()))
                 .collect()
         };
         let side = |changed: &[Option<Option<V>>]| -> Vec<Option<V>> {
