@@ -106,8 +106,9 @@ The decisions themselves are records [157](../decisions/157-v0.2-in-four-milesto
 39. RT18-4: a save's ID inside a hint's command is its short change ID when the save is on the line the project is on, else 12 hex digits of its fingerprint, decided by asking the resolver; a hint whose ID wouldn't work is left out.
 40. RT18-5: `goto` advises `opalro goto <line>` only when that would go onto the line; otherwise it points at `line rename`.
 41. RT18-6: one rule for every hint: text from the project goes inside a command only when it is plain (a line name's characters, not starting with `-`); anything else is left out or shown as a placeholder. This covers names, labels and paths.
-42. The tag list is read once for one name, not twice (the report's suspicion). A tag list near the largest a record can be still costs about half a gigabyte to read; that is on the follow-ups.
+42. The report suspected that a name read the tag list twice. The review of the fixes found it was read once already: the gigabyte the report measured is the stored record and the list decoded from it, held together. A test now pins the one read. A tag list near the largest a record can be still costs about a gigabyte for one name; that is on the follow-ups.
 43. No third red-team session: the fixes are small, each has its proof test, the whole-branch review reads them, and milestone 8's session attacks names and hints again. Cost if wrong: a flaw in these fixes waits for that session.
+44. The review of the second fixes found one hint that could mislead: with a shelf label that isn't plain it said to run the same unshelf command again, which after a plain `opalro unshelf` and a new shelf brings back the wrong shelf. It now shows `opalro unshelf <label>` as it stands and points at `opalro shelf --list`. The same round put `line delete`'s two hints through the plain-text rule (a stored line name can start with `-`), told a server-lines record that can't be read as damage by name, and let only damage, never another error, end a tag's or server line's chain in the fingerprint search. This round was not reviewed by itself: the whole-branch review was asked to check each of its seven points. Cost if wrong: a slip in it is seen one step later.
 
 ## Deferred
 
@@ -122,7 +123,8 @@ Each of these is a row in the [follow-ups](2026-11-01-milestone-1-follow-ups.md)
 - The questions before moving or deleting a tag don't count the saves only that tag holds, as `line delete`'s question does (for the owner).
 - `status` needs room under its limit again on Linux: a speed pass before v0.2 is released ("Please confirm" 11).
 - The walk on Git's own history was timed in all (17.9 s for 64 questions), not question by question, and not against Git: both before milestone 8 builds on it.
-- A tag list near the largest a record can be costs about half a gigabyte to read for one name; looking a name up needs only the names.
+- A tag list near the largest a record can be costs about a gigabyte to read for one name; looking a name up needs only the names. `show` and a `goto` by ID read it once or twice more for their next-step lines.
+- An odd shelf label is escaped but not put between quotes where a message names the shelf.
 - The damage message for a tag list that can't be read doesn't say that `opalro undo` may bring the project back.
 - A line whose own history can't be read can't be deleted; that belongs with repair.
 - A save's message can end in text that looks like a line's mark in `history`; with colour on, the real mark is painted and the message isn't (for the owner).
