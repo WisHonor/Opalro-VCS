@@ -151,7 +151,7 @@ fn extend(out: &mut Vec<u8>, lines: &[&[u8]]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::changes::{DEADLINE, MAX_LINES};
+    use crate::changes::{DEADLINE, MAX_LINES, MAX_LINES_SIZE};
     use proptest::prelude::*;
 
     fn merged(base: &str, ours: &str, theirs: &str) -> Text {
@@ -262,18 +262,20 @@ mod tests {
 
     #[test]
     fn a_comparison_past_its_deadline_is_coarser_never_wrong() {
+        // Ours edits around theirs, so a hurried comparison of ours swallows theirs.
         let base: String = (0..2000).map(|i| format!("line {i}\n")).collect();
-        let ours = base.replace("line 10\n", "ours\n");
-        let theirs = base.replace("line 1990\n", "theirs\n");
-        let full = merged(&base, &ours, &theirs);
-        assert_eq!(
-            full,
-            clean(
-                &base
-                    .replace("line 10\n", "ours\n")
-                    .replace("line 1990\n", "theirs\n")
-            )
+        let ours = base
+            .replace("line 10\n", "ours\n")
+            .replace("line 1990\n", "ours too\n");
+        let theirs = base.replace("line 1000\n", "theirs\n");
+        let (full, late) = merge_text(
+            base.as_bytes(),
+            ours.as_bytes(),
+            theirs.as_bytes(),
+            DEADLINE,
         );
+        assert!(!late);
+        assert_eq!(full, clean(&ours.replace("line 1000\n", "theirs\n")));
         let (hurried, timed_out) = merge_text(
             base.as_bytes(),
             ours.as_bytes(),
@@ -281,7 +283,24 @@ mod tests {
             Duration::ZERO,
         );
         assert!(timed_out);
-        assert!(hurried == full || hurried == OVERLAP, "{hurried:?}");
+        assert_eq!(hurried, OVERLAP);
+    }
+
+    #[test]
+    fn a_side_over_64_mib_is_too_big() {
+        // Zeros too, so the size is seen before the zero byte would make it binary.
+        let over = vec![0; usize::try_from(MAX_LINES_SIZE).unwrap() + 1];
+        let plain: &[u8] = b"a\n";
+        for sides in [
+            [&over[..], plain, plain],
+            [plain, &over[..], plain],
+            [plain, plain, &over[..]],
+        ] {
+            assert_eq!(
+                merge_text(sides[0], sides[1], sides[2], DEADLINE).0,
+                Text::Not(NotMerged::TooBig)
+            );
+        }
     }
 
     /// 0 to 30 lines of 4 kinds, so they repeat, ending in `\n` or `\r\n`, the last maybe in
