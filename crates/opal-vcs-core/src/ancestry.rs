@@ -2,7 +2,7 @@
 //! following every parent.
 
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, BinaryHeap, HashMap};
+use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
 
 use crate::id::Id;
 use crate::repo::{RepoError, Repository};
@@ -24,7 +24,7 @@ pub const MAX_STARTS: usize = 16;
 pub enum Starts {
     /// The common starting points, in ID order; empty when the histories never met.
     Found(Vec<Id>),
-    /// The walk's candidates were more than `MAX_STARTS`: how many.
+    /// The lines have more than `MAX_STARTS` common starting points: how many.
     TooMany(usize),
 }
 
@@ -231,23 +231,72 @@ pub fn common_starts(repo: &Repository, ours: &[Id], theirs: &[Id]) -> Result<St
         .filter(|(_, node)| node.marks == BOTH)
         .map(|(&id, _)| id)
         .collect();
-    if candidates.len() > MAX_STARTS {
-        return Ok(Starts::TooMany(candidates.len()));
-    }
     candidates.sort();
-    if candidates.len() < 2 {
-        return Ok(Starts::Found(candidates));
+    // Where saves are dated alike or before a parent, a candidate can be under another.
+    let starts = if candidates.len() > MAX_STARTS {
+        drop_held_at_once(repo, &candidates, &walk.nodes)?
+    } else {
+        drop_held_each(repo, &candidates)?
+    };
+    if starts.len() > MAX_STARTS {
+        return Ok(Starts::TooMany(starts.len()));
     }
-    // Where saves are dated alike or before a parent, a candidate can be under another; only_in
-    // tells that exactly.
+    Ok(Starts::Found(starts))
+}
+
+/// `candidates` without those another of them has in its history, by one `only_in` each.
+fn drop_held_each(repo: &Repository, candidates: &[Id]) -> Result<Vec<Id>, RepoError> {
+    if candidates.len() < 2 {
+        return Ok(candidates.to_vec());
+    }
     let mut starts = Vec::with_capacity(candidates.len());
-    for &c in &candidates {
+    for &c in candidates {
         let others: Vec<Id> = candidates.iter().copied().filter(|&d| d != c).collect();
         if only_in(repo, c, &others)? != 0 {
             starts.push(c);
         }
     }
-    Ok(Starts::Found(starts))
+    Ok(starts)
+}
+
+/// `candidates` without those another of them has in its history, in one pass down from all
+/// their parents that reads each save at most once; saves in `known` are not read again. Keeps
+/// the candidates' order.
+fn drop_held_at_once(
+    repo: &Repository,
+    candidates: &[Id],
+    known: &HashMap<Id, Node>,
+) -> Result<Vec<Id>, RepoError> {
+    let parents_of = |id: &Id| -> Result<Vec<Id>, RepoError> {
+        Ok(match known.get(id) {
+            Some(node) => node.parents.clone(),
+            None => repo.store().save(id, repo.signatures_allowed())?.parents,
+        })
+    };
+    let all: HashSet<Id> = candidates.iter().copied().collect();
+    let mut unreached = all.clone();
+    let mut seen: HashSet<Id> = HashSet::new();
+    let mut todo: Vec<Id> = Vec::new();
+    for c in candidates {
+        todo.extend(parents_of(c)?);
+    }
+    // The last one left can't be under another: some candidate is under none.
+    while unreached.len() > 1
+        && let Some(id) = todo.pop()
+    {
+        if seen.insert(id) {
+            unreached.remove(&id);
+            // A candidate's parents are on their way already.
+            if !all.contains(&id) {
+                todo.extend(parents_of(&id)?);
+            }
+        }
+    }
+    Ok(candidates
+        .iter()
+        .copied()
+        .filter(|c| unreached.contains(c))
+        .collect())
 }
 
 #[cfg(test)]
@@ -645,8 +694,100 @@ mod tests {
         );
     }
 
+    /// `roots` saves W after a first save, combined into V, then Z after V, and two sides that
+    /// part at Z and each combine every W again, one save at a time. The first save, V and Z are
+    /// dated `t`, the Ws `w` and the sides' saves `s`. Returns the saves, Z and the two tips.
+    fn parted_once(roots: usize, [t, w, s]: [i64; 3]) -> (Saves, usize, [usize; 2]) {
+        let mut saves: Saves = vec![(vec![], t)];
+        let ws: Vec<usize> = (0..roots)
+            .map(|_| {
+                saves.push((vec![0], w));
+                saves.len() - 1
+            })
+            .collect();
+        saves.push((ws.clone(), t));
+        saves.push((vec![saves.len() - 1], t));
+        let z = saves.len() - 1;
+        let mut tips = [z, z];
+        for tip in &mut tips {
+            saves.push((vec![*tip], s));
+            *tip = saves.len() - 1;
+            for &w_save in &ws {
+                saves.push((vec![*tip, w_save], s));
+                *tip = saves.len() - 1;
+            }
+        }
+        (saves, z, tips)
+    }
+
     #[test]
-    fn seventeen_candidates_are_too_many() {
+    fn lines_that_parted_once_have_one_starting_point_however_their_saves_are_dated() {
+        // The W saves dated after Z, as by a clock run ahead.
+        let (_dir, mut repo) = project();
+        let t = 1_700_000_000_000;
+        let (saves, z, [ours, theirs]) = parted_once(16, [t, t + 100_000, t + 300_000]);
+        let ids = plant(&mut repo, &saves);
+        assert!(plain_candidates(&saves, &ids, &[ours], &[theirs]).len() > MAX_STARTS);
+        let before = repo.store().saves_read();
+        assert_eq!(
+            common_starts(&repo, &[ids[ours]], &[ids[theirs]]).unwrap(),
+            found(vec![ids[z]])
+        );
+        let read = repo.store().saves_read() - before;
+        assert!(read <= saves.len(), "{read} saves read");
+    }
+
+    #[test]
+    fn lines_that_parted_once_with_saves_dated_alike_have_one_starting_point() {
+        // Only about one history in eight leaves many candidates, as the IDs fall; go on until
+        // one has.
+        let mut crowded = 0;
+        for k in 0..128 {
+            if crowded > 0 && k >= 8 {
+                break;
+            }
+            let (_dir, mut repo) = project();
+            let mut saves = filler(k % 8);
+            let (more, z, tips) = parted_once(40, [5, 5, 5]);
+            let first = saves.len();
+            let shift = |s: &usize| s + first;
+            saves.extend(
+                more.into_iter()
+                    .map(|(parents, time)| (parents.iter().map(shift).collect(), time)),
+            );
+            let [ours, theirs] = tips.map(|s| s + first);
+            let ids = plant(&mut repo, &saves);
+            assert_eq!(
+                common_starts(&repo, &[ids[ours]], &[ids[theirs]]).unwrap(),
+                found(vec![ids[z + first]]),
+                "history {k}"
+            );
+            crowded +=
+                usize::from(plain_candidates(&saves, &ids, &[ours], &[theirs]).len() > MAX_STARTS);
+        }
+        assert!(crowded > 0, "no history left many candidates");
+    }
+
+    #[test]
+    fn dropping_many_candidates_reads_each_save_behind_them_once() {
+        let (_dir, mut repo) = project();
+        let (saves, z, _) = parted_once(16, [1000, 2000, 3000]);
+        let ids = plant(&mut repo, &saves);
+        // Z, V, every W, and the first save, which every W is on.
+        let behind = 19;
+        let mut candidates: Vec<Id> = ids[1..=16].to_vec();
+        candidates.push(ids[z]);
+        candidates.sort();
+        let before = repo.store().saves_read();
+        let got = drop_held_at_once(&repo, &candidates, &HashMap::new()).unwrap();
+        assert_eq!(got, [ids[z]]);
+        let read = repo.store().saves_read() - before;
+        assert!(read <= behind, "{read} saves read");
+        assert_eq!(drop_held_each(&repo, &candidates).unwrap(), [ids[z]]);
+    }
+
+    #[test]
+    fn seventeen_starting_points_are_too_many() {
         for (roots, want) in [(17, None), (16, Some(16))] {
             let (_dir, mut repo) = project();
             let mut saves: Vec<(Vec<usize>, i64)> =
@@ -683,7 +824,7 @@ mod tests {
             let ids = plant(&mut repo, &saves);
             let got = common_starts(&repo, &[ids[o]], &[ids[t]]).unwrap();
             assert_eq!(got, found(vec![ids[d]]), "history {k}");
-            extra.insert(plain_candidates(&saves, &ids, &[o], &[t]));
+            extra.insert(plain_candidates(&saves, &ids, &[o], &[t]).len());
         }
         assert_eq!(extra, HashSet::from([1, 2]), "both tie orders");
     }
@@ -790,7 +931,7 @@ mod tests {
         ids: &[Id],
         ours: &[usize],
         theirs: &[usize],
-    ) -> usize {
+    ) -> Vec<usize> {
         let n = saves.len();
         let (mut marks, mut spread) = (vec![0u8; n], vec![0u8; n]);
         for &o in ours {
@@ -818,54 +959,118 @@ mod tests {
                 marks[p] |= give;
             }
         }
-        marks.iter().filter(|&&m| m == BOTH).count()
+        (0..n).filter(|&s| marks[s] == BOTH).collect()
     }
 
-    proptest! {
-        #![proptest_config(ProptestConfig::with_cases(256))]
-        #[test]
-        fn common_starts_agrees_with_a_full_walk(
-            shape in prop::collection::vec(
-                (prop::collection::vec(any::<prop::sample::Index>(), 0..=3), 0..1000i64),
+    /// First saves added to a drawn history, each side holding all of them as parents.
+    #[derive(Clone, Copy, Debug)]
+    struct Crowd {
+        roots: usize,
+        /// Each side holds them through one save or two.
+        split: [bool; 2],
+        /// The roots are combined into one save Z, after which each side's save holds Z and every
+        /// root again, the roots dated after everything as by a clock run ahead: one starting
+        /// point, with many candidates.
+        joined: bool,
+    }
+
+    /// Adds `crowd` to the history and to the sides' tips.
+    fn add_crowd(
+        crowd: Crowd,
+        clock: Clock,
+        parents: &mut Vec<Vec<usize>>,
+        saves: &mut Saves,
+        sides: [&mut Vec<usize>; 2],
+    ) {
+        let first = saves.len();
+        for r in 0..crowd.roots {
+            let time = if crowd.joined {
+                i64::MAX
+            } else {
+                dated(clock, saves, &[], r as i64 * 37)
+            };
+            parents.push(Vec::new());
+            saves.push((Vec::new(), time));
+        }
+        let all: Vec<usize> = (first..first + crowd.roots).collect();
+        // Dated as if its parents were `by` alone.
+        let push =
+            |parents: &mut Vec<Vec<usize>>, saves: &mut Saves, group: Vec<usize>, by: &[usize]| {
+                let time = dated(clock, saves, by, 500);
+                parents.push(group.clone());
+                saves.push((group, time));
+                saves.len() - 1
+            };
+        if crowd.joined {
+            let v = push(parents, saves, all.clone(), &[]);
+            let z = push(parents, saves, vec![v], &[v]);
+            for side in sides {
+                let mut group = vec![z];
+                group.extend(&all);
+                side.push(push(parents, saves, group, &[z]));
+            }
+            return;
+        }
+        for (split, side) in crowd.split.into_iter().zip(sides) {
+            let groups = if split {
+                let (a, b) = all.split_at(crowd.roots / 2);
+                vec![a.to_vec(), b.to_vec()]
+            } else {
+                vec![all.clone()]
+            };
+            for group in groups {
+                let by = group.clone();
+                side.push(push(parents, saves, group, &by));
+            }
+        }
+    }
+
+    #[test]
+    fn common_starts_agrees_with_a_full_walk() {
+        use proptest::test_runner::{Config, TestRunner};
+        let strategy = (
+            prop::collection::vec(
+                (
+                    prop::collection::vec(any::<prop::sample::Index>(), 0..=3),
+                    0..1000i64,
+                ),
                 1..=40,
             ),
-            ours in prop::collection::vec(any::<prop::sample::Index>(), 1..=3),
-            theirs in prop::collection::vec(any::<prop::sample::Index>(), 1..=3),
-            clock in prop_oneof![
+            prop::collection::vec(any::<prop::sample::Index>(), 1..=3),
+            prop::collection::vec(any::<prop::sample::Index>(), 1..=3),
+            prop_oneof![
                 Just(Clock::Forwards),
                 Just(Clock::Ties),
                 Just(Clock::Random),
                 Just(Clock::Ends),
             ],
-            // More first saves than a combine takes, each side holding all of them as parents
-            // through one save or two.
-            crowd in prop::option::weighted(0.125, (17..=20usize, any::<bool>(), any::<bool>())),
-        ) {
+            // More first saves than a combine takes.
+            prop::option::weighted(
+                0.25,
+                (17..=20usize, any::<[bool; 2]>(), any::<bool>()).prop_map(
+                    |(roots, split, joined)| Crowd {
+                        roots,
+                        split,
+                        joined,
+                    },
+                ),
+            ),
+        );
+        // Cases with more candidates than a combine takes, but few enough starting points.
+        let crowded_but_few = std::cell::Cell::new(0usize);
+        let mut runner = TestRunner::new(Config::with_cases(256));
+        let result = runner.run(&strategy, |(shape, ours, theirs, clock, crowd)| {
             let (mut parents, mut saves) = drawn(&shape, clock);
             let mut ours: Vec<usize> = ours.iter().map(|o| o.index(saves.len())).collect();
             let mut theirs: Vec<usize> = theirs.iter().map(|t| t.index(saves.len())).collect();
-            if let Some((roots, ours_split, theirs_split)) = crowd {
-                let first = saves.len();
-                for r in 0..roots {
-                    let time = dated(clock, &saves, &[], r as i64 * 37);
-                    parents.push(Vec::new());
-                    saves.push((Vec::new(), time));
-                }
-                let all: Vec<usize> = (first..first + roots).collect();
-                for (split, side) in [(ours_split, &mut ours), (theirs_split, &mut theirs)] {
-                    let groups = if split {
-                        let (a, b) = all.split_at(roots / 2);
-                        vec![a.to_vec(), b.to_vec()]
-                    } else {
-                        vec![all.clone()]
-                    };
-                    for group in groups {
-                        let time = dated(clock, &saves, &group, 500);
-                        parents.push(group.clone());
-                        saves.push((group, time));
-                        side.push(saves.len() - 1);
-                    }
-                }
+            if let Some(crowd) = crowd {
+                add_crowd(
+                    crowd,
+                    clock,
+                    &mut parents,
+                    &mut saves,
+                    [&mut ours, &mut theirs],
+                );
             }
 
             let common: HashSet<usize> = ancestors(&parents, &ours)
@@ -884,30 +1089,37 @@ mod tests {
                 .map(|&c| ids[c])
                 .collect();
             answer.sort();
-            let candidates = plain_candidates(&saves, &ids, &ours, &theirs);
 
             let side = |tips: &[usize]| tips.iter().map(|&s| ids[s]).collect::<Vec<Id>>();
             let got = common_starts(&repo, &side(&ours), &side(&theirs)).unwrap();
-            match &got {
-                Starts::Found(got) => {
-                    prop_assert!(candidates <= MAX_STARTS);
-                    prop_assert_eq!(got, &answer);
-                }
-                Starts::TooMany(n) => {
-                    prop_assert!(candidates > MAX_STARTS);
-                    prop_assert_eq!(*n, candidates);
-                }
+            if answer.len() > MAX_STARTS {
+                prop_assert_eq!(got, Starts::TooMany(answer.len()));
+            } else {
+                prop_assert_eq!(got, Starts::Found(answer.clone()));
             }
-            // Only saves dated after their parents make the candidates the answer itself; with
-            // ties there can be more, which the match above already checks against.
-            if clock == Clock::Forwards {
-                prop_assert_eq!(
-                    matches!(got, Starts::TooMany(_)),
-                    answer.len() > MAX_STARTS
-                );
-            }
-        }
 
+            // Both ways of dropping the candidates under another give the answer.
+            let mut candidates: Vec<Id> = plain_candidates(&saves, &ids, &ours, &theirs)
+                .into_iter()
+                .map(|c| ids[c])
+                .collect();
+            candidates.sort();
+            prop_assert_eq!(&drop_held_each(&repo, &candidates).unwrap(), &answer);
+            let at_once = drop_held_at_once(&repo, &candidates, &HashMap::new()).unwrap();
+            prop_assert_eq!(&at_once, &answer);
+            if candidates.len() > MAX_STARTS && answer.len() <= MAX_STARTS {
+                crowded_but_few.set(crowded_but_few.get() + 1);
+            }
+            Ok(())
+        });
+        if let Err(e) = result {
+            panic!("{e}");
+        }
+        assert!(crowded_but_few.get() > 0, "no history had many candidates");
+    }
+
+    proptest! {
+        #![proptest_config(ProptestConfig::with_cases(256))]
         #[test]
         fn only_in_agrees_with_a_full_walk(
             shape in prop::collection::vec(

@@ -78,10 +78,9 @@ fn plant(
 /// RT19-1. Sixteen feature lines W1..W16 are combined into V, Z is saved on V, and `main` and
 /// `side` each part from Z and then combine every Wi again, two parents at a time. The W saves
 /// were made on a computer whose clock ran ahead, so they are dated after Z. The lines parted
-/// once, at Z, yet the walk's candidates (Z and every Wi) are counted before the exact drop, and
-/// the combine is refused as "crossing too many times".
+/// once, at Z, yet the walk's candidates (Z and every Wi) were counted before the exact drop, and
+/// the combine was refused as "crossing too many times".
 #[test]
-#[ignore = "RT19-1: candidates past 16 are refused before the exact drop"]
 fn lines_that_parted_once_combine_whatever_their_saves_dates() {
     let env = project();
     let t = 1_700_000_000_000;
