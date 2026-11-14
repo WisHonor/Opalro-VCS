@@ -552,3 +552,49 @@ fn every_save_object_has_its_parents() {
     let went = json(&env, &["goto", "side"], 0);
     assert_eq!(went["save"]["parents"], serde_json::json!([a]), "{went}");
 }
+
+#[test]
+fn show_names_a_combined_parent_it_cannot_read_without_its_message() {
+    let env = project();
+    let missing = opal_core::id::hash_content(b"no such save");
+    support::plant_combined(env.root(), "Combined", &[missing]);
+    let (shown, said) = run(&env, &["show"], 0);
+    assert!(
+        shown.contains(&format!(
+            " \"A\"\n    Combined     {}\n    Fingerprint  ",
+            missing.short_hex()
+        )),
+        "{shown}"
+    );
+    assert_eq!(said, "");
+    let doc = json(&env, &["show"], 0);
+    assert_eq!(doc["save"]["parents"][1], missing.to_hex());
+}
+
+#[test]
+fn show_and_history_name_every_parent_of_a_save_with_many() {
+    let env = project();
+    let others: Vec<Id> = (1..40)
+        .map(|n| opal_core::id::hash_content(format!("parent {n}").as_bytes()))
+        .collect();
+    support::plant_combined(env.root(), "Octopus", &others);
+    let (shown, _) = run(&env, &["history"], 0);
+    let marks: String = (others.iter())
+        .map(|p| format!("  [combined {}]", p.short_hex()))
+        .collect();
+    let row = shown.lines().nth(2).unwrap();
+    assert!(row.ends_with(&format!("Octopus  [main]{marks}")), "{shown}");
+    let (shown, _) = run(&env, &["show"], 0);
+    let rows: Vec<String> = (others.iter().enumerate())
+        .map(|(at, p)| {
+            let label = if at == 0 { "Combined" } else { "" };
+            format!("    {label:<13}{}\n", p.short_hex())
+        })
+        .collect();
+    assert!(
+        shown.contains(&format!(" \"A\"\n{}    Fingerprint  ", rows.concat())),
+        "{shown}"
+    );
+    let doc = json(&env, &["history"], 0);
+    assert_eq!(doc["saves"][0]["parents"].as_array().unwrap().len(), 40);
+}

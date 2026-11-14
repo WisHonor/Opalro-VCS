@@ -1497,7 +1497,7 @@ fn after(env: &Env, what: &[&str]) -> Vec<String> {
 /// wherever a line's history or the save the project is at reaches that save through any parent:
 /// a merge's other parent whose branch is gone, or the parent of a save past every line.
 #[test]
-fn show_takes_back_the_fingerprints_it_names_where_a_lines_history_reaches_them() {
+fn show_takes_back_the_fingerprints_it_names_through_every_parent_and_from_a_detached_save() {
     for keep_the_branch in [true, false] {
         let env = Env(support::Env::new());
         env.commit("a.txt", "a\n", "First");
@@ -1514,8 +1514,13 @@ fn show_takes_back_the_fingerprints_it_names_where_a_lines_history_reaches_them(
         assert_eq!(parents.len(), 2, "{parents:?}");
         assert_eq!(after(&env, &[&parents[0]]).len(), 1);
         let out = env.opalro().args(["show", &parents[1]]).output().unwrap();
-        let taken_back = out.status.code() == Some(0);
-        assert!(taken_back, "{}", text(&out.stderr));
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        let heading = text(&out.stdout)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_owned();
+        assert!(heading.ends_with(" \"Side\""), "{heading}");
     }
     // A detached Git HEAD two commits past main: Opalro is at its save, whose parent only that
     // save reaches, and the digits `show` names for it are taken back from there.
@@ -1529,6 +1534,12 @@ fn show_takes_back_the_fingerprints_it_names_where_a_lines_history_reaches_them(
     assert!(stdout_of(&env, &["show"]).contains("\"B\""));
     let out = env.opalro().args(["show", b]).output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let heading = text(&out.stdout)
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(heading.ends_with(" \"B\""), "{heading}");
     // A save made on a new line from an older one: its parent is on main's history.
     let env = project_with_two_saves();
     let history: serde_json::Value =

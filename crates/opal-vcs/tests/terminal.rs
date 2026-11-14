@@ -630,6 +630,20 @@ fn history_keeps_combined_marks_whole_and_cuts_the_message() {
     assert!(row.ends_with(&marks), "{shown}");
     assert!(row.contains("  word"), "{shown}");
     assert!(shown.lines().all(|l| l.len() <= 70), "{shown}");
+
+    // With more marks than fit, the message is cut to nothing and the marks run long, whole.
+    let others: Vec<opal_core::id::Id> = (1..40)
+        .map(|n| opal_core::id::hash_content(format!("parent {n}").as_bytes()))
+        .collect();
+    support::plant_combined(env.root(), "Octopus", &others);
+    let (shown, _) = run_at(&env, Some(70), &["history"]);
+    let row = shown.lines().nth(2).unwrap();
+    let marks: String = (others.iter())
+        .map(|p| format!("  [combined {}]", p.short_hex()))
+        .collect();
+    assert!(row.ends_with(&format!("  [main]{marks}")), "{shown}");
+    assert!(!row.contains("Octopus"), "{shown}");
+    assert!(shown.lines().skip(3).all(|l| l.len() <= 70), "{shown}");
 }
 
 #[test]
