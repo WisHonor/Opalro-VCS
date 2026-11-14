@@ -5,6 +5,7 @@ pub mod ancestry;
 pub mod changeids;
 pub mod changes;
 pub mod chunks;
+pub mod combine;
 pub mod config;
 pub mod diary;
 pub mod diff;

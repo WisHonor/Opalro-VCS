@@ -75,14 +75,25 @@ pub fn file_lines<'a>(old: &'a [u8], new: &'a [u8], deadline: Duration) -> Lines
         return Lines::TooManyLines;
     }
     let (old, new) = (lines_of(old), lines_of(new));
+    let (ops, timed_out) = line_ops(&old, &new, deadline);
+    let hunks = group_diff_ops(ops, CONTEXT)
+        .iter()
+        .map(|group| hunk(group, &old, &new))
+        .collect();
+    Lines::Hunks { hunks, timed_out }
+}
+
+/// Myers line by line between `old` and `new` with a deadline: the operations, and whether it
+/// ran past the deadline (its answer is then coarser, never wrong).
+pub(crate) fn line_ops(old: &[&[u8]], new: &[&[u8]], deadline: Duration) -> (Vec<DiffOp>, bool) {
     let start = Instant::now();
     // Myers alone: the clean-up pass `similar` adds after it has no deadline.
     let mut ops = Replace::new(Capture::new());
     let diffed = myers::diff_deadline(
         &mut ops,
-        &old[..],
+        old,
         0..old.len(),
-        &new[..],
+        new,
         0..new.len(),
         start.checked_add(deadline),
     );
@@ -91,12 +102,7 @@ pub fn file_lines<'a>(old: &'a [u8], new: &'a [u8], deadline: Duration) -> Lines
         Err(never) => match never {},
     };
     // `similar` doesn't say whether it gave up: one that ran past its deadline did.
-    let timed_out = start.elapsed() >= deadline;
-    let hunks = group_diff_ops(ops, CONTEXT)
-        .iter()
-        .map(|group| hunk(group, &old, &new))
-        .collect();
-    Lines::Hunks { hunks, timed_out }
+    (ops, start.elapsed() >= deadline)
 }
 
 /// How line endings changed, when nothing else did.
@@ -298,7 +304,7 @@ fn lines<'a>(old: &'a Side, new: &'a Side) -> Lines<'a> {
 }
 
 /// How long a file's diff may take; crash tests can shorten it.
-fn deadline() -> Duration {
+pub(crate) fn deadline() -> Duration {
     #[cfg(feature = "fault-injection")]
     if let Some(ms) = std::env::var("OPALRO_DIFF_DEADLINE_MS")
         .ok()
@@ -402,18 +408,18 @@ fn unreadable(path: &str, source: io::Error) -> SaveError {
     }
 }
 
-fn is_binary(bytes: &[u8]) -> bool {
+pub(crate) fn is_binary(bytes: &[u8]) -> bool {
     bytes.iter().take(BINARY_CHECK).any(|&b| b == 0)
 }
 
 /// How many lines `bytes` holds, a last one without `\n` included.
-fn line_count(bytes: &[u8]) -> usize {
+pub(crate) fn line_count(bytes: &[u8]) -> usize {
     let breaks = bytes.iter().filter(|&&b| b == b'\n').count();
     breaks.saturating_add(usize::from(bytes.last().is_some_and(|&b| b != b'\n')))
 }
 
 /// Each line with its `\n`; a last line without one stays as it is.
-fn lines_of(bytes: &[u8]) -> Vec<&[u8]> {
+pub(crate) fn lines_of(bytes: &[u8]) -> Vec<&[u8]> {
     bytes.split_inclusive(|&b| b == b'\n').collect()
 }
 
