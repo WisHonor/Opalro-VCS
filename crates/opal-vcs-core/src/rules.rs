@@ -9,7 +9,10 @@ use opal_platform::dir::{Dir, EntryType};
 use toml::{Table, Value};
 
 use crate::chunks::{CHUNK_FROM, CHUNK_UP_TO};
+use crate::drive::Drive;
+use crate::ignore::{Decision, Matcher, Rules as IgnoreRules};
 use crate::safe_fs;
+use crate::scope::ancestors;
 use crate::text::{escape, thousands};
 use crate::warning::{self, Warning};
 
@@ -66,6 +69,56 @@ impl Default for Rules {
             ask_over_files: 10_000,
             rules: vec![],
         }
+    }
+}
+
+/// How rule patterns compare names: ASCII case ignored on every system, since what a rule decides
+/// ends up in a save and must not depend on the computer.
+const RULE_DRIVE: Drive = Drive {
+    ignores_case: true,
+    composes_unicode: false,
+};
+
+/// The project's `[[rule]]` tables, each turned into a matcher once.
+#[derive(Debug)]
+pub struct RuleMatcher {
+    rules: Vec<(Matcher, Option<bool>)>,
+}
+
+impl RuleMatcher {
+    #[must_use]
+    pub fn new(rules: &Rules) -> RuleMatcher {
+        let rules = rules.rules.iter().map(|rule| {
+            // A pattern can't be split across lines of the one rule file it becomes.
+            let lines: Vec<&str> = rule
+                .files
+                .iter()
+                .map(String::as_str)
+                .filter(|p| !p.contains(['\n', '\r']))
+                .collect();
+            let mut matcher = Matcher::new(RULE_DRIVE);
+            matcher.enter(
+                "",
+                vec![IgnoreRules::parse(lines.join("\n").as_bytes(), "", false)],
+            );
+            (matcher, rule.conflict_markers)
+        });
+        RuleMatcher {
+            rules: rules.collect(),
+        }
+    }
+
+    /// Whether a file at `path` (`a/b/c`) may be merged line by line: what the last rule that
+    /// matches it and gives `conflict-markers` says, `true` when none does.
+    #[must_use]
+    pub fn conflict_markers(&self, path: &str) -> bool {
+        let says = |(matcher, markers): &(Matcher, Option<bool>)| {
+            markers.filter(|_| {
+                matcher.decide(path, false) == Decision::Ignored
+                    || ancestors(path).any(|f| matcher.decide(f, true) == Decision::Ignored)
+            })
+        };
+        self.rules.iter().rev().find_map(says).unwrap_or(true)
     }
 }
 
@@ -617,6 +670,93 @@ mod tests {
         assert!(message.len() < 4_000, "{}", message.len());
         assert!(!message.contains(&"x".repeat(65)), "{message}");
         assert!(message.contains("and 982 more"), "{message}");
+    }
+
+    fn matcher(rules: &[(&[&str], Option<bool>)]) -> RuleMatcher {
+        let rules = rules.iter().map(|(files, markers)| Rule {
+            files: files.iter().map(|f| (*f).to_owned()).collect(),
+            lockable: None,
+            conflict_markers: *markers,
+        });
+        RuleMatcher::new(&Rules {
+            rules: rules.collect(),
+            ..Rules::default()
+        })
+    }
+
+    /// Whether `pattern`'s rule matches `path`.
+    fn matches(patterns: &[&str], path: &str) -> bool {
+        !matcher(&[(patterns, Some(false))]).conflict_markers(path)
+    }
+
+    #[test]
+    fn no_rule_means_markers() {
+        assert!(matcher(&[]).conflict_markers("a.txt"));
+    }
+
+    #[test]
+    fn the_last_matching_rule_that_gives_the_key_decides() {
+        let m = matcher(&[
+            (&["*.unity"], Some(false)),
+            (&["Assets/Keep/*.unity"], Some(true)),
+            (&["*.unity"], None),
+        ]);
+        assert!(!m.conflict_markers("Assets/a.unity"));
+        assert!(m.conflict_markers("Assets/Keep/b.unity"));
+        assert!(m.conflict_markers("a.txt"));
+    }
+
+    #[test]
+    fn patterns_match_as_opalroignore_lines_do() {
+        assert!(matches(&["*.meta"], "a/b/c.meta"));
+        assert!(matches(&["/top.txt"], "top.txt"));
+        assert!(!matches(&["/top.txt"], "a/top.txt"));
+        assert!(matches(&["art/**/*.png"], "art/x/y.png"));
+        assert!(matches(&["*.unity", "!keep.unity"], "a.unity"));
+        assert!(!matches(&["*.unity", "!keep.unity"], "keep.unity"));
+    }
+
+    #[test]
+    fn a_folder_pattern_matches_the_files_below_it() {
+        assert!(matches(&["Assets/Scenes/"], "Assets/Scenes/x/y.unity"));
+        assert!(!matches(&["Assets/Scenes/"], "Assets/Scenes.unity"));
+    }
+
+    #[test]
+    fn ascii_letter_case_is_ignored_everywhere() {
+        // The same on every system, whatever the drive the tests run on.
+        assert!(matches(&["*.UNITY"], "Main.unity"));
+        assert!(matches(&["*.unity"], "MAIN.UNITY"));
+        assert!(matches(&["Assets/"], "assets/a.txt"));
+        assert!(!matches(&["\u{c9}.txt"], "\u{e9}.txt"));
+    }
+
+    #[test]
+    fn a_pattern_holding_a_line_break_matches_nothing() {
+        for pattern in ["a\nb", "a\r\nb", "a\rb"] {
+            for path in ["a", "b", "a\nb"] {
+                assert!(!matches(&[pattern], path), "{pattern:?} {path:?}");
+            }
+        }
+        // The rule's other patterns still count.
+        assert!(matches(&["a\nb", "c"], "c"));
+    }
+
+    #[test]
+    fn the_game_presets_scenes_prefabs_and_meta_files_get_no_markers() {
+        use crate::presets::{Engine, Found, Preset, opal_toml};
+        let found = Found {
+            engines: vec![Engine::Unity],
+            languages: vec![],
+        };
+        let text = opal_toml(Preset::Game, &found).unwrap();
+        let (rules, ignored) = parse(text.as_bytes()).unwrap();
+        assert!(ignored.is_empty(), "{ignored:?}");
+        let m = RuleMatcher::new(&rules);
+        assert!(!m.conflict_markers("Assets/Main.unity"));
+        assert!(!m.conflict_markers("Assets/P.prefab"));
+        assert!(!m.conflict_markers("Assets/P.prefab.meta"));
+        assert!(m.conflict_markers("Assets/Player.cs"));
     }
 
     proptest::proptest! {
