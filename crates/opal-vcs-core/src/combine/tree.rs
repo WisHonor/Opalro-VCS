@@ -40,6 +40,10 @@ pub(crate) struct Made {
     pub max_left_bytes: usize,
     /// How long each file's comparison may take (`changes::deadline()`; tests lower it).
     pub deadline: Duration,
+    /// How many more move notes this combine may check (`moves::MAX_CHECKED_NOTES` at first;
+    /// tests lower it), and whether a save's notes were past it, so no more notes count.
+    pub notes_left: usize,
+    pub notes_spent: bool,
 }
 
 impl Default for Made {
@@ -51,6 +55,8 @@ impl Default for Made {
             max_held: MAX_HELD_TEXT,
             max_left_bytes: crate::moves::MAX_LEFT_BYTES,
             deadline: changes::deadline(),
+            notes_left: crate::moves::MAX_CHECKED_NOTES,
+            notes_spent: false,
         }
     }
 }
@@ -68,6 +74,8 @@ pub(crate) struct Merged {
     pub timed_out: Vec<String>,
     /// Sides where too many files left for moves to be followed by their contents.
     pub unfollowed: Vec<Side>,
+    /// Whether the combine's move notes were past what it checks, so none counted here.
+    pub notes_unbelieved: bool,
 }
 
 /// The three versions' entries, or listings, in the order of `Which`.
@@ -95,6 +103,7 @@ pub(crate) fn merge_trees(
         more: 0,
         timed_out: Vec::new(),
         unfollowed: Vec::new(),
+        notes_unbelieved: false,
     };
     if let Some(root) = one_sides([start, ours, theirs].map(Some)) {
         merged.root = root.unwrap_or(ours);

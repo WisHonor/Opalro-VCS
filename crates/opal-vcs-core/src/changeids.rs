@@ -287,7 +287,7 @@ impl ChangeIds {
                 found.extend(self.lines.remove(name).unwrap_or_default());
                 break;
             }
-            let save = repo.store().save(&id, repo.signatures_allowed())?;
+            let save = repo.store().save_links(&id, repo.signatures_allowed())?;
             found.push((id, save.change_id));
             next = save.parents.first().copied();
         }

@@ -24,8 +24,8 @@ use crate::kept::{EXACT, Put, overlay_with};
 use crate::lines::Target;
 use crate::listing::{Entry, Listing, SaveLimits};
 use crate::moves::{
-    MAX_LEFT_BYTES, MAX_NOTED_BYTES, Version, first_that_fit, followed, is_file, room_at,
-    same_contents,
+    MAX_CHECKED_NOTES, MAX_LEFT_BYTES, MAX_NOTED_BYTES, Version, first_that_fit, followed, is_file,
+    room_at, same_contents,
 };
 use crate::names::PortabilityProblem;
 use crate::pack::{ObjectKind, PackSet};
@@ -543,6 +543,7 @@ pub(crate) fn merge_three(
         .filter(|(_, w)| w.too_many_left)
         .map(|(side, _)| side)
         .collect();
+    merged.notes_unbelieved = went.iter().any(|w| w.notes_unbelieved);
     if !clashes.is_empty() {
         // Each names a path the tree merge found nothing at, so the two are named together.
         let mut all = std::mem::take(&mut merged.conflicts);
@@ -611,12 +612,13 @@ fn move_in(
 }
 
 /// What one combine may take: inner combines, text they hold, time to compare each file, memory
-/// to follow moves by contents, and the result's limits.
+/// to follow moves by contents, move notes to check, and the result's limits.
 struct Bounds {
     max_inner: usize,
     max_held: u64,
     deadline: Duration,
     max_left_bytes: usize,
+    max_notes: usize,
     limits: SaveLimits,
 }
 
@@ -654,6 +656,7 @@ pub fn combine(
         max_held: MAX_HELD_TEXT,
         deadline: deadline(),
         max_left_bytes: MAX_LEFT_BYTES,
+        max_notes: MAX_CHECKED_NOTES,
         limits: SaveLimits::default(),
     };
     combine_with(repo, &asked, on_wait, bounds)
@@ -743,6 +746,12 @@ fn combine_locked(
                        there without a note were not followed.";
         warnings.push(Warning::new(warning::MOVES_NOT_FOLLOWED, message));
     }
+    if made.notes_unbelieved {
+        let message = "The saves being combined hold more move notes than Opalro checks in one \
+                       combine (1,000,000), so past that many it followed files that moved by \
+                       their contents alone.";
+        warnings.push(Warning::new(warning::TOO_MANY_MOVE_NOTES, message));
+    }
     let done = to.switch(repo, lock, earlier, asked, made.save, warnings)?;
     let result = Combined::Made {
         starts: made.starts,
@@ -804,6 +813,8 @@ struct MadeSave {
     unfollowed: Vec<Side>,
     /// Whether moves weren't followed by contents while the starting points were combined.
     starts_unfollowed: bool,
+    /// Whether the move notes were past what one combine checks.
+    notes_unbelieved: bool,
 }
 
 /// Merges `with` into `from` and stores the combined save, made on `line`. Everything is built in
@@ -822,6 +833,7 @@ fn make_save(
         max_held: bounds.max_held,
         deadline: bounds.deadline,
         max_left_bytes: bounds.max_left_bytes,
+        notes_left: bounds.max_notes,
         ..Made::default()
     };
     let starts = match common_starts(repo, &[from], &[with])? {
@@ -909,6 +921,8 @@ fn make_save(
         timed_out: merged.timed_out,
         unfollowed: merged.unfollowed,
         starts_unfollowed,
+        // Once spent, the budget stays spent for every later merge, this last one included.
+        notes_unbelieved: merged.notes_unbelieved,
     })
 }
 

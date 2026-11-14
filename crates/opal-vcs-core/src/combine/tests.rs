@@ -15,7 +15,10 @@ use crate::id::{ChangeId, Flavor, Id, hash_record};
 use crate::kept::overlay;
 use crate::link::ProjectLink;
 use crate::listing::{Entry, EntryKind, Listing};
-use crate::moves::{HELD_PER_PLACE, MAX_LEFT_BYTES, Version, followed, same_contents};
+use crate::moves::{
+    HELD_PER_PLACE, MAX_CHECKED_NOTES, MAX_LEFT_BYTES, NOTES_CHECKED, Version, followed,
+    same_contents,
+};
 use crate::names::PortabilityProblem;
 use crate::pack::{ObjectKind, PackSet};
 use crate::presets::{Engine, Found, Preset, opal_toml};
@@ -1566,7 +1569,7 @@ impl Hist {
 
     /// Where `start`'s files went on `side`.
     fn followed(&self, start: Version, side: Version) -> Vec<(String, String)> {
-        followed(&self.repo, &Made::default(), &start, &side)
+        followed(&self.repo, &mut Made::default(), &start, &side)
             .unwrap()
             .went
             .into_iter()
@@ -1886,7 +1889,7 @@ fn a_file_moved_in_by_notes_where_one_was_removed_counts_as_removed() {
     // `Player.cs` removed, then `Other.cs` moved where it was, each saved alone.
     let t = h.save("side", s, &tree(&[("Other.cs", f("other\n"))]));
     let t = h.save("side", t, &tree(&[("Player.cs", f("other\n"))]));
-    let side = followed(&h.repo, &Made::default(), &h.version(s), &h.version(t)).unwrap();
+    let side = followed(&h.repo, &mut Made::default(), &h.version(s), &h.version(t)).unwrap();
     assert!(side.went.is_empty(), "{side:?}");
     assert!(side.replaced.contains("Player.cs"), "{side:?}");
     assert_eq!(
@@ -2035,11 +2038,11 @@ fn following_by_contents_holds_a_bounded_amount() {
     // of 20.
     let fits = 2 * HELD_PER_PLACE + 29;
     let at_most = |n: usize| {
-        let made = Made {
+        let mut made = Made {
             max_left_bytes: n,
             ..Made::default()
         };
-        followed(&h.repo, &made, &h.version(s), &made_up).unwrap()
+        followed(&h.repo, &mut made, &h.version(s), &made_up).unwrap()
     };
     let past = at_most(fits - 1);
     assert!(past.went.is_empty() && past.too_many_left, "{past:?}");
@@ -2333,6 +2336,184 @@ fn the_walk_for_notes_is_bounded() {
     assert_eq!(h.followed(vs, vt), pairs(&[]));
     let read = h.repo.store().saves_read() - before;
     assert!(read <= counting + 1_002, "{read} > {counting} + 1,002");
+}
+
+/// `n` notes of files that were never there.
+fn untrue_notes(n: usize, tag: &str) -> Vec<MoveNote> {
+    (0..n)
+        .map(|i| MoveNote {
+            from: format!("{tag}-gone{i:04}"),
+            to: format!("{tag}-here{i:04}"),
+        })
+        .collect()
+}
+
+/// A start with two files alike, `a` and `b`; a side that moves them to `c` and `d` in one save,
+/// noted, then `c` on to `e` in another. Only the notes tell the files apart. Returns the start,
+/// and the side's tip with the same moves unnoted.
+fn moved_alike(h: &mut Hist) -> (Id, Id, Id) {
+    let first = h.first;
+    let none: &[(&str, &str)] = &[];
+    let s = h.plant(
+        &[first],
+        &tree(&[("a", f(BODY)), ("b", f(BODY))]),
+        Some(none),
+    );
+    let both = tree(&[("c", f(BODY)), ("d", f(BODY))]);
+    let t1 = h.plant(&[s], &both, Some(&[("a", "c"), ("b", "d")][..]));
+    let on = tree(&[("e", f(BODY)), ("d", f(BODY))]);
+    let t2 = h.plant(&[t1], &on, Some(&[("c", "e")][..]));
+    let unnoted = h.plant(&[s], &on, Some(none));
+    (s, t2, unnoted)
+}
+
+/// Where `start`'s files went on `side`, checking notes against `made`, and whether notes were
+/// believed.
+fn followed_with(h: &Hist, made: &mut Made, start: Id, side: Id) -> (Vec<(String, String)>, bool) {
+    let out = followed(&h.repo, made, &h.version(start), &h.version(side)).unwrap();
+    (out.went.into_iter().collect(), out.notes_unbelieved)
+}
+
+#[test]
+fn notes_within_what_a_combine_checks_are_followed() {
+    let mut h = Hist::new();
+    let (s, tip, unnoted) = moved_alike(&mut h);
+    let both = pairs(&[("a", "e"), ("b", "d")]);
+    // Three notes, three to check.
+    let mut made = Made {
+        notes_left: 3,
+        ..Made::default()
+    };
+    assert_eq!(followed_with(&h, &mut made, s, tip), (both.clone(), false));
+    assert_eq!((made.notes_left, made.notes_spent), (0, false));
+    assert_eq!(h.followed(h.version(s), h.version(tip)), both);
+    // Without notes, files alike can't be told apart.
+    assert_eq!(h.followed(h.version(s), h.version(unnoted)), pairs(&[]));
+}
+
+#[test]
+fn a_true_note_past_what_a_combine_checks_is_not_believed() {
+    let mut h = Hist::new();
+    let (s, tip, _) = moved_alike(&mut h);
+    // The newest save's one note fits; the save before it holds two, past what is left, so the
+    // chain isn't followed half-way: no note counts.
+    let mut made = Made {
+        notes_left: 2,
+        ..Made::default()
+    };
+    assert_eq!(followed_with(&h, &mut made, s, tip), (pairs(&[]), true));
+    assert_eq!((made.notes_left, made.notes_spent), (0, true));
+}
+
+#[test]
+fn once_the_notes_are_spent_no_save_is_read_for_them_on_either_side() {
+    let mut h = Hist::new();
+    let (s, tip, _) = moved_alike(&mut h);
+    let root = h.version(s).root;
+    let many = h.plant_root(&[s], root, untrue_notes(10, "x"));
+    let (vs, v_many, v_tip) = (h.version(s), h.version(many), h.version(tip));
+    let mut made = Made {
+        notes_left: 5,
+        ..Made::default()
+    };
+    let out = followed(&h.repo, &mut made, &vs, &v_many).unwrap();
+    assert!(out.notes_unbelieved && made.notes_spent);
+    // The other side's notes, which alone would be followed, aren't read.
+    let before = h.repo.store().saves_read();
+    let other = followed(&h.repo, &mut made, &vs, &v_tip).unwrap();
+    assert_eq!(h.repo.store().saves_read(), before);
+    assert!(other.went.is_empty() && other.notes_unbelieved, "{other:?}");
+}
+
+#[test]
+fn untrue_notes_past_what_a_combine_checks_are_told_once_and_moves_follow_contents() {
+    let mut h = Hist::new();
+    let s = player(&mut h);
+    // `side` moves `Player.cs` unnoted, and then five saves each note ten files never there.
+    let moved = moved_to("Characters/Player.cs", f(BODY));
+    let none: &[(&str, &str)] = &[];
+    let mut tip = h.plant(&[s], &moved, Some(none));
+    let root = h.version(tip).root;
+    for i in 0..5 {
+        tip = h.plant_root(&[tip], root, untrue_notes(10, &i.to_string()));
+    }
+    h.save("main", s, &moved_to("Player.cs", edit(1, "TWO")));
+    h.set(|st| {
+        st.lines.insert("side".into(), tip);
+    });
+    NOTES_CHECKED.set(0);
+    let tight = Bounds {
+        max_notes: 25,
+        ..bounds()
+    };
+    let done = combine_by(&mut h, "side", None, tight).unwrap();
+    // Two saves' notes fit; the third's don't, and are never checked.
+    assert_eq!(NOTES_CHECKED.get(), 20);
+    let told: Vec<&str> = done
+        .applied
+        .warnings
+        .iter()
+        .filter(|w| w.kind == warning::TOO_MANY_MOVE_NOTES)
+        .map(|w| w.message.as_str())
+        .collect();
+    assert_eq!(
+        told,
+        [
+            "The saves being combined hold more move notes than Opalro checks in one combine \
+             (1,000,000), so past that many it followed files that moved by their contents alone."
+        ]
+    );
+    assert_eq!(h.folder(), moved_to("Characters/Player.cs", edit(1, "TWO")));
+    assert_eq!(MAX_CHECKED_NOTES, 1_000_000);
+}
+
+#[test]
+fn notes_spent_while_combining_starting_points_are_told_once() {
+    let mut h = Hist::new();
+    let base = tree(&[("Player.cs", f(BODY)), ("Other.cs", f("other\n"))]);
+    let b1 = moved_to("src/Player.cs", f(BODY));
+    let b2 = tree(&[("Player.cs", f(BODY)), ("Other.cs", f("other, changed\n"))]);
+    let both = tree(&[
+        ("src/Player.cs", f(BODY)),
+        ("Other.cs", f("other, changed\n")),
+    ]);
+    let crossed = crossed(&mut h, &base, &[b1, b2], &both);
+    tips(
+        &mut h,
+        crossed,
+        &with(&both, &[("m.txt", f("m\n"))]),
+        &with(&both, &[("s.txt", f("s\n"))]),
+    );
+    // The starting point that moved `Player.cs` noted it, past a budget of none.
+    let none = Bounds {
+        max_notes: 0,
+        ..bounds()
+    };
+    let done = combine_by(&mut h, "side", None, none).unwrap();
+    let told = done
+        .applied
+        .warnings
+        .iter()
+        .filter(|w| w.kind == warning::TOO_MANY_MOVE_NOTES)
+        .count();
+    assert_eq!(told, 1);
+    assert!(h.folder().contains_key("src/Player.cs"));
+}
+
+#[test]
+fn a_walk_over_saves_with_notes_builds_none() {
+    let mut h = Hist::new();
+    let (s, tip, unnoted) = moved_alike(&mut h);
+    crate::save::NOTES_BUILT.set(0);
+    assert_eq!(only_in(&h.repo, tip, &[unnoted]).unwrap(), 2);
+    let starts = crate::ancestry::common_starts(&h.repo, &[tip], &[unnoted]).unwrap();
+    assert_eq!(starts, crate::ancestry::Starts::Found(vec![s]));
+    let mut ids = crate::changeids::ChangeIds::default();
+    assert_eq!(ids.chain(&h.repo, Some("side"), tip).unwrap().len(), 4);
+    assert_eq!(crate::save::NOTES_BUILT.get(), 0);
+    // Reading a save whole builds them.
+    h.save_of(tip);
+    assert_eq!(crate::save::NOTES_BUILT.get(), 1);
 }
 
 /// One side's work on a start of files `s0` to `s5`. First up to 3 moves, each saved alone, by
@@ -2788,6 +2969,7 @@ fn bounds() -> Bounds {
         max_held: MAX_HELD_TEXT,
         deadline: DEADLINE,
         max_left_bytes: MAX_LEFT_BYTES,
+        max_notes: MAX_CHECKED_NOTES,
         limits: SaveLimits::default(),
     }
 }

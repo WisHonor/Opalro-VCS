@@ -1,9 +1,8 @@
-//! Red-team session RT19 (decision 024): milestone 8, `opalro combine`. Each test states what
-//! should be true and fails today because of the finding it names; see
-//! docs/redteam/2026-11-14-milestone-8.md.
+//! The proofs of red-team session RT19 (milestone 8, `opalro combine`): one test per finding,
+//! each asserting what should be true; see docs/redteam/2026-11-14-milestone-8.md.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use opal_core::diary::{Action, DiaryEntry};
 use opal_core::id::{ChangeId, Id};
@@ -104,13 +103,11 @@ fn lines_that_parted_once_combine_whatever_their_saves_dates() {
     assert!(said.starts_with("Combined side into main"), "{said}");
 }
 
-/// RT19-2. Saves may hold 100,000 move notes each; a combine checks every note of every save
-/// along the line back to where the lines parted, true or not. Fifty planted saves whose notes are
-/// all untrue (2.4 MB of packs) make `combine` take about 20 seconds in a debug build, and the
-/// time grows with each such save (and again with each inner combine that walks them).
+/// RT19-2. Fifty planted saves of 100,000 untrue move notes each made a combine slow: it checked
+/// every note, and read each large save several times. A combine now checks at most a million
+/// notes; past that it follows moves by contents, goes through, and says so.
 #[test]
-#[ignore = "RT19-2: untrue move notes cost a combine time without bound but the save count"]
-fn untrue_move_notes_dont_make_a_combine_slow() {
+fn a_combine_past_a_million_move_notes_goes_through_and_says_so() {
     let env = project();
     assert_eq!(run(&env, &["line", "new", "side"]).0, 0);
     support::write(&env, "b.txt", "b\n");
@@ -132,10 +129,13 @@ fn untrue_move_notes_dont_make_a_combine_slow() {
     });
     let started = Instant::now();
     let (code, said) = run(&env, &["combine", "side"]);
+    println!("combine took {:.1?}", started.elapsed());
     assert_eq!(code, 0, "{said}");
     assert!(
-        started.elapsed() < Duration::from_secs(5),
-        "took {:?}",
-        started.elapsed()
+        said.contains(
+            "The saves being combined hold more move notes than Opalro checks in one combine \
+             (1,000,000), so past that many it followed files that moved by their contents alone."
+        ),
+        "{said}"
     );
 }

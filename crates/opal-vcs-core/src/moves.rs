@@ -197,23 +197,37 @@ pub(crate) struct Followed {
     pub replaced: BTreeSet<String>,
     /// Too many files left on the side to match them by their contents, so only notes count.
     pub too_many_left: bool,
+    /// The combine's notes were too many to check, so no note counts.
+    pub notes_unbelieved: bool,
+}
+
+/// The most move notes one combine checks, true or not, on both sides of every merge it makes.
+pub(crate) const MAX_CHECKED_NOTES: usize = 1_000_000;
+
+#[cfg(test)]
+thread_local! {
+    /// How many move notes the combines on this thread checked.
+    pub(crate) static NOTES_CHECKED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Where the files of `start` went on `side`. Listings in `made` are read before the store's.
 pub(crate) fn followed(
     repo: &Repository,
-    made: &Made,
+    made: &mut Made,
     start: &Version,
     side: &Version,
 ) -> Result<Followed, RepoError> {
     let store = repo.store();
     let noted = match (start.save, side.save) {
-        (Some(from), Some(tip)) => noted(repo, from, start.root, tip)?,
+        (Some(from), Some(tip)) if !made.notes_spent => noted(repo, made, from, start.root, tip)?,
         _ => BTreeMap::new(),
     };
     let mut at_start = Tree::new(store, &made.listings, start.root, EXACT);
     let mut on_side = Tree::new(store, &made.listings, side.root, EXACT);
-    let mut out = Followed::default();
+    let mut out = Followed {
+        notes_unbelieved: made.notes_spent,
+        ..Followed::default()
+    };
     // A side whose notes moved a file has moved it, whatever it holds where the file was.
     for (from, to) in noted {
         // The place counts as replaced only while a file is still there; edits in place keep
@@ -247,9 +261,11 @@ pub(crate) fn followed(
 
 /// The moves the notes of `tip`'s saves tell, back along first parents to `start` (whose root
 /// is `start_root`) and taken one after another; none when that path doesn't reach it. A note
-/// counts only when it is true of its own save.
+/// counts only when it is true of its own save. Each save's notes are counted against what
+/// `made` has left to check before any is; none at all once a save's are more than that.
 fn noted(
     repo: &Repository,
+    made: &mut Made,
     start: Id,
     start_root: Id,
     tip: Id,
@@ -284,10 +300,19 @@ fn noted(
         };
         let parent_root = parent_save.as_ref().map_or(start_root, |p| p.root);
         let mut before = Tree::new(repo.store(), &unstored, parent_root, EXACT);
+        // A chain followed half-way would be wrong, so a save past the budget spends it all.
+        let Some(left) = made.notes_left.checked_sub(save.move_notes.len()) else {
+            made.notes_left = 0;
+            made.notes_spent = true;
+            return none;
+        };
+        made.notes_left = left;
         // A save's notes all hold between it and its first parent, so they are taken together.
         // A file removed and made again in a later save is taken for the same file, as an edit.
         let mut true_notes = Vec::new();
         for n in std::mem::take(&mut save.move_notes) {
+            #[cfg(test)]
+            NOTES_CHECKED.set(NOTES_CHECKED.get() + 1);
             if validate_path(&n.from).is_ok()
                 && validate_path(&n.to).is_ok()
                 && true_of(&mut before, &mut after, &n)?
@@ -328,13 +353,13 @@ fn noted(
 /// Whether a note is true of the save it is in: its file left `from` for `to` with the same
 /// non-empty contents, as a save's own notes are made.
 fn true_of(before: &mut Tree, after: &mut Tree, n: &MoveNote) -> Result<bool, StoreError> {
-    let (Some(left), Some(came)) = (
-        file(before.entry(&n.from)?.as_ref()).cloned(),
-        file(after.entry(&n.to)?.as_ref()).cloned(),
-    ) else {
+    // An untrue note is mostly one whose file was never there: that is answered first.
+    let Some(left) = file(before.entry(&n.from)?.as_ref()).map(|e| e.id) else {
         return Ok(false);
     };
-    Ok(left.id == came.id && after.entry(&n.from)?.is_none() && before.entry(&n.to)?.is_none())
+    Ok(after.entry(&n.from)?.is_none()
+        && before.entry(&n.to)?.is_none()
+        && file(after.entry(&n.to)?.as_ref()).is_some_and(|e| e.id == left))
 }
 
 /// Whether a move from `from` to `to` counts: the start holds a file at `from` and has room at

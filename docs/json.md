@@ -225,7 +225,7 @@ Saving gives one of two documents, told apart by `result`.
 | `starts` | list of string | The saves where the two lines parted, 64 hex digits each, in ID order; `[]` unless `result` is `"combined"`. |
 | `merged_files` | list of string | The paths of the files merged line by line; `[]` if none. |
 | `written`, `removed`, `not_written`, `placeholders`, `safety_copies` | | As in `opalro goto --json`; `0` and `[]` for `"nothing"`. |
-| `warnings` | list | See §4: the warnings a `goto` can give, and `merge_timed_out` and `moves_not_followed`. |
+| `warnings` | list | See §4: the warnings a `goto` can give, and `merge_timed_out`, `moves_not_followed` and `too_many_move_notes`. |
 
 A refusal is the §5 error document. A combine stopped by conflicts names the conflicting files in `error.message`, each on a line of its own with what happened to it on the two lines: the first 100 in path order, then how many more.
 
@@ -585,6 +585,7 @@ Folders are not listed; the files in them are.
 | `diff_timed_out` | `changes` | Comparing a file line by line took more than 2 seconds, so Opalro stopped and shows its changes in bigger pieces than they could be (its `timed_out` is `true`). One warning for each such file, naming it. |
 | `merge_timed_out` | `combine` | Comparing a file's versions line by line took more than 2 seconds, so Opalro compared them roughly, in bigger pieces than it could have; what it merged is right. One warning for each such file, naming it. |
 | `moves_not_followed` | `combine` | Too many files left their places on one of the lines (or between the two lines' common starting points, while those were combined) for Opalro to match them by their contents, so files that moved there without a move note were not followed: a file moved on one line and changed on the other may then stop the combine as a conflict. The message names the line. |
+| `too_many_move_notes` | `combine` | The saves being combined hold more move notes than one combine checks (1,000,000, on both lines and in the starting points' own combine together). Past that many, notes were not believed: files that moved were followed by their contents alone, within the bound `moves_not_followed` tells of. Told once for the whole combine. |
 | `elevated_only` | `start`, `import`, on Windows | The project belongs to the Administrators group, so it opens only from an administrator terminal unless its folder is added to `safe-folders`. |
 | `first_save_not_read` | `start` | The project was made, but Opalro couldn't read its first save back, so `save` is `null`. The message says why, and to run `opalro history` to check that the project reads. |
 | `nested_opalro_folder` | `import` | Git checked out a folder named `.opalro` below the top of the project (one in its current commit). Opalro left it out of history, but Opalro commands run inside it would take it for a project. Each of the first 100 gets a warning naming it; one more warning counts the rest. A folder Git holds at two paths (one tree used twice) is named at the first only. |

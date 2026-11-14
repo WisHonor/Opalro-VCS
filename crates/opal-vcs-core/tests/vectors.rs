@@ -185,6 +185,12 @@ fn save_vectors_hold() {
     assert!(!vectors.is_empty());
     for v in vectors {
         let s = Save::decode(&unhex(&v.hex), false).unwrap_or_else(|e| panic!("{}: {e}", v.name));
+        // A walk's reading of a save gives what decoding it does.
+        let links =
+            Save::links(&unhex(&v.hex), false).unwrap_or_else(|e| panic!("{}: {e}", v.name));
+        assert_eq!(links.parents, s.parents, "{}", v.name);
+        assert_eq!(links.time_ms, s.saver.time_ms, "{}", v.name);
+        assert_eq!(links.change_id, s.change_id, "{}", v.name);
         assert_eq!(hex(&s.encode()), v.hex, "{}", v.name);
         assert_eq!(s.id().to_hex(), v.id, "{}", v.name);
     }

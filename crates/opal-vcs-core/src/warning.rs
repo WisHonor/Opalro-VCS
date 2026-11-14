@@ -76,6 +76,8 @@ pub const DIFF_TIMED_OUT: &str = "diff_timed_out";
 pub const MERGE_TIMED_OUT: &str = "merge_timed_out";
 /// A combine followed no moves by contents on a side that too many files left.
 pub const MOVES_NOT_FOLLOWED: &str = "moves_not_followed";
+/// A combine's saves held more move notes than it checks, so past them it followed by contents.
+pub const TOO_MANY_MOVE_NOTES: &str = "too_many_move_notes";
 /// The project's `opalro.toml` couldn't be used at all, so Opalro's own values apply.
 pub const RULES_FILE_SKIPPED: &str = "rules_file_skipped";
 /// Parts of `opalro.toml` couldn't be used and were passed over; the rest of it counts.

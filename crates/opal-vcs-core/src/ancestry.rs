@@ -143,11 +143,11 @@ impl<'r, W: Watch> Walk<'r, W> {
                 let save = self
                     .repo
                     .store()
-                    .save(&id, self.repo.signatures_allowed())?;
+                    .save_links(&id, self.repo.signatures_allowed())?;
                 e.insert(Node {
                     marks: 0,
                     spread: 0,
-                    time: save.saver.time_ms,
+                    time: save.time_ms,
                     parents: save.parents,
                 })
             }
@@ -270,7 +270,11 @@ fn drop_held_at_once(
     let parents_of = |id: &Id| -> Result<Vec<Id>, RepoError> {
         Ok(match known.get(id) {
             Some(node) => node.parents.clone(),
-            None => repo.store().save(id, repo.signatures_allowed())?.parents,
+            None => {
+                repo.store()
+                    .save_links(id, repo.signatures_allowed())?
+                    .parents
+            }
         })
     };
     let all: HashSet<Id> = candidates.iter().copied().collect();
