@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 8 planning)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 012](012-lines.md) (combining is a three-way merge from the common starting point, and several common starting points are recorded through decision 007's record); [decision 160](160-whether-a-save-is-in-anothers-history.md) (the walk)
+- **Refined by:** [decision 170](170-what-building-milestone-8-refined.md) (when the walk's candidates are the answer; starting points with no save in common; refusals met while starting points are combined)
 
 ## Context
 

@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 8 planning)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 006](006-save-object.md) (a save records a move only when Opalro is certain; merges use move notes when present); [decision 012](012-lines.md) (combining follows move notes); [decision 166](166-merging-two-versions-of-the-project.md) (the file-by-file merge)
+- **Refined by:** [decision 170](170-what-building-milestone-8-refined.md) (what a save may hold for its notes; a side's notes decide whether it moved a file; a note must be true of its own save; a file counts as removed where another arrived; what both sides hold alike is taken)
 
 ## Context
 

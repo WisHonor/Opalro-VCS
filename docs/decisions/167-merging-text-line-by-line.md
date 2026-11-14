@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 8 planning)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 012](012-lines.md) (text merged line by line; binary files never merged automatically); [decision 004](004-project-contents.md) (bytes in, bytes out: no line-ending conversion); [decision 007](007-conflicts.md) (presets decide which files get conflict markers; the Unity preset treats scenes, prefabs and `.meta` files like binaries); [decision 058](058-changes-line-by-line.md) (how `changes` compares lines, and what it takes for text); [decision 114](114-bolt-toml-keys-and-how-bolt-reads-it.md) (`conflict-markers`)
+- **Refined by:** [decision 170](170-what-building-milestone-8-refined.md) (where lines repeat Opalro and Git can differ in three ways; a leading `#` and letter case in a rule's patterns)
 
 ## Context
 
