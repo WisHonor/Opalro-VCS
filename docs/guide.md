@@ -963,7 +963,7 @@ They are ordinary files: they go into your saves like any other file, so a copy 
 
 **Custom** writes no file. A project with no `opalro.toml` uses Opalro's own values. That includes an imported project, unless its Git history held an `opalro.toml` of its own.
 
-"Lockable" and "conflict markers" are only recorded in v0.1: locking a file arrives with syncing, and conflict markers with combining lines. The presets write them now so a project has them from its first save.
+"Lockable" is only recorded: locking a file arrives with syncing. "Conflict markers" already decides one thing: `opalro combine` never merges a file line by line when its rule says `false`, so the Game preset's Unity scenes, prefabs and `.meta` files stop a combine when both lines changed them differently; the markers themselves arrive when a combine can keep a conflict. The presets write both now so a project has them from its first save.
 
 ### `opalro.toml`, key by key
 
@@ -993,7 +993,7 @@ ask-before-saving-files-over = 10000
 Each `[[rule]]` has `files`, a list of one or more patterns written as in `.opalroignore`, and either or both of these, each `true` or `false`:
 
 - `lockable` (`false` when no rule says): the file can be locked, once locking arrives.
-- `conflict-markers` (`true` when no rule says): whether a conflict inside the file is shown with markers, once combining arrives. Scene files that an engine must read whole are better off without them.
+- `conflict-markers` (`true` when no rule says): whether `opalro combine` may merge the file line by line when both lines changed it; with `false`, it never does, and different changes on both lines stop the combine. Once a combine can keep a conflict, it also says whether the conflict is shown with markers inside the file. Scene files that an engine must read whole are better off without them. Where several rules match a file and give this key, the last one decides; a rule's patterns ignore the letter case of A to Z on every system, so `*.unity` also covers `Main.UNITY`.
 
 ```toml
 [[rule]]
@@ -1111,7 +1111,7 @@ opalro shelf --list
 No shelves: opalro shelf sets your unsaved changes aside on one.
 ```
 
-If your folder already differs from the shelf's save at a path the shelf changes, `opalro unshelf` stops and changes nothing, since combining two versions of a file comes later. Save, shelve or discard what is there first.
+If your folder already differs from the shelf's save at a path the shelf changes, `opalro unshelf` stops and changes nothing, since bringing a shelf back doesn't merge two versions of a file. Save, shelve or discard what is there first.
 
 Making a shelf and bringing one back are steps that `opalro undo` takes back. Shelving only some files, keeping a shelf while bringing it back, and dropping a shelf aren't built yet; to drop one, bring it back and then `opalro discard`.
 

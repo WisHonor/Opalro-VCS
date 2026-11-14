@@ -1,6 +1,6 @@
 # Opalro Benchmarks
 
-> **Status:** started 2026-11-09 with the two speed gates for v0.1; Opalro against Git and Git LFS, the speeds of a save's parts and the ruling on compressing again were added the same day. A third gate, against Git on a code project, and the profile milestone 6 starts from (§7) were added on 2026-11-10; the numbers in §1 to §6 are from before milestone 6's speed work, and §8, added the same day, gives them after it; §9, added that day too, measures both halves of milestone 6 together; §10, added on 2026-11-11, has the gate's new rule for v0.1, its ten runs on the finished code, and the finished code beside `main` turn by turn; §11, added on 2026-11-14, has milestone 7's walk on Git's own history, and the gate before and after milestone 7 on the runners' new image, where `status` now sits at its limit. Every speed or size claim Opalro makes comes from this page, the ones Git or Git LFS wins included ([decision 088](decisions/088-benchmarks-and-the-speed-gates.md)).
+> **Status:** started 2026-11-09 with the two speed gates for v0.1; Opalro against Git and Git LFS, the speeds of a save's parts and the ruling on compressing again were added the same day. A third gate, against Git on a code project, and the profile milestone 6 starts from (§7) were added on 2026-11-10; the numbers in §1 to §6 are from before milestone 6's speed work, and §8, added the same day, gives them after it; §9, added that day too, measures both halves of milestone 6 together; §10, added on 2026-11-11, has the gate's new rule for v0.1, its ten runs on the finished code, and the finished code beside `main` turn by turn; §11, added on 2026-11-14, has milestone 7's walk on Git's own history, and the gate before and after milestone 7 on the runners' new image, where `status` now sits at its limit; §12, added the same day, has milestone 8's common starting points and its search through every parent on Git's own history, the gate after milestone 8, and the cost of the move notes every save now works out. Every speed or size claim Opalro makes comes from this page, the ones Git or Git LFS wins included ([decision 088](decisions/088-benchmarks-and-the-speed-gates.md)).
 
 **In plain words.** Opalro promises three things before v0.1 (decisions [023](decisions/023-v0.1-speed-bar.md) and [099](decisions/099-a-third-speed-gate-within-twice-gits-time.md)): saving a huge file must not eat the computer's memory, asking what changed in a big project must be quick, and on an everyday code project Opalro must stay within twice Git's time. This page says how each was measured, on which machines, and what came out, pass or fail. It then puts Opalro beside Git and Git LFS on the same files, step by step, and says where each one wins.
 
@@ -1008,3 +1008,37 @@ The Nightly workflow's differential job ([run 43582373823](https://github.com/Wi
 - **Git is quicker on these runners than it was.** In §10's ten runs of 2026-11-11, where Opalro took 13.5 and 14.0 ms, Git took 7.9 and 8.2 ms; now it takes 6.4 to 7.1 ms. In between the runners' image changed: `main`'s Nightly of 2026-11-13 ran on ubuntu-24.04 image 20261101.360.1 with git 2.56.0, today's runs on 20261111.127.1 and 20261111.370.1 with git 2.56.1. Which of the two made Git quicker wasn't measured.
 - **Windows passed every run,** on both commits: `status` 1.64 to 1.81 times Git's time, the small save 0.67 to 0.73, `goto` 1.66 to 1.79.
 - **What follows.** The gate for `status` can now fail on Linux with `main`'s own code, on a runner where Git is quick. The limit is the owner's (decisions 128 and 132) and wasn't touched. `status` needs room under it again before v0.2 is released (the follow-ups list).
+
+## 12. v0.2, milestone 8: where two lines parted and the search through every parent on Git's own history, and the gate
+
+**In plain words.** Milestone 8 added three things that cost time. A combine looks for every save where the two lines parted ([decision 164](decisions/164-where-two-lines-parted.md)): on Git's own repository it gave Git's own answer for all 64 pairs of tips. A save's ID that the line you're on doesn't have is now looked for through every parent ([decision 169](decisions/169-saves-reached-through-a-combine.md)): an ID no save has took 1.44 seconds to look for there. And every save now works out which files it moved ([decision 168](decisions/168-moves-in-saves-and-in-combines.md)): the small save is no slower for it. `status` is still at its limit on Linux, as in §11, with Opalro's own time what it was.
+
+Measured on 2026-11-14, on `milestone-8`: the Nightly workflow at `f5317d3`, and the speed gate run by hand twice at `cee0175`, the commit that made every save work out its move notes.
+
+### Git's own repository
+
+The Nightly workflow's differential job ([run 43640086187](https://github.com/WisHonor/Opalro-VCS/actions/runs/43640086187)) imported git/git: 86,273 commits, 1 line, 8 server lines and 1,018 tags in 150.0 s, 437 MiB at peak, everything matching Git. (§11's import took 118.5 s; how long an import takes depends on the runner's processor, §3.)
+
+- **Common starting points:** on the 64 pairs of tips the ancestry walk compares, `common_starts` gave exactly the commits `git merge-base --all` prints, every pair.
+- **The ancestry walk** on those 64 pairs: 19,136.5 ms in all, each count equal to `git rev-list --count`'s (§11: 17,850.1 ms).
+- **A change ID no save has** (`zzzzzzzzzzzzzzzz`) took 1.44 s to look for: the first step looks on the line, and the second reads every save that a line, a server line or a tag reaches, through every parent. A line or tag named only with the letters k to z pays it each time it is named, since the check that the name isn't also the start of a save's ID takes both steps. A table of every reachable save's change ID would end it (the follow-ups list).
+- The nightly run's fuzz job was still running when these numbers were read, so nothing is said of it here.
+
+### The gate after milestone 8
+
+`bench/run.sh gate` in the same Nightly run, on a Xeon 6975P-C (Opalro's median, Git's median, the ratio). Limits: `status` and the small save 2, `goto` 3.5.
+
+| `status` | Small save | `goto` |
+|---|---|---|
+| 12.7 ms, 6.1 ms, **2.075, over** | 16.4 ms, 14.3 ms, 1.149 | 17.7 ms, 6.5 ms, 2.739 |
+
+- **`status` is over its limit for the reason §11 gives:** Opalro's own time is what it was (13.1 to 13.9 ms in §11's runs on the same processor type, before and after milestone 7), and Git's is short on this runner. Milestone 8 changed nothing `status` runs.
+- **Windows passed.**
+
+### The small save, with move notes
+
+Every save now works out its move notes against its first parent. At `cee0175` that took a walk of the changed folders of its own; since `4ac0c0f` the notes come from the one pass that also counts the save's changed files, which, on a small save counted once by hand, asked the store for 3 listings where the count alone had asked for 6. The Nightly run's gate above is after it: 16.4 ms on the Xeon 6975P-C, where §11's runs took 17.3 to 18.0 ms. Two runs of the gate by hand at `cee0175` ([43610198315](https://github.com/WisHonor/Opalro-VCS/actions/runs/43610198315) and [43610205594](https://github.com/WisHonor/Opalro-VCS/actions/runs/43610205594)) timed the small save on Linux at 28.7 ms against Git's 26.9 on an EPYC 7763, and 19.3 ms against 21.8 on an EPYC 9V45: no slower than before (§11: 28.9 ms against 28.8 with `main`'s code on an EPYC 7763), within its limit of 2.
+
+### A combine's memory
+
+`a_combine_of_many_large_text_files_stays_within_memory` runs on Linux on every push ([testing.md](testing.md) §3): a combine of twelve 30 MiB text files, each changed on both lines and merged line by line, stays under 300 MB at its peak. The test asserts the bound and prints no figure, so there is no number to give here.
