@@ -140,16 +140,15 @@ pub(crate) fn merge_trees(
         let Some(done) = folders.pop() else {
             return Ok(walk.merged);
         };
-        let name = done.name.clone();
+        let (name, held_empty) = (done.name.clone(), done.held_empty);
         let (id, empty) = walk.leave(done)?;
         match folders.last_mut() {
             None => {
                 walk.merged.root = id;
                 return Ok(walk.merged);
             }
-            // An empty folder only the merge made is no side's own; one a side holds empty is
-            // taken whole before this.
-            Some(up) if !empty => up.entries.push(Entry {
+            // An empty folder only the merge made is no side's own.
+            Some(up) if held_empty || !empty => up.entries.push(Entry {
                 name,
                 kind: EntryKind::Folder,
                 id,
@@ -224,6 +223,8 @@ struct Folder {
     path: String,
     name: String,
     depth: usize,
+    /// Both sides have the folder and one holds it empty, so it stays though nothing is left.
+    held_empty: bool,
     /// Ours' and theirs' listings here, for the names check.
     ours: Listing,
     theirs: Listing,
@@ -264,6 +265,8 @@ impl Walk<'_> {
             }
         }
         let [s, o, t] = &listings;
+        let both = into.ids[1].is_some() && into.ids[2].is_some();
+        let held_empty = both && (o.entries().is_empty() || t.entries().is_empty());
         let mut entries = Vec::new();
         let mut todo = Vec::new();
         for (name, three) in names(s, o, t) {
@@ -304,6 +307,7 @@ impl Walk<'_> {
             path,
             name,
             depth,
+            held_empty,
             ours,
             theirs,
             entries,

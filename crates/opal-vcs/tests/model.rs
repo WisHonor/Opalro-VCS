@@ -2411,6 +2411,21 @@ fn merge(
             Some(_) => clash(&mut trees, at),
         }
     }
+    // A folder the moves or a conflict left empty is no version's own.
+    for (tree, before) in trees.iter_mut().zip(was) {
+        loop {
+            let emptied: Vec<String> = (tree.folders.iter())
+                .filter(|p| holds_nothing(tree, p) && !holds_nothing(before, p))
+                .cloned()
+                .collect();
+            if emptied.is_empty() {
+                break;
+            }
+            for p in emptied {
+                tree.folders.remove(&p);
+            }
+        }
+    }
     let [s, o, t] = &trees;
     let mut paths = PathMerge {
         three: [s, o, t],
@@ -2442,6 +2457,12 @@ fn at<'a>(tree: &'a Tree, path: &str) -> At<'a> {
         None if tree.folders.contains(path) => At::Folder,
         None => At::Nothing,
     }
+}
+
+/// Whether nothing is below the folder `path` in `tree`.
+fn holds_nothing(tree: &Tree, path: &str) -> bool {
+    let below = |p: &&String| within(p, path) && *p != path;
+    !tree.files.keys().any(|p| below(&p)) && !tree.folders.iter().any(|p| below(&p))
 }
 
 /// Whether two trees hold the same at `path` and below it.
@@ -2497,13 +2518,17 @@ impl PathMerge<'_> {
         }
         match (at(s, path), at(o, path), at(t, path)) {
             // Two folders, or a folder against its removal, merge inside: what is left there keeps
-            // the folder, and a folder left with nothing is gone. A side's own empty folder comes
-            // only whole, above.
+            // the folder. Left with nothing, two folders stay when a side holds its own empty;
+            // else the folder is gone.
             (_, At::Folder, At::Folder)
             | (At::Folder, At::Folder, At::Nothing)
             | (At::Folder, At::Nothing, At::Folder) => {
                 for c in self.children(path) {
                     self.merge_at(&c);
+                }
+                let both = at(o, path) == At::Folder && at(t, path) == At::Folder;
+                if both && (holds_nothing(o, path) || holds_nothing(t, path)) {
+                    self.out.add_folder(path);
                 }
             }
             (At::File(s), At::File(o), At::File(t)) => self.file(path, s, o, t),

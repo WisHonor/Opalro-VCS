@@ -434,6 +434,28 @@ fn a_folder_one_side_moved_a_file_out_of_and_the_other_removed_one_from_is_gone(
 }
 
 #[test]
+fn a_folder_a_line_holds_empty_stays_when_the_other_lines_changes_leave_nothing_in_it() {
+    let base = tree(&[("d/f", f("f\n")), ("d/g", f("g\n"))]);
+    let emptied = tree(&[("d", V::Folder)]);
+    let one_left = tree(&[("d/f", f("f\n"))]);
+    for (side, main) in [(&emptied, &one_left), (&one_left, &emptied)] {
+        let got = combined_tree(&mut Hist::new(), &base, side, main, true);
+        assert_eq!(got, emptied);
+    }
+}
+
+#[test]
+fn a_folder_one_line_holds_empty_and_the_other_removed_is_gone() {
+    let base = tree(&[("d/f", f("f\n")), ("x", f("x\n"))]);
+    let emptied = tree(&[("d", V::Folder), ("x", f("x\n"))]);
+    let removed = tree(&[("x", f("x\n"))]);
+    for (side, main) in [(&emptied, &removed), (&removed, &emptied)] {
+        let got = combined_tree(&mut Hist::new(), &base, side, main, true);
+        assert_eq!(got, removed);
+    }
+}
+
+#[test]
 fn an_empty_folder_a_line_saved_is_kept() {
     let empty = ("d", V::Folder);
     // Both lines hold it empty.
@@ -1184,8 +1206,8 @@ struct Model {
 }
 
 /// Merges the folder at `path` (`""` the top) whose contents are `s`, `o` and `t`, and adds to
-/// `m` what it holds. A folder below the top is there only when something is left in it: an empty
-/// folder comes only from a side that held it so, taken as it was.
+/// `m` what it holds. A folder below the top is there when something is left in it; an empty one
+/// only when a side holds it empty itself.
 fn model_folder(path: &str, s: &Tree, o: &Tree, t: &Tree, m: &mut Model) {
     let before = m.files.len();
     let mut kept_names = BTreeSet::new();
@@ -1251,7 +1273,17 @@ fn model_entry(path: &str, s: &Node, o: &Node, t: &Node, m: &mut Model) -> bool 
         m.files.len() > before
     };
     match (s, o, t) {
-        (_, Node::Folder(a), Node::Folder(b)) => return merge_folders(a, b, m),
+        (_, Node::Folder(a), Node::Folder(b)) => {
+            if merge_folders(a, b, m) {
+                return true;
+            }
+            // Nothing left: a folder one side holds empty stays empty; else it is gone.
+            if a.is_empty() || b.is_empty() {
+                m.files.insert(path.to_owned(), V::Folder);
+                return true;
+            }
+            return false;
+        }
         (Node::Folder(_), Node::Folder(a), Node::Missing) => return merge_folders(a, &empty, m),
         (Node::Folder(_), Node::Missing, Node::Folder(b)) => return merge_folders(&empty, b, m),
         (Node::Leaf(V::File(sc, sx)), Node::Leaf(V::File(oc, ox)), Node::Leaf(V::File(tc, tx))) => {
@@ -2708,6 +2740,22 @@ fn moves_case(
         let below = format!("{a}/");
         for v in &mut was {
             v.retain(|p, _| p != a && !p.starts_with(&below));
+        }
+    }
+    // A folder these steps emptied is no version's own: only one a version held empty stays.
+    for (v, before) in was.iter_mut().zip(&three) {
+        let is_empty = |t: &Tree, p: &str| node(t, p) == Node::Folder(Tree::new());
+        loop {
+            let emptied: Vec<String> = (v.iter())
+                .filter(|(p, x)| **x == V::Folder && is_empty(v, p) && !is_empty(before, p))
+                .map(|(p, _)| p.clone())
+                .collect();
+            if emptied.is_empty() {
+                break;
+            }
+            for p in emptied {
+                v.remove(&p);
+            }
         }
     }
     let mut want = model(&was[0], &was[1], &was[2]);
