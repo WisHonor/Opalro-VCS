@@ -12,15 +12,15 @@ use std::sync::Arc;
 use opal_platform::dir::{Dir, EntryMeta, EntryType};
 
 use crate::changeids::ChangeIds;
-use crate::diary::{Action, DiaryEntry, Position, State, line_named_alike, validate_line_name};
+use crate::diary::{Action, DiaryEntry, Position, State};
 use crate::diff::count_changes;
 use crate::drive::{self, Drive};
-use crate::encoding::DecodeError;
 use crate::filecache::{self, FileCache, FileState};
 use crate::fsio;
 use crate::history;
 use crate::id::{ChangeId, ContentHasher, Id, hash_content};
 use crate::ingest::{self, IngestError, Ready};
+use crate::lines::{NameError, check_new_name};
 use crate::link;
 use crate::listing::{Entry, EntryKind, Listing, SaveLimits};
 use crate::names::{Given, PortabilityProblem, folder_problems};
@@ -176,20 +176,9 @@ pub enum SaveError {
     NeedsMessage,
     #[error("You're at a save, not on a line, so this save needs a new line to go on.")]
     NeedsLineName,
-    // `reason` is Opalro's own wording.
-    #[error("`{}` can't be a line's name: {reason}.", escape(name, false))]
-    BadLineName { name: String, reason: &'static str },
-    #[error(
-        "There is already a line {}, and two lines can't have names that differ only by letter \
-         case.",
-        escape(taken, false)
-    )]
-    LineTaken { taken: String },
-    #[error(
-        "You're on line {}, and making a new line from a line comes in v0.2.",
-        escape(line, false)
-    )]
-    LineFromLine { line: String },
+    /// `--line` named a line that can't be made; never [`NameError::Repo`].
+    #[error(transparent)]
+    Name(NameError),
     #[error(
         "{} matches nothing in your files or in the last save.",
         escape(given, false)
@@ -226,9 +215,12 @@ pub enum SaveError {
     LargeSave(LargeSave),
     #[error("You're at a save, not on a line, so there is no newest save of a line to amend.")]
     AmendAtSave,
+    #[error("An amend replaces the newest save of your line, so it can't start a new line.")]
+    AmendNewLine,
     #[error("{}", shown_too(by))]
     AmendShared {
-        /// Who else shows the save: `line x`, `server line y@origin` or `tag v1`.
+        /// Who else shows the save, each as shown, escaped: `line x`, `server line y@origin` or
+        /// `tag v1`.
         by: Vec<String>,
     },
 }
@@ -237,6 +229,15 @@ pub enum SaveError {
 impl From<StoreError> for SaveError {
     fn from(e: StoreError) -> Self {
         SaveError::Repo(e.into())
+    }
+}
+
+impl From<NameError> for SaveError {
+    fn from(e: NameError) -> Self {
+        match e {
+            NameError::Repo(e) => SaveError::Repo(e),
+            e => SaveError::Name(e),
+        }
     }
 }
 
@@ -320,7 +321,7 @@ fn lfs_pointers_in_folder(paths: &[String], count: u64) -> String {
 
 /// Names the first few of those that show the save an amend would replace, and counts the rest.
 fn shown_too(by: &[String]) -> String {
-    let mut named: Vec<String> = by.iter().take(NAMED).map(|b| escape(b, false)).collect();
+    let mut named: Vec<String> = by.iter().take(NAMED).cloned().collect();
     let more = by.len().saturating_sub(NAMED);
     if more > 0 {
         named.push(format!("{more} more"));
@@ -392,12 +393,7 @@ impl SaveError {
                 "Say what you changed: opalro save \"describe your change\"".into()
             }
             SaveError::NeedsLineName => "Name it: opalro save --line <name> \"message\"".into(),
-            SaveError::BadLineName { .. } | SaveError::LineTaken { .. } => {
-                "Choose another name.".into()
-            }
-            SaveError::LineFromLine { line } => {
-                format!("Leave out --line to save on {}.", escape(line, false))
-            }
+            SaveError::Name(e) => e.hint()?,
             SaveError::NoMatch { .. } => {
                 "Name files, folders or patterns from the folder you are in.".into()
             }
@@ -431,6 +427,9 @@ impl SaveError {
             SaveError::AmendAtSave => {
                 "To amend a line's newest save, go to the line first: opalro goto <line>".into()
             }
+            SaveError::AmendNewLine => {
+                "To start a line with these changes: opalro save --line <name> \"message\"".into()
+            }
             SaveError::AmendShared { .. } => {
                 "Save your changes as a new save instead: opalro save \"describe your change\""
                     .into()
@@ -457,6 +456,9 @@ pub fn save_folder(
     if req.message.is_none() && !req.amend {
         return Err(SaveError::NeedsMessage);
     }
+    if req.amend && req.new_line.is_some() {
+        return Err(SaveError::AmendNewLine);
+    }
     let lock = repo.lock_for_change(req.command, on_wait)?;
     // A stopped switch is finished first, so the save is of the folder it left. What came of it
     // is kept with the store's warnings, so it is told even if the save then fails.
@@ -469,7 +471,7 @@ pub fn save_folder(
     if req.amend && matches!(entry.state.position, Position::AtSave(_)) {
         return Err(SaveError::AmendAtSave);
     }
-    let (line, parent_id) = save_goes_on(&entry.state, req.new_line)?;
+    let (line, parent_id) = save_goes_on(repo, &entry.state, req.new_line)?;
     let parent = repo.store().save(&parent_id, repo.signatures_allowed())?;
     // An amend needs the change-ID cache before the walk; a save, only once it has its save.
     let mut early_cache = None;
@@ -726,18 +728,19 @@ pub(crate) fn shown_elsewhere(
 ) -> Result<Vec<String>, SaveError> {
     let mut by: Vec<String> = lines_reaching(repo, cache, state, line, id, &save.change_id)?
         .into_iter()
-        .map(|name| format!("line {name}"))
+        .map(|name| format!("line {}", escape(name, false)))
         .collect();
     for (server, lines) in &repo.server_lines(state)?.servers {
         for (name, &tip) in lines {
             if tip == id {
+                let (name, server) = (escape(name, false), escape(server, false));
                 by.push(format!("server line {name}@{server}"));
             }
         }
     }
     for (name, tag) in &repo.tag_list(state)?.tags {
         if tag.save == id {
-            by.push(format!("tag {name}"));
+            by.push(format!("tag {}", crate::tags::shown_name(name)));
         }
     }
     Ok(by)
@@ -945,34 +948,29 @@ fn large_save(
     }))
 }
 
-/// The line a save goes on, and the save it builds on: the current line or, at a save, the new
-/// line `new_line`, which the save's diary entry then makes. `None` at a save without one.
-fn save_goes_on(state: &State, new_line: Option<&str>) -> Result<(Option<String>, Id), SaveError> {
-    match (&state.position, new_line) {
-        (Position::OnLine(line), None) => {
-            let tip = *state.lines.get(line).ok_or_else(|| RepoError::Damaged {
-                detail: format!("the current line {line} has no save"),
-            })?;
-            Ok((Some(line.clone()), tip))
+/// The line a save goes on, and the save it builds on: the current line, or the new line
+/// `new_line`, which the save's diary entry then makes; the line the project was on stays where
+/// it was. `None` at a save without one.
+fn save_goes_on(
+    repo: &Repository,
+    state: &State,
+    new_line: Option<&str>,
+) -> Result<(Option<String>, Id), SaveError> {
+    let parent = match &state.position {
+        Position::OnLine(line) => *state.lines.get(line).ok_or_else(|| RepoError::Damaged {
+            detail: format!("the current line {line} has no save"),
+        })?,
+        Position::AtSave(at) => *at,
+    };
+    let line = match (&state.position, new_line) {
+        (_, Some(name)) => {
+            check_new_name(repo, state, name, None)?;
+            Some(name.to_owned())
         }
-        (Position::OnLine(line), Some(_)) => Err(SaveError::LineFromLine { line: line.clone() }),
-        (Position::AtSave(at), None) => Ok((None, *at)),
-        (Position::AtSave(at), Some(name)) => {
-            validate_line_name(name).map_err(|e| SaveError::BadLineName {
-                name: name.to_owned(),
-                reason: match e {
-                    DecodeError::Invalid(reason) => reason,
-                    _ => "it breaks the rules for line names",
-                },
-            })?;
-            if let Some(taken) = line_named_alike(&state.lines, name) {
-                return Err(SaveError::LineTaken {
-                    taken: taken.to_owned(),
-                });
-            }
-            Ok((Some(name.to_owned()), *at))
-        }
-    }
+        (Position::OnLine(line), None) => Some(line.clone()),
+        (Position::AtSave(_), None) => None,
+    };
+    Ok((line, parent))
 }
 
 /// Writes `seen`, holding what this walk vouched for and learned of the files, as the file-state
@@ -2923,9 +2921,6 @@ mod tests {
                 paths: vec!["fine".into(), hostile()],
                 count: 2,
             },
-            SaveError::AmendShared {
-                by: vec!["line fine".into(), format!("tag {HOSTILE}")],
-            },
         ] {
             assert_hostile_text_escaped(&e.to_string());
         }
@@ -3059,6 +3054,55 @@ mod tests {
             panic!("nothing was amended");
         };
         assert_eq!(save.message, "Start project");
+    }
+
+    #[test]
+    fn an_amend_can_t_start_a_new_line() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"a");
+        let head = repo.head().unwrap();
+        let who = who();
+        let req = SaveRequest {
+            message: Some("A"),
+            who: &who,
+            command: "save",
+            accept_crlf: false,
+            git_excludes: None,
+            new_line: Some("x"),
+            only: None,
+            amend: true,
+        };
+        let refused = save_folder(&mut repo, &req, &mut |_| {}, &mut |_| true);
+        assert!(
+            matches!(refused, Err(SaveError::AmendNewLine)),
+            "{refused:?}"
+        );
+        assert_eq!(repo.head().unwrap(), head);
+    }
+
+    #[test]
+    fn a_new_line_from_a_save_can_t_start_with_a_dash() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"a");
+        let head = repo.head().unwrap();
+        let who = who();
+        let req = SaveRequest {
+            message: Some("A"),
+            who: &who,
+            command: "save",
+            accept_crlf: false,
+            git_excludes: None,
+            new_line: Some("-x"),
+            only: None,
+            amend: false,
+        };
+        let refused = save_folder(&mut repo, &req, &mut |_| {}, &mut |_| true);
+        assert!(
+            matches!(&refused, Err(SaveError::Name(NameError::Bad { reason, .. }))
+                if reason == "a line name cannot start with -"),
+            "{refused:?}"
+        );
+        assert_eq!(repo.head().unwrap(), head);
     }
 
     #[test]

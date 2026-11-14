@@ -4,10 +4,12 @@
 use std::collections::HashSet;
 
 use crate::changeids::ChangeIds;
-use crate::diary::{DiaryEntry, Position};
+use crate::diary::{DiaryEntry, Position, TagList};
 use crate::id::{ChangeId, Id, is_hex_start};
+use crate::lines::Target;
 use crate::repo::{RepoError, Repository};
 use crate::save::Save;
+use crate::store::is_unreadable_record;
 use crate::text::escape;
 
 /// A short change ID has at least this many letters.
@@ -36,6 +38,34 @@ pub enum ResolveError {
         saves.join(", ")
     )]
     LineOrSave { text: String, saves: Vec<String> },
+    #[error(
+        "\"{}\" is the name of a tag and also the start of another save's ID ({}), so Opalro \
+         didn't pick either.",
+        escape(text, false),
+        saves.join(", ")
+    )]
+    TagOrSave { text: String, saves: Vec<String> },
+    /// `line` and `tag` are the two saves' first 12 hex digits.
+    #[error(
+        "\"{}\" is the name of a line and also of a tag at another save (line {line}, tag {tag}), \
+         so Opalro didn't pick either.",
+        escape(text, false)
+    )]
+    LineOrTag {
+        text: String,
+        line: String,
+        tag: String,
+    },
+    #[error(
+        "\"{}\" is the name of a server line and also of a tag at another save (server line \
+         {line}, tag {tag}), so Opalro didn't pick either.",
+        escape(text, false)
+    )]
+    ServerLineOrTag {
+        text: String,
+        line: String,
+        tag: String,
+    },
     #[error(transparent)]
     Repo(#[from] RepoError),
 }
@@ -49,8 +79,24 @@ impl ResolveError {
             ResolveError::Ambiguous { .. } => Some("Type more of the ID to pick one.".to_owned()),
             ResolveError::LineOrSave { .. } => Some(
                 "To reach the save, type more of its ID; opalro history --json gives the whole \
-                 change ID and fingerprint. Until Opalro can rename lines, that line can't be \
-                 reached by this name."
+                 change ID and fingerprint. To reach the line by another name: opalro line \
+                 rename <old> <new>"
+                    .to_owned(),
+            ),
+            ResolveError::TagOrSave { .. } => Some(
+                "To reach the save, type more of its ID; opalro history --json gives the whole \
+                 change ID and fingerprint. To reach the tag's save, take its ID from: opalro tag"
+                    .to_owned(),
+            ),
+            ResolveError::LineOrTag { .. } => Some(
+                "To reach one of them, type its ID as shown here. To end the double meaning, \
+                 rename the line (opalro line rename <old> <new>) or delete the tag (opalro tag \
+                 --delete <name>)."
+                    .to_owned(),
+            ),
+            ResolveError::ServerLineOrTag { .. } => Some(
+                "To reach one of them, type its ID as shown here. To end the double meaning, \
+                 delete the tag: opalro tag --delete <name>"
                     .to_owned(),
             ),
             ResolveError::Repo(r) => r.hint(),
@@ -361,14 +407,15 @@ fn by_change_prefix(
     Ok(found)
 }
 
-/// Calls `visit` once for each save reachable from `tips` along first parents. A chain an
-/// earlier tip walked is not walked again, so the cost doesn't grow with the number of tips.
+/// Calls `visit` once for each save reachable from `tips` along first parents and not in `seen`,
+/// adding them to it. A chain an earlier tip walked is not walked again, so the cost doesn't grow
+/// with the number of tips.
 fn each_once<E>(
+    seen: &mut HashSet<Id>,
     tips: impl IntoIterator<Item = Id>,
     mut first_parent: impl FnMut(&Id) -> Result<Option<Id>, E>,
     mut visit: impl FnMut(&Id),
 ) -> Result<(), E> {
-    let mut seen = HashSet::new();
     for tip in tips {
         let mut next = Some(tip);
         while let Some(id) = next {
@@ -382,11 +429,12 @@ fn each_once<E>(
     Ok(())
 }
 
-/// The saves, among those any line reaches by first parents, whose fingerprint starts with
-/// `text`, each with its fingerprint.
+/// The saves, among those any line, server line or tag reaches by first parents, whose
+/// fingerprint starts with `text`, each with its fingerprint. `tags` are the project's.
 fn by_fingerprint_prefix(
     repo: &Repository,
     entry: &DiaryEntry,
+    tags: &TagList,
     text: &str,
 ) -> Result<Vec<(Id, String)>, ResolveError> {
     let text = text.to_ascii_lowercase();
@@ -417,70 +465,180 @@ fn by_fingerprint_prefix(
         }
     }
     let mut found = Vec::new();
+    let mut visit = |id: &Id| {
+        let hex = id.to_hex();
+        if hex.starts_with(&text) {
+            found.push((*id, hex));
+        }
+    };
+    let parent = |id: &Id| {
+        let save = repo.store().save(id, repo.signatures_allowed());
+        save.map(|save| save.parents.first().copied())
+    };
+    let mut seen = HashSet::new();
     each_once(
+        &mut seen,
         entry.state.lines.values().copied(),
-        |id| {
-            let save = repo.store().save(id, repo.signatures_allowed())?;
-            Ok::<_, RepoError>(save.parents.first().copied())
-        },
-        |id| {
-            let hex = id.to_hex();
-            if hex.starts_with(&text) {
-                found.push((*id, hex));
-            }
-        },
+        |id| Ok::<_, RepoError>(parent(id)?),
+        &mut visit,
     )?;
+    // A server line's or tag's save that can't be read ends its chain there: it can still be
+    // named, and it never stops a search that the lines alone would answer.
+    let servers = repo.server_lines(&entry.state)?;
+    let more = (servers.servers.values())
+        .flat_map(|lines| lines.values().copied())
+        .chain(tags.tags.values().map(|tag| tag.save));
+    let damage_ends = |id: &Id| match parent(id) {
+        Err(e) if is_unreadable_record(&e) => Ok(None),
+        read => Ok::<_, RepoError>(read?),
+    };
+    each_once(&mut seen, more, damage_ends, &mut visit)?;
     Ok(found)
 }
 
-/// Finds a save from text: a line name, else a change-ID prefix (lowercase `k`-`z`, unique on
-/// the current line), else at least 8 hex digits of a fingerprint. Fails with `NotFound`,
-/// `Ambiguous`, `LineOrSave`, or a repository problem.
+/// The save `id` as a hint's command names it: its short change ID when that reaches it from where
+/// the project is, otherwise the first 12 hex digits of its fingerprint when those do; `None`
+/// when neither does.
+#[must_use]
+pub fn id_for_command(repo: &Repository, id: &Id) -> Option<String> {
+    let reaches = |text: &String| matches!(resolve(repo, text), Ok(found) if found == *id);
+    let save = repo.store().save(id, repo.signatures_allowed()).ok();
+    let short = save.and_then(|save| short_change_id(repo, id, &save.change_id).ok());
+    short.into_iter().chain([id.short_hex()]).find(reaches)
+}
+
+/// Finds a save from text, as [`find`] reads it.
 pub fn resolve(repo: &Repository, text: &str) -> Result<Id, ResolveError> {
+    find(repo, text).map(|(_, id)| id)
+}
+
+/// Reads `text` in the one order a save is named by: a line's name, a server line
+/// `line@server`, a tag's name, the start of a change ID (lowercase `k`-`z`, unique on the
+/// current line), the start of a fingerprint (at least 8 hex digits). Gives where that leads,
+/// and the save. A line or server line whose name a tag at another save has too is refused, as
+/// is a line or tag name that is also the start of another save's ID.
+pub(crate) fn find(repo: &Repository, text: &str) -> Result<(Target, Id), ResolveError> {
     let (_, entry) = repo.current()?;
-    if let Some(id) = line_named(repo, &entry, text)? {
-        return Ok(id);
+    // Read once: it can be large.
+    let tags = repo.tag_list(&entry.state)?;
+    if let Some(line) = line_named(repo, &entry, &tags, text)? {
+        if let Some(tag) = tag_elsewhere(&tags, text, line) {
+            return Err(ResolveError::LineOrTag {
+                text: text.to_owned(),
+                line: shown_save(&line),
+                tag: shown_save(&tag),
+            });
+        }
+        return Ok((Target::Line(text.to_owned()), line));
     }
-    one_of(text, by_id(repo, &entry, text)?)
+    // A line name never holds `@`, so a server line can't be taken for one.
+    if let Some((line, server)) = text.split_once('@') {
+        let servers = repo.server_lines(&entry.state)?;
+        if let Some(&save) = servers.servers.get(server).and_then(|l| l.get(line)) {
+            if let Some(tag) = tag_elsewhere(&tags, text, save) {
+                return Err(ResolveError::ServerLineOrTag {
+                    text: text.to_owned(),
+                    line: shown_save(&save),
+                    tag: shown_save(&tag),
+                });
+            }
+            let target = Target::ServerLine {
+                server: server.to_owned(),
+                line: line.to_owned(),
+                save,
+            };
+            return Ok((target, save));
+        }
+    }
+    let id = match tag_named(repo, &entry, &tags, text)? {
+        Some(id) => id,
+        None => one_of(text, by_id(repo, &entry, &tags, text)?)?,
+    };
+    Ok((Target::Save(id), id))
+}
+
+/// The save of the tag named `text`, if it isn't `save`.
+fn tag_elsewhere(tags: &TagList, text: &str, save: Id) -> Option<Id> {
+    tags.tags.get(text).map(|t| t.save).filter(|t| *t != save)
+}
+
+/// A save as a refusal names it: its fingerprint's first 12 hex digits.
+fn shown_save(id: &Id) -> String {
+    id.to_hex()[..12].to_owned()
 }
 
 /// The save of the line named `text`, if there is one. A name that is also the start of
 /// another save's change ID or fingerprint is refused, so that neither passes for the other.
-pub(crate) fn line_named(
+fn line_named(
     repo: &Repository,
     entry: &DiaryEntry,
+    tags: &TagList,
     text: &str,
 ) -> Result<Option<Id>, ResolveError> {
     let Some(&line) = entry.state.lines.get(text) else {
         return Ok(None);
     };
-    let mut saves: Vec<String> = by_id(repo, entry, text)?
-        .into_iter()
-        .filter(|(id, _)| *id != line)
-        .map(|(_, shown)| shown)
-        .collect();
+    let saves = others_by_id(repo, entry, tags, text, line)?;
     if saves.is_empty() {
         return Ok(Some(line));
     }
-    saves.sort_unstable();
-    saves.dedup();
     Err(ResolveError::LineOrSave {
         text: text.to_owned(),
         saves,
     })
 }
 
+/// The save of the tag named `text`, if there is one. A name that is also the start of
+/// another save's change ID or fingerprint is refused, as a line's is.
+fn tag_named(
+    repo: &Repository,
+    entry: &DiaryEntry,
+    tags: &TagList,
+    text: &str,
+) -> Result<Option<Id>, ResolveError> {
+    let Some(tag) = tags.tags.get(text) else {
+        return Ok(None);
+    };
+    let saves = others_by_id(repo, entry, tags, text, tag.save)?;
+    if saves.is_empty() {
+        return Ok(Some(tag.save));
+    }
+    Err(ResolveError::TagOrSave {
+        text: text.to_owned(),
+        saves,
+    })
+}
+
+/// The saves other than `own` that `text` names by ID, as shown, sorted and once each.
+fn others_by_id(
+    repo: &Repository,
+    entry: &DiaryEntry,
+    tags: &TagList,
+    text: &str,
+    own: Id,
+) -> Result<Vec<String>, ResolveError> {
+    let mut saves: Vec<String> = by_id(repo, entry, tags, text)?
+        .into_iter()
+        .filter(|(id, _)| *id != own)
+        .map(|(_, shown)| shown)
+        .collect();
+    saves.sort_unstable();
+    saves.dedup();
+    Ok(saves)
+}
+
 /// The saves `text` names as the start of a change ID or of a fingerprint.
 fn by_id(
     repo: &Repository,
     entry: &DiaryEntry,
+    tags: &TagList,
     text: &str,
 ) -> Result<Vec<(Id, String)>, ResolveError> {
     if !text.is_empty() && text.bytes().all(|b| (b'k'..=b'z').contains(&b)) {
         return by_change_prefix(repo, entry, text);
     }
     if is_hex_start(text) {
-        return by_fingerprint_prefix(repo, entry, text);
+        return by_fingerprint_prefix(repo, entry, tags, text);
     }
     Ok(Vec::new())
 }
@@ -728,6 +886,135 @@ mod tests {
             saves: vec!["klmn".into()],
         };
         assert_hostile_text_escaped(&refused.to_string());
+        let refused = ResolveError::TagOrSave {
+            text: HOSTILE.into(),
+            saves: vec!["klmn".into()],
+        };
+        assert_hostile_text_escaped(&refused.to_string());
+        let (line, tag) = ("3f9a1c2b4d5e".to_owned(), "9b8c7d6e5f4a".to_owned());
+        let refused = ResolveError::LineOrTag {
+            text: HOSTILE.into(),
+            line: line.clone(),
+            tag: tag.clone(),
+        };
+        assert_hostile_text_escaped(&refused.to_string());
+        let refused = ResolveError::ServerLineOrTag {
+            text: HOSTILE.into(),
+            line,
+            tag,
+        };
+        assert_hostile_text_escaped(&refused.to_string());
+    }
+
+    /// Gives the save `id` the tag `name` too, as an import may: any name.
+    fn name_tag(repo: &mut Repository, name: &str, id: Id) {
+        use crate::diary::Tag;
+        let lock = repo.lock_for_change("tag", &mut |_| {}).unwrap();
+        let (head, entry) = repo.current().unwrap();
+        let mut list = repo.tag_list(&entry.state).unwrap();
+        let tag = Tag {
+            save: id,
+            message: String::new(),
+            git_tags: vec![],
+        };
+        list.tags.insert(name.to_owned(), tag);
+        let mut packs = repo.new_packs().unwrap();
+        let mut state = entry.state.clone();
+        state.tags = Some(
+            packs
+                .add_record(ObjectKind::TagList, &list.encode())
+                .unwrap(),
+        );
+        let diary = DiaryEntry {
+            parent: Some(head),
+            action: Action::Command,
+            command: "tag".into(),
+            who: who(),
+            opal_version: "0.1.0".into(),
+            state,
+            folder_change: None,
+        };
+        repo.commit(&lock, packs, &diary).unwrap();
+    }
+
+    #[test]
+    fn a_line_wins_over_a_tag_of_the_same_name_at_its_save() {
+        use crate::lines::{Target, resolve_target};
+        let (_dir, mut repo, ids) = project_with(&["lmnopq"]);
+        name_line(&mut repo, "v1.0", ids[0]);
+        name_tag(&mut repo, "v1.0", ids[0]);
+        assert_eq!(resolve(&repo, "v1.0").unwrap(), ids[0]);
+        assert_eq!(
+            resolve_target(&repo, "v1.0").unwrap(),
+            Target::Line("v1.0".into())
+        );
+        // A tag alone is its save, and not a line.
+        name_tag(&mut repo, "release/1", ids[0]);
+        assert_eq!(resolve(&repo, "release/1").unwrap(), ids[0]);
+        assert_eq!(
+            resolve_target(&repo, "release/1").unwrap(),
+            Target::Save(ids[0])
+        );
+    }
+
+    #[test]
+    fn a_tag_named_like_the_start_of_another_saves_id_is_refused() {
+        let (_dir, mut repo, ids) = project_with(&["lmnopq"]);
+        let hex = ids[0].to_hex()[..8].to_owned();
+        name_tag(&mut repo, &hex, ids[1]);
+        let refused = resolve(&repo, &hex).unwrap_err();
+        match &refused {
+            ResolveError::TagOrSave { saves, .. } => assert_eq!(saves, &[ids[0].to_hex()]),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            refused.to_string(),
+            format!(
+                "\"{hex}\" is the name of a tag and also the start of another save's ID ({}), so \
+                 Opalro didn't pick either.",
+                ids[0].to_hex()
+            )
+        );
+        assert_eq!(
+            refused.hint().unwrap(),
+            "To reach the save, type more of its ID; opalro history --json gives the whole change \
+             ID and fingerprint. To reach the tag's save, take its ID from: opalro tag"
+        );
+        let target = crate::lines::resolve_target(&repo, &hex);
+        assert!(matches!(target, Err(ResolveError::TagOrSave { .. })));
+        // A tag named like the start of its own save's IDs is just the tag.
+        let own = ids[1].to_hex()[..8].to_owned();
+        name_tag(&mut repo, &own, ids[1]);
+        assert_eq!(resolve(&repo, &own).unwrap(), ids[1]);
+    }
+
+    #[test]
+    fn a_tag_holding_an_at_sign_is_found_when_no_server_line_matches() {
+        use crate::lines::{Target, resolve_target};
+        let (_dir, mut repo, ids) = project_with(&["lmnopq"]);
+        name_tag(&mut repo, "v1@home", ids[0]);
+        assert_eq!(
+            resolve_target(&repo, "v1@home").unwrap(),
+            Target::Save(ids[0])
+        );
+        assert!(matches!(
+            resolve_target(&repo, "v2@home"),
+            Err(ResolveError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn a_line_or_save_refusal_hints_at_renaming_the_line() {
+        let refused = ResolveError::LineOrSave {
+            text: "mnop".into(),
+            saves: vec!["mnopqr".into()],
+        };
+        assert!(
+            refused
+                .hint()
+                .unwrap()
+                .ends_with(" To reach the line by another name: opalro line rename <old> <new>")
+        );
     }
 
     #[test]
@@ -749,6 +1036,50 @@ mod tests {
         assert!(matches!(
             resolve(&repo, "0123456"),
             Err(ResolveError::NotFound(_))
+        ));
+    }
+
+    // Reading a name reads the tag list once, whatever the name turns out to be: a line, a tag,
+    // hex text, or a line refused as a tag's name too.
+    #[test]
+    fn reading_a_name_reads_the_tag_list_once_whatever_it_names() {
+        use crate::repo::TAG_LISTS_READ;
+        let (_dir, mut repo, ids) = project_with(&["lmnopq"]);
+        name_tag(&mut repo, "rel-1", ids[0]);
+        let hex = ids[0].to_hex()[..8].to_owned();
+        for name in ["main", "rel-1", hex.as_str()] {
+            let before = TAG_LISTS_READ.get();
+            resolve(&repo, name).unwrap();
+            assert_eq!(TAG_LISTS_READ.get() - before, 1, "{name}");
+        }
+        // A line that is also a tag at another save is refused after one read too.
+        name_tag(&mut repo, "main", ids[0]);
+        let before = TAG_LISTS_READ.get();
+        assert!(matches!(
+            resolve(&repo, "main"),
+            Err(ResolveError::LineOrTag { .. })
+        ));
+        assert_eq!(TAG_LISTS_READ.get() - before, 1);
+    }
+
+    #[test]
+    fn saves_off_the_lines_that_share_a_start_are_more_than_one() {
+        // No two saves can be made to share 8 digits, so the empty start stands in for one.
+        let (_dir, mut repo, ids) = project_with(&[]);
+        let behind = plant(&mut repo, &[ids[0]], "lmno", None);
+        let tagged = plant(&mut repo, &[behind], "mnop", None);
+        name_tag(&mut repo, "rel-1", tagged);
+        let (_, entry) = repo.current().unwrap();
+        let tags = repo.tag_list(&entry.state).unwrap();
+        let found = by_fingerprint_prefix(&repo, &entry, &tags, "").unwrap();
+        let mut all: Vec<Id> = found.iter().map(|(id, _)| *id).collect();
+        all.sort_unstable();
+        let mut want = vec![ids[0], behind, tagged];
+        want.sort_unstable();
+        assert_eq!(all, want);
+        assert!(matches!(
+            one_of("", found),
+            Err(ResolveError::Ambiguous { candidates, .. }) if candidates.len() == 3
         ));
     }
 
@@ -782,6 +1113,7 @@ mod tests {
         let mut reads = 0;
         let mut visited = Vec::new();
         each_once(
+            &mut HashSet::new(),
             (0..100_000).map(|_| numbered(299)),
             |id| {
                 reads += 1;
@@ -805,6 +1137,7 @@ mod tests {
         let tips = [49, 20, 89, 49, 9, 60, 0].map(numbered);
         let (mut reads, mut visited) = (0, Vec::new());
         each_once(
+            &mut HashSet::new(),
             tips,
             |id| {
                 reads += 1;
@@ -821,6 +1154,7 @@ mod tests {
     #[test]
     fn a_walk_that_fails_stops_with_the_error() {
         let result = each_once(
+            &mut HashSet::new(),
             [numbered(5)],
             |id| {
                 if number(id) == 3 {

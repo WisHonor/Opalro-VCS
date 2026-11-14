@@ -380,7 +380,8 @@ goto      Go to another line or save
 undo      Take back your last step   (and: redo)
 
 Lines, shelves and details
-line      List your lines
+line      List, make, rename and delete lines
+tag       Name a save, like v1.0, or list your tags
 shelf     Set your unsaved changes aside   (and: unshelf)
 discard   Throw away your unsaved changes; undo brings them back
 show      Show everything about one save
@@ -485,7 +486,7 @@ Nothing to save: no changes since your last save, rmns "Add a to-do list and an 
 
 **A message is needed.** `opalro save` with no message stops and saves nothing. Only `--amend` may leave it out.
 
-**At an older save,** a save starts a new line, and `--line <name>` names it: see [Lines](#8-lines).
+**`--line <name>` starts a new line** with the save, and you're on it afterwards. On a line, the line you were on stays where it was. At an older save, a save always starts a new line, and `--line` names it: see [Lines](#8-lines). When there is nothing to save, no line is made; `opalro line new <name>` makes one without saving.
 
 ### `opalro changes`
 
@@ -511,7 +512,7 @@ Name files or folders to look only there:
 opalro changes todo.txt
 ```
 
-`--save` shows what a save changed instead, compared with the save before it. Name the save by its line (for the line's newest save), its change ID, or 8 or more digits of its fingerprint. Here it shows the save made with `--amend` above, which added both files:
+`--save` shows what a save changed instead, compared with the save before it. Name the save by its line (for the line's newest save), a tag, its change ID, or 8 or more digits of its fingerprint. Here it shows the save made with `--amend` above, which added both files:
 
 ```sh
 opalro changes --save main
@@ -545,7 +546,7 @@ Each row is the change ID, when the save was made, who made it, and the first li
 
 ### `opalro goto`
 
-Go to another line or save. Name a line, a save's change ID as `opalro history` shows it (Opalro looks for change IDs among the saves of the line you're on), or 8 or more digits of a save's fingerprint.
+Go to another line or save. Name, in the order Opalro tries them, a line, a server line (`main@origin`), a tag, a save's change ID as `opalro history` shows it (Opalro looks for change IDs among the saves of the line you're on), or 8 or more digits of a save's fingerprint (any save your lines, server lines or tags lead back to). A tag or a server line takes you to its save, not onto a line. `opalro show`, `opalro changes --save` and `opalro tag --save` take a save named the same way. If a line and a tag share a name but sit at two different saves, Opalro picks neither and shows both saves' IDs: type the one you mean, or end the double meaning: rename the line, or delete the tag.
 
 ```sh
 opalro goto main
@@ -658,7 +659,55 @@ On the server (origin):
   main@origin
 ```
 
-`Skyrunner` is the name of the project's folder. Lines "on the server" come only from a Git import in v0.1: they are the server branches Git last saw. See [Lines](#8-lines) for how a new line starts.
+`Skyrunner` is the name of the project's folder. Lines "on the server" come only from a Git import in v0.1: they are the server branches Git last saw. Type one as it is listed (`opalro goto main@origin`, `opalro show main@origin`) to reach its save.
+
+`opalro line new` starts a new line at the save you're on and moves you onto it; your files stay as they are. `opalro line rename` renames a line, and `opalro line delete` deletes one; `opalro undo` takes back each of them.
+
+```sh
+opalro line new wall-run
+opalro line rename wall-run wall-running
+opalro goto main
+opalro line delete wall-running
+```
+
+```text
+Started line wall-run at save tqwl "Eggs too".
+
+    You're on it: your next save goes on wall-run.
+
+Changed your mind? opalro undo
+```
+
+`opalro line rename trunk`, with one name, renames the line you're on. You can't delete the line you're on: go to another first. See [Lines](#8-lines) for more.
+
+### `opalro tag`
+
+Name a save, like a sticky note on it: `v1.0`, or `release/2026-11`. Unlike a line, a tag stays where you put it when you save again.
+
+```sh
+opalro tag v1.0 "First playable"
+opalro tag
+```
+
+```text
+Tagged save tqwl "Eggs too" as v1.0.
+
+Changed your mind? opalro undo
+```
+
+```text
+1 tag:
+
+  v1.0  9d02c3aa41f0  "First playable"
+```
+
+The message is optional. `--save` tags another save than the one you're at: `opalro tag v1.0 --save main`, or a change ID. Naming a tag that is at another save moves it, after asking (`--yes` moves it without asking). `opalro tag --delete` deletes a tag, after asking too; `opalro undo` brings it back.
+
+```sh
+opalro tag --delete v1.0 --yes
+```
+
+See [Lines](#8-lines) for more on tags.
 
 ### `opalro shelf` and `opalro unshelf`
 
@@ -729,7 +778,7 @@ opalro save "Add a draft"
 
 ### `opalro show`
 
-Show everything about one save: the one you're at, or one you name by line, change ID or fingerprint.
+Show everything about one save: the one you're at, or one you name as `opalro goto` takes it: by line, server line, tag, change ID or fingerprint.
 
 ```sh
 opalro show
@@ -756,7 +805,7 @@ Save ptvz "Add double jump"
 Next: see its lines with: opalro changes --save ptvz
 ```
 
-The **fingerprint** is a save's full, permanent name, worked out from everything in it. `After` names the save before this one by the first 12 digits of its fingerprint, and its message. `opalro show` and `opalro goto` take those digits back whenever the history of one of your lines leads back to that save, which is nearly always. Only some saves brought in from Git are out of reach: the other side of a Git merge whose branch was gone before the import, or the save before one where the import left you away from every line.
+The **fingerprint** is a save's full, permanent name, worked out from everything in it. `After` names the save before this one by the first 12 digits of its fingerprint, and its message. `opalro show` and `opalro goto` take those digits back whenever the history of one of your lines, server lines or tags leads back to that save, which is nearly always. Only some saves brought in from Git are out of reach: the other side of a Git merge whose branch was gone before the import, or the save before one where the import left you away from every line.
 
 ### `opalro start`
 
@@ -1025,7 +1074,7 @@ Making a shelf and bringing one back are steps that `opalro undo` takes back. Sh
 
 A line is a name, like `main` or `feature/double-jump`, that points at the newest save made on it and moves forward each time you save. Every project starts with `main`.
 
-**How a line starts.** You start a new line by saving somewhere that isn't the newest save of a line:
+**How a line starts.** On a line, `opalro save --line <name> "message"` starts a new line with the save, and the line you were on stays where it was. You also start a new line by saving somewhere that isn't the newest save of a line:
 
 1. Find a save in `opalro history`, and go to it with `opalro goto` and its change ID. Opalro says you are not on a line.
 2. Change some files.
@@ -1048,9 +1097,32 @@ Now `opalro line` lists both lines, and `opalro goto main` and `opalro goto wall
 opalro line
 ```
 
-**Names** may use letters, digits, `-`, `_`, `.` and `/`, with no spaces, and two names may not differ only in letter case.
+**Names** may use letters, digits, `-`, `_`, `.` and `/`, with no spaces, and two names may not differ only in letter case. A new name can't start with `-`, so it never reads as an option.
 
-**In v0.1** a line can be made, listed and switched to. There is no merging yet: two lines can't be combined into one, and lines can't be renamed or deleted. Those come in v0.2. While you are on a line, `--line` is refused.
+**Making, renaming and deleting a line.** `opalro line new <name>` starts a line at the save you're on, without saving: your unsaved changes stay, and your next save goes on the new line. `opalro line rename <old> <new>` renames a line, and `opalro line rename <new>` the one you're on; the saves already made keep the old name as the line they were made on. `opalro line delete <name>` deletes a line, but not the one you're on.
+
+```sh
+opalro line new jump-test
+echo "jump higher" > jump.txt
+opalro save "Jump higher"
+opalro line rename jump-test double-jump
+opalro goto main
+opalro line delete double-jump --yes
+```
+
+```text
+Deleted line double-jump, which was at save mzpv "Jump higher".
+
+    No other line or tag has its 1 save. opalro tidy frees them once the undo window has passed.
+
+Changed your mind? opalro undo
+```
+
+Deleting a line keeps its saves: `opalro undo` brings the line back for as long as the undo window lasts (30 days unless you change it), and `opalro tidy` keeps them till then. When no other line or tag has the line's saves, Opalro asks first (`Delete it? [y/N]`); `--yes` deletes without asking, and without a terminal Opalro stops and names `--yes`. When another line or tag holds them all, it asks nothing.
+
+**Tags.** A tag names one save for good, such as the build you shipped: `opalro tag v1.0 "First playable"` tags the save you're at, and `opalro tag` lists the tags. A line moves on with each save; a tag stays put until you move it. Tag names follow the same rules as line names, and a tag can't share a line's name. Naming a tag that is at another save moves it there, and deleting one (`opalro tag --delete <name>`) takes it away; Opalro asks before either (`--yes` answers for you), and `opalro undo` takes each back. Tags a Git import brought in are listed too, with their messages. `opalro history` ends a save's row with `[tag v1.0]` for each tag at it, and `opalro show` names them in a `Tags` row. As long as a tag holds a save, `opalro tidy` keeps it and the saves before it.
+
+**Not yet:** two lines can't be combined into one.
 
 ## 9. Coming from Git
 
@@ -1079,6 +1151,7 @@ Next: look around with: opalro status
 
 - **In place.** It makes `.opalro` next to `.git`, in the same folder. It never changes the Git repository, never runs Git, and never goes online.
 - **What comes along:** every commit, exactly, as a save; your branches as lines; each server's branches, as Git last saw them, as server lines (`main@origin`); and tags. Names Opalro doesn't allow are renamed by a fixed rule, and the summary lists them. You end up where Git was: on its current branch's line, or at the save of a detached `HEAD`, where saving asks for a new line's name.
+- **A branch and a tag of one name.** Git lets a branch and a tag share a name (a release branch and a tag both called `v1`, say), and the import keeps both. If they point at different commits, Opalro won't guess which you mean: `opalro goto v1` stops, showing both saves' IDs. Type the ID you want. To end the double meaning, give the line another name with `opalro line rename v1 v1-branch`, and `v1` then means the tag; or delete the tag with `opalro tag --delete v1`, and `v1` then means the line. A server branch and a tag of one name (`main@origin`) stop the same way, and deleting the tag is the way out.
 - **Work you hadn't committed** isn't refused: it shows as unsaved changes and goes into your next save.
 - **Ignore rules** carry over by themselves, since Opalro reads `.gitignore` files.
 - **Git LFS files** come in as ordinary files, read from `.git/lfs/objects`, which must hold every version the history names. Opalro never downloads them: first run `git lfs fetch --all`.
@@ -1122,15 +1195,21 @@ hint: in Opalro, commit is save; it takes new files too: opalro save "message"
 | `git stash pop` | `opalro unshelf` | runs; `stash pop 2` runs `unshelf 2` |
 | `git stash list` | `opalro shelf --list` | runs |
 | `git branch` | `opalro line` | runs |
+| `git checkout -b <name>`, `git switch -c <name>` | `opalro line new <name>` | runs; also `switch --create <name>` |
+| `git branch -m [<old>] <new>` | `opalro line rename [<old>] <new>` | runs; also `--move` |
+| `git branch -d <name>` | `opalro line delete <name>` | runs; also `--delete` |
+| `git branch -D <name>` | `opalro line delete <name> --yes` | runs |
+| `git tag` | `opalro tag` | the same word; `tag -d <name>` runs `tag --delete <name>`. Git's `tag <name> <commit>` isn't Opalro's form: a second word is the tag's message, and another save is tagged with `--save <save>` |
 | `git fsck` | `opalro verify` | runs |
 | `git gc` | `opalro tidy` | runs |
 | `git restore` | `opalro discard <paths>` | explained, never run |
 | `git add` | nothing: `opalro save` takes every change | explained |
 | `git rm`, `git mv` | delete or move the file itself | explained |
 | `git reset` | `opalro undo`, `opalro discard` or `opalro goto <save>` | explained |
-| `git checkout -b`, `git switch -c`, `git branch <name>` | `opalro goto <save>`, then `opalro save --line <name> "message"` | explained |
+| `git branch <name>`; `git checkout -b`, `git switch -c` with a starting point | `opalro goto <save>`, then `opalro line new <name>` | explained |
 | `git revert` | `opalro reverse`, in v0.3; until then `opalro undo` | explained |
-| `git merge`, `rebase`, `cherry-pick`, `tag`, `blame` | coming in v0.2 | explained |
+| `git merge`, `blame` | coming later in v0.2 | explained |
+| `git rebase`, `cherry-pick` | not yet: moving saves between lines comes after v0.2; until then `opalro save --amend` or `opalro undo` | explained |
 | `git clone`, `fetch`, `pull`, `push`, `remote` | coming in v0.3 | explained |
 | `git clean` | none: Opalro never deletes files it doesn't keep | explained |
 
@@ -1141,7 +1220,7 @@ Opalro has no staging step: `opalro save` saves every change, new files too.
 To save only some files, name them: `opalro save "message" <paths>`
 ```
 
-A Git word runs only in the forms that mean in Opalro what they mean in Git; any other form is explained, rather than run as something you didn't mean. So `commit` runs only with `-m` or `--message`, or with options alone (`opalro commit --amend`); `opalro commit "message"` without `-m`, or a path without a message, is explained. `stash` runs only as `stash`, `stash push`, `stash pop`, `stash pop <number>` and `stash list`; `stash apply` and the rest are explained.
+A Git word runs only in the forms that mean in Opalro what they mean in Git; any other form is explained, rather than run as something you didn't mean. So `commit` runs only with `-m` or `--message`, or with options alone (`opalro commit --amend`); `opalro commit "message"` without `-m`, or a path without a message, is explained. `stash` runs only as `stash`, `stash push`, `stash pop`, `stash pop <number>` and `stash list`; `stash apply` and the rest are explained. `checkout -b <name>` and `switch -c <name>` run only with the name alone; with a starting point they are explained, as is `branch <name>`, which in Git makes the branch and stays where you are, while `opalro line new` moves onto the new line.
 
 **What is different from Git, on purpose:**
 
@@ -1294,7 +1373,7 @@ opalro status --json
 opalro history --json
 ```
 
-A command that would ask (`opalro start`, a big `opalro save`, a save away from a line, `opalro setup --preset`) stops instead, and its error names the flag that answers the question: `--preset`, `--yes` or `--line`. Without a terminal, the same commands stop the same way even without `--json`.
+A command that would ask (`opalro start`, a big `opalro save`, a save away from a line, `opalro setup --preset`, `opalro line delete` when nothing else holds the line's saves, and moving or deleting a tag with `opalro tag`) stops instead, and its error names the flag that answers the question: `--preset`, `--yes` or `--line`. Without a terminal, the same commands stop the same way even without `--json`.
 
 Every command ends with one of three exit codes:
 
@@ -1309,7 +1388,7 @@ The `--json` reference, published on https://opalro.com, describes every documen
 ## 13. What v0.1 doesn't do yet
 
 - **No server, no sharing.** v0.1 is one person on one computer. Opalro can't yet copy a project from a server, or send and get changes (syncing is planned for v0.3).
-- **No merging.** Two lines can't be combined, and lines can't be renamed or deleted (v0.2).
+- **No merging.** Two lines can't be combined into one yet, and Opalro can't yet show who changed each line of a file (both v0.2).
 - **No locking.** Rules can mark files lockable, but nothing locks them until syncing arrives (v0.3).
 - **No repair.** `opalro verify` finds damage but can't fix it.
 - **No export to Git yet,** and an import happens once: bringing in Git's newer commits later comes after v0.1.

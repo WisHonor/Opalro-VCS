@@ -292,6 +292,41 @@ fn goto_a_save_at_a_lines_tip_is_at_the_save() {
 }
 
 #[test]
+fn goto_advises_renaming_a_line_whose_name_goto_would_refuse() {
+    let env = two_lines();
+    let (_, state) = env.state();
+    let (feature, main) = (state.lines["feature"], state.lines["main"]);
+    // A tag feature at another save.
+    env.plant_tags(["feature".to_owned()].into_iter(), main);
+    let said = goto(&env, &feature.to_hex()[..12]);
+    assert!(
+        said.contains(
+            "Line feature is here too, but feature is also a tag at another save. To keep saving \
+             on the line, rename it first: opalro line rename <old> <new>"
+        ),
+        "{said}"
+    );
+    assert!(!said.contains("opalro goto feature"), "{said}");
+    // A line named like the start of another save's ID.
+    env.plant_tags(["rel-1".to_owned()].into_iter(), main);
+    let hex = main.to_hex()[..8].to_owned();
+    goto(&env, "main");
+    env.opalro()
+        .args(["line", "rename", "feature", &hex])
+        .assert()
+        .success();
+    let said = goto(&env, &feature.to_hex()[..12]);
+    assert!(
+        said.contains(&format!(
+            "Line {hex} is here too, but {hex} is also the start of another save's ID. To keep \
+             saving on the line, rename it first: opalro line rename <old> <new>"
+        )),
+        "{said}"
+    );
+    assert!(!said.contains(&format!("opalro goto {hex}")), "{said}");
+}
+
+#[test]
 fn goto_a_server_line_is_at_its_save() {
     let env = two_lines();
     let (repo, state) = env.state();
@@ -710,4 +745,34 @@ fn a_goto_that_needs_a_pack_that_is_gone_stops_and_names_the_way_on() {
     support::write(&env, "h.txt", "new\n");
     env.opalro().args(["save", "Four"]).assert().success();
     assert_eq!(std::fs::read(env.root().join("f.txt")).unwrap(), b"z\n");
+}
+
+#[test]
+fn goto_gives_no_command_for_a_stored_line_name_that_reads_as_an_option() {
+    let env = two_lines();
+    let feature = env.state().1.lines["feature"];
+    {
+        let mut repo = Repository::open(env.root()).unwrap();
+        let lock = repo.lock_for_change("test", &mut |_| {}).unwrap();
+        let (head, entry) = repo.current().unwrap();
+        let mut state = entry.state.clone();
+        state.lines.insert("-x".into(), feature);
+        let diary = DiaryEntry {
+            parent: Some(head),
+            action: Action::Command,
+            command: "test".into(),
+            who: entry.who,
+            opal_version: "0.1.0".into(),
+            state,
+            folder_change: None,
+        };
+        let packs = repo.new_packs().unwrap();
+        repo.commit(&lock, packs, &diary).unwrap();
+    }
+    let said = goto(&env, &feature.to_hex()[..12]);
+    assert!(
+        said.contains("Saving here asks for a new line's name."),
+        "{said}"
+    );
+    assert!(!said.contains("opalro goto"), "{said}");
 }

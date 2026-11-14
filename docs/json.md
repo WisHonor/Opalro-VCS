@@ -143,7 +143,7 @@ Saving gives one of two documents, told apart by `result`.
 
 **At a save, not on a line,** a save needs `--line <name>`: the new line it starts, which points at the new save; the project is then on it, and the save's `line` is that name. With `--json` Opalro never asks for the name, so without the flag a save with changes fails (§5), saving nothing. A name that breaks the line-name rules, or that is a line's already in any letter case, fails the save too, and so does `--line` on a line ([decision 055](decisions/055-lines-in-v0.1.md)).
 
-`"result": "nothing_changed"`: the folder is as the save it would build on has it (the line's newest, or the save the project is at), so nothing was saved. At a save no name is needed for that, and with `--line` no line is made: a new line starts with a save, so change a file first. For an amend, the message is the save's own too, so nothing was amended. The fields are `opalro_json`, `result`, `paths` (as above: with paths, nothing they match changed), `warnings` and, if it applies, `ignored_project_identity`.
+`"result": "nothing_changed"`: the folder is as the save it would build on has it (the line's newest, or the save the project is at), so nothing was saved. At a save no name is needed for that, and with `--line` no line is made: `opalro line new <name>` makes one without saving. For an amend, the message is the save's own too, so nothing was amended. The fields are `opalro_json`, `result`, `paths` (as above: with paths, nothing they match changed), `warnings` and, if it applies, `ignored_project_identity`.
 
 **`ignored_project_identity`** is there only when the project's own settings (`.opalro/config.toml`) name a person other than the user. Opalro never takes who the user is from a project, since a project that was shared could name anyone, so the save was made as the user. The field says who was named, `{"name": …, "email": …}`, and is left out otherwise. For people, `opalro save` prints a note instead of the field. The note shows at most 256 characters of a name or email, and gives the lines to add to their own settings, if they do want that identity in this folder, only when nothing was cut: lines with a cut name would save as someone else. The field always has both in full.
 
@@ -171,7 +171,7 @@ Saving gives one of two documents, told apart by `result`.
 
 ### `opalro changes --json`
 
-`opalro changes` shows unsaved changes line by line: the folder against the save the project is on, read as `status` reads it (it never changes the project; it may only rewrite its caches in `.opalro/cache/`). With `--save <save>` (a line name, the start of a change ID, or the start of a fingerprint) it shows what that save changed against its first parent instead. Paths after it limit it to those files and folders, taken from the folder you are in; a path is never taken for a save ([decision 058](decisions/058-changes-line-by-line.md)).
+`opalro changes` shows unsaved changes line by line: the folder against the save the project is on, read as `status` reads it (it never changes the project; it may only rewrite its caches in `.opalro/cache/`). With `--save <save>` (named as for `goto`: a line name, a server line `line@server`, a tag's name, the start of a change ID, or the start of a fingerprint, with the same refusals) it shows what that save changed against its first parent instead. Paths after it limit it to those files and folders, taken from the folder you are in; a path is never taken for a save ([decision 058](decisions/058-changes-line-by-line.md)).
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -193,7 +193,7 @@ Saving gives one of two documents, told apart by `result`.
 
 ### `opalro goto --json`
 
-`opalro goto <target>` moves the project to a line or a save. The target is, in this order, a line's name (the project is then on that line), a server line `line@server` (at its save, not on a line), the start of a change ID on the current line, or at least 8 hex digits of a fingerprint (at that save, not on a line, even when it is a line's newest; the text output then says how to keep saving on that line, naming the first such line by name when several are there) ([decision 055](decisions/055-lines-in-v0.1.md)). A line's name that is also the start of another save's change ID or fingerprint is refused (exit code 1), and `error.message` lists the IDs it matched, so a line named like a save's ID never passes for that save; type more of the ID to reach the save ([decision 068](decisions/068-a-goto-target-that-names-both.md)). Unsaved changes come along unless the switch would overwrite them; then nothing changes, and the command fails, naming them ([decision 050](decisions/050-unsaved-work-in-goto-and-discard.md)).
+`opalro goto <target>` moves the project to a line or a save. The target is, in this order, a line's name (the project is then on that line), a server line `line@server` (at its save, not on a line), a tag's name (at its save, not on a line), the start of a change ID on the current line, or at least 8 hex digits of a fingerprint, looked for among the saves that lines, server lines and tags reach along first parents (at that save, not on a line, even when it is a line's newest; the text output then says how to keep saving on that line, naming the first such line by name when several are there) ([decision 055](decisions/055-lines-in-v0.1.md)). A line's or a tag's name that is also the start of another save's change ID or fingerprint is refused (exit code 1), and `error.message` lists the IDs it matched, so a line or tag named like a save's ID never passes for that save; type more of the ID to reach the save ([decision 068](decisions/068-a-goto-target-that-names-both.md)). A line's or a server line's name that a tag at another save has too is refused the same way (exit code 1): `error.message` gives the first 12 hex digits of both saves' fingerprints, and `error.hint` says to type one of them (both reach their saves) and how to end the double meaning: for a line, `To reach one of them, type its ID as shown here. To end the double meaning, rename the line (opalro line rename <old> <new>) or delete the tag (opalro tag --delete <name>).`; for a server line, `To reach one of them, type its ID as shown here. To end the double meaning, delete the tag: opalro tag --delete <name>`; a tag at the line's own save changes nothing ([decision 162](decisions/162-red-team-m7-rulings.md), [decision 163](decisions/163-red-team-m7-session-2-rulings.md)). Unsaved changes come along unless the switch would overwrite them; then nothing changes, and the command fails, naming them ([decision 050](decisions/050-unsaved-work-in-goto-and-discard.md)).
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -361,7 +361,7 @@ A step that stops it fails it with exit code 1, and its document is the error do
 
 ### `opalro unshelf --json`
 
-`opalro unshelf [number]` brings back the newest shelf, or the one with that number, onto whatever save the project is on ([decision 073](decisions/073-shelves.md)). Its changes are made as a switch from the save it was shelved on to the shelf, carrying all other unsaved work along, and the shelf leaves the list. Where the folder differs from the save it was shelved on at a path the shelf changes (unsaved work there, a file Opalro ignores, or the current save changed it since), nothing changes and the command fails (exit code 1). `error.message` names the paths of each kind apart: unsaved work or files Opalro ignores, and what the current save changed since the shelf was made (the save shelved on and the current one differ there). The hint gives each kind its own way out: save, shelve or discard the work, then bring the shelf back by its number; and for what the current save changed, go to the save the shelf was made on with `opalro goto` and the first 12 hex digits of its ID, which the hint gives, and bring the shelf back there. A path counts as changed by the current save where the two saves differ at it, or where the current save holds a file or link at a folder above it that the save shelved on doesn't hold there (it made the folder a file, say, or changed a file the shelf made a folder); work of the user's own below a folder the current save made or removed counts as unsaved work. When `goto` can't reach the save shelved on by those digits (it finds only saves some line still reaches, and an `undo --to` that moved a line back can leave one behind), the hint says so instead, and points to `opalro undo --list`, whose steps can bring it back. A number no shelf has, or no shelf at all, fails it too. After finishing a switch that a crash or a file in use stopped, it brings back no shelf (`finished` is `true`), so running it again never brings back a second one ([decision 075](decisions/075-crash-recovery.md)).
+`opalro unshelf [number]` brings back the newest shelf, or the one with that number, onto whatever save the project is on ([decision 073](decisions/073-shelves.md)). Its changes are made as a switch from the save it was shelved on to the shelf, carrying all other unsaved work along, and the shelf leaves the list. Where the folder differs from the save it was shelved on at a path the shelf changes (unsaved work there, a file Opalro ignores, or the current save changed it since), nothing changes and the command fails (exit code 1). `error.message` names the paths of each kind apart: unsaved work or files Opalro ignores, and what the current save changed since the shelf was made (the save shelved on and the current one differ there). The hint gives each kind its own way out: save, shelve or discard the work, then bring the shelf back by its number (a label only a planted project can hold, one that isn't plain as [terminal.md](terminal.md) says, isn't put in the command: the hint says to bring this shelf back by its label with `opalro unshelf <label>`, as it stands, and that `opalro shelf --list` shows the label); and for what the current save changed, go to the save the shelf was made on with `opalro goto` and an ID the hint gives (the save's short change ID when it is on the current line, otherwise the first 12 hex digits of its fingerprint), and bring the shelf back there. A path counts as changed by the current save where the two saves differ at it, or where the current save holds a file or link at a folder above it that the save shelved on doesn't hold there (it made the folder a file, say, or changed a file the shelf made a folder); work of the user's own below a folder the current save made or removed counts as unsaved work. When `goto` can't reach the save shelved on by either (it finds only saves some line, server line or tag still reaches, and an `undo --to` that moved a line back can leave one behind), the hint says so instead, and points to `opalro undo --list`, whose steps can bring it back. A number no shelf has, or no shelf at all, fails it too. After finishing a switch that a crash or a file in use stopped, it brings back no shelf (`finished` is `true`), so running it again never brings back a second one ([decision 075](decisions/075-crash-recovery.md)).
 
 | Field | Type | Meaning |
 |---|---|---|
@@ -426,6 +426,75 @@ A step that stops it fails it with exit code 1, and its document is the error do
 | `server_lines` | list of string | Every server line as `line@server`, by server and then line, in byte order. `[]` if none. |
 | `warnings` | list | See §4. |
 
+### `opalro line new --json`
+
+`opalro line new <name>` makes a line at the save the project is on, and puts the project on it ([decision 158](decisions/158-making-renaming-and-deleting-lines.md)). The folder isn't touched, so unsaved changes stay as they are and the next save goes on the new line. It works on a line and at a save. A name that breaks the rules for line names, that another line has in any letter case, or that is a tag's fails the command (exit code 1), changing nothing. It is one step, which `opalro undo` takes back.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `opalro_json` | number | `1` |
+| `line` | string | The new line's name. |
+| `save` | save or `null` | The save the new line starts at. `null` only if Opalro couldn't read it back after making the line, which happened all the same. |
+| `warnings` | list | See §4. |
+
+### `opalro line rename --json`
+
+`opalro line rename <old> <new>` renames the line `old`, and `opalro line rename <new>` the line the project is on; at a save, with no line, the second fails (exit code 1). A project on the line stays on it, under the new name. Saves already made keep the old name as the line they were made on. The new name follows `line new`'s rules, except that a line may take another spelling of its own name (`Main` to `main`). Renaming a line to the name it has already changes nothing and records no step. A rename is one step, which `opalro undo` takes back.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `opalro_json` | number | `1` |
+| `from` | string | The line's name before. |
+| `to` | string | Its name now. |
+| `renamed` | boolean | `false` when the line already had that name, so nothing changed and no step was recorded. |
+| `warnings` | list | See §4. |
+
+### `opalro line delete --json`
+
+`opalro line delete <name>` takes the name away; the line's saves stay stored, and `opalro undo` brings the line back for as long as the undo window lasts. The line the project is on can't be deleted (exit code 1). When no other line, no tag and no server line has the line's newest save in its history, the line holds saves nothing else shows: in a terminal Opalro asks first, and with `--json` it never asks, so the command fails (exit code 1), deleting nothing, and `error.hint` names `--yes`, which deletes without asking. When the walk meets a save that can't be read, the command fails as damage (exit code 1), deleting nothing, with or without `--yes`: `error.message` names the first line, tag or server line, in that order, whose history through every parent holds it (`the tag ghost names a save that can't be read: …` for its own save, `the tag ghost names a save whose history can't be read: …` for one further back), or, when none does, the deleted line (`line feat's history can't be read: …`) ([decision 163](decisions/163-red-team-m7-session-2-rulings.md)).
+
+| Field | Type | Meaning |
+|---|---|---|
+| `opalro_json` | number | `1` |
+| `line` | string | The deleted line's name. |
+| `save` | save or `null` | The line's newest save. `null` only if Opalro couldn't read it back after deleting the line, which happened all the same. |
+| `only_here` | number | How many of the line's saves no other line, tag or server line has. `0` when something else holds them all. |
+| `warnings` | list | See §4. |
+
+### `opalro tag --json`
+
+`opalro tag` lists the project's tags ([decision 159](decisions/159-tags.md)). No save is read.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `opalro_json` | number | `1` |
+| `tags` | list of object | Each tag as `{"name": string, "save": 64 hex digits, "message": string}`, in name order (byte order), the name as it is stored, never quoted as the text output may show it. `message` is the tag's whole message, as it is; `""` if it has none. `[]` if the project has no tags. |
+| `warnings` | list | See §4. |
+
+### `opalro tag <name> --json`
+
+`opalro tag <name> [<message>] [--save <save>]` tags the save the project is at, or the one `--save` names (as for `goto`: by line name, server line, tag, change ID or fingerprint, with the same refusals). A new tag's name follows the rules for line names, and can't be a line's or differ from another tag's only by letter case; such a name fails the command (exit code 1), changing nothing. Tagging the save a tag is at already changes nothing and records no step. A tag at another save is moved, which in a terminal Opalro asks about first; with `--json` it never asks, so the command fails (exit code 1), moving nothing, and `error.hint` names `--yes`, which moves it without asking. Making or moving a tag is one step, which `opalro undo` takes back.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `opalro_json` | number | `1` |
+| `tag` | string | The tag's name. |
+| `save` | save or `null` | The save the tag is at now. `null` only if Opalro couldn't read it back, after tagging it all the same. |
+| `moved_from` | string or `null` | The save the tag was at before it moved (64 hex digits); `null` when it didn't move. |
+| `changed` | boolean | `false` when the tag was at that save already, so nothing changed and no step was recorded. |
+| `warnings` | list | See §4. |
+
+### `opalro tag --delete --json`
+
+`opalro tag --delete <name>` deletes a tag; `opalro undo` brings it back. In a terminal Opalro asks first; with `--json` it never asks, so the command fails (exit code 1), deleting nothing, and `error.hint` names `--yes`, which deletes without asking: `To delete it, run the same command with --yes.`, never the tag's name, which an import may have made any text. A tag that isn't there fails the command (exit code 1).
+
+| Field | Type | Meaning |
+|---|---|---|
+| `opalro_json` | number | `1` |
+| `tag` | string | The deleted tag's name. |
+| `save` | save or `null` | The save the tag was at. `null` only if Opalro couldn't read it back, after deleting the tag all the same. |
+| `warnings` | list | See §4. |
+
 ### `opalro history --json`
 
 | Field | Type | Meaning |
@@ -433,16 +502,18 @@ A step that stops it fails it with exit code 1, and its document is the error do
 | `opalro_json` | number | `1` |
 | `position` | object | Where the project is, as in `status`: `{"line": …}`, or `{"save": …}` (64 hex digits) when it is at a save instead of on a line. |
 | `saves` | list of save | The saves of the line, newest first, following first parents back to the start. |
+| `tags` | list | Every tag at a listed save, in name order, each `{"name": …, "save": …}`: the tag's name as it is, and its save's fingerprint (64 hex digits). |
 | `warnings` | list | See §4. |
 
 ### `opalro show --json`
 
-`opalro show` takes a line name, the start of a change ID, or the start of a fingerprint (at least 8 hex digits), and shows the save the project is on when given none. A text that is both a line's name and the start of another save's ID is refused, as for `goto` (and for `changes --save`).
+`opalro show` takes a line name, a server line `line@server`, a tag's name, the start of a change ID, or the start of a fingerprint (at least 8 hex digits), tried in that order, and shows the save the project is on when given none. A text that is both a line's or a tag's name and the start of another save's ID is refused, as for `goto` (and for `changes --save` and `tag --save`), and so is a line's or server line's name that a tag at another save has too.
 
 | Field | Type | Meaning |
 |---|---|---|
 | `opalro_json` | number | `1` |
 | `save` | save | The save shown. |
+| `tags` | list of string | The names of the tags at the save shown, in order, as they are; empty when it has none. |
 | `changes` | list of change | What the save changed compared with its first parent (with all of its files for a save that has none), in the order of the paths. |
 | `warnings` | list | See §4. |
 

@@ -5,19 +5,21 @@ mod goto_output;
 mod help;
 mod history_output;
 mod import_output;
+mod line_output;
 mod output;
 mod progress;
 mod setup_output;
 mod shelf_output;
 mod show_output;
 mod style;
+mod tag_output;
 mod undo_output;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::ffi::OsString;
 use std::io::{BufRead, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser, Subcommand};
@@ -27,15 +29,15 @@ use opal_core::config::{
     ConfigError, Identity, git_excludes_file, git_import_settings, ignored_identity_note,
     ignored_project_identity, load_identity, now_person, undo_window_days,
 };
-use opal_core::diary::{Action, DiaryEntry, Position};
+use opal_core::diary::{Action, DiaryEntry, Position, is_plain};
 use opal_core::diff::{count_changes, for_each_change};
 use opal_core::fsio::fault_point;
 use opal_core::history::{
-    LineIds, ResolveError, current_save, for_each_on_line, resolve, short_change_id,
+    LineIds, ResolveError, current_save, for_each_on_line, id_for_command, resolve, short_change_id,
 };
 use opal_core::id::{ChangeId, Id};
 use opal_core::import::{ImportError, ImportPass, ImportRequest, import_git};
-use opal_core::lines::resolve_target;
+use opal_core::lines::{self, LineError, resolve_target};
 use opal_core::names::{GivenPathError, project_given, project_path};
 use opal_core::presets::{Looked, Preset, suggested};
 use opal_core::repo::{RepoError, Repository, elevated_only_note, resolved};
@@ -46,6 +48,7 @@ use opal_core::snapshot::{LargeSave, SaveError, SaveOutcome, SaveRequest, save_f
 use opal_core::status::{PathChange, status, why_stopped};
 use opal_core::store::StoreError;
 use opal_core::switch::{SwitchError, discard, goto};
+use opal_core::tags::{self, Ask, TagError, Tagged};
 use opal_core::text::escape;
 use opal_core::tidy;
 use opal_core::undo::{self, StepInfo, StepRequest};
@@ -100,7 +103,8 @@ enum Command {
     /// Show your unsaved changes line by line, in these files and folders or everywhere; or what
     /// a save changed.
     Changes {
-        /// The save to show, by line name, change ID or fingerprint, against its first parent.
+        /// The save to show, by line name, line@server, tag, change ID or fingerprint, against its
+        /// first parent.
         #[arg(long, value_name = "SAVE")]
         save: Option<String>,
         /// Only these files and folders.
@@ -111,12 +115,35 @@ enum Command {
     History,
     /// Show one save.
     Show {
-        /// The save, by line name, change ID or fingerprint; the one you're at if left out.
+        /// The save, by line name, line@server, tag, change ID or fingerprint; the one you're at
+        /// if left out.
         save: Option<String>,
     },
-    /// List the lines, marking the one you're on, then the server lines.
-    Line,
-    /// Go to a line, or to a save: by line name, line@server, change ID or fingerprint.
+    /// List the lines, marking the one you're on, then the server lines; or make, rename or
+    /// delete one.
+    #[command(disable_help_subcommand = true, subcommand_value_name = "FORM")]
+    Line {
+        #[command(subcommand)]
+        action: Option<LineAction>,
+    },
+    /// Name a save with a tag, list the tags, or delete one.
+    Tag {
+        /// The tag's name. Without one, the tags are listed.
+        name: Option<String>,
+        /// What the tag marks, in a few words.
+        message: Option<String>,
+        /// The save to tag, by line name, line@server, tag, change ID or fingerprint; the one
+        /// you're at if left out.
+        #[arg(long, value_name = "SAVE", requires = "name")]
+        save: Option<String>,
+        /// Delete this tag.
+        #[arg(long, value_name = "NAME", conflicts_with_all = ["name", "message", "save"])]
+        delete: Option<String>,
+        /// Move or delete the tag without asking.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Go to a line, or to a save: by line name, line@server, tag, change ID or fingerprint.
     Goto {
         /// The line or save to go to.
         target: String,
@@ -172,6 +199,24 @@ enum Command {
     Verify,
 }
 
+#[derive(Subcommand)]
+enum LineAction {
+    /// Make a new line at the save you're on, and move onto it.
+    New { name: String },
+    /// Rename a line: the one you're on, or the one named first.
+    Rename {
+        #[arg(value_name = "NAME", num_args = 1..=2, required = true)]
+        names: Vec<String>,
+    },
+    /// Delete a line. Its saves stay stored for the undo window.
+    Delete {
+        name: String,
+        /// Delete without asking, even when no other line or tag has its saves.
+        #[arg(long)]
+        yes: bool,
+    },
+}
+
 #[derive(Clone, Copy, clap::ValueEnum)]
 enum PresetArg {
     Code,
@@ -199,7 +244,7 @@ struct SaveArgs {
     /// After an import, save files Git wrote with CRLF line endings as they are.
     #[arg(long)]
     accept_crlf: bool,
-    /// At a save rather than on a line, the name of the new line this save starts.
+    /// The name of a new line this save starts.
     #[arg(long, value_name = "NAME")]
     line: Option<String>,
     /// Save without asking, however much the save adds.
@@ -307,6 +352,26 @@ impl From<SetupError> for Failure {
 
 impl From<ImportError> for Failure {
     fn from(e: ImportError) -> Failure {
+        Failure {
+            hint: e.hint(),
+            message: e.to_string(),
+            printed: false,
+        }
+    }
+}
+
+impl From<LineError> for Failure {
+    fn from(e: LineError) -> Failure {
+        Failure {
+            hint: e.hint(),
+            message: e.to_string(),
+            printed: false,
+        }
+    }
+}
+
+impl From<TagError> for Failure {
+    fn from(e: TagError) -> Failure {
         Failure {
             hint: e.hint(),
             message: e.to_string(),
@@ -678,6 +743,22 @@ fn setup_command(
 /// Asks in the terminal whether to apply a preset's changes. Only a yes is one.
 fn ask_apply() -> bool {
     let _ = write!(std::io::stderr(), "Apply these changes? [y/N] ");
+    answered_yes()
+}
+
+/// Asks in the terminal whether to delete `line`, which alone holds `only_here` saves.
+fn ask_delete_line(line: &str, only_here: u64) -> bool {
+    let line = style::err().paint(style::Role::Line, &escape(line, false));
+    let saves = output::counted(only_here, "save", "saves");
+    output::tell(&format!(
+        "Line {line} holds {saves} that no other line or tag has."
+    ));
+    let _ = write!(std::io::stderr(), "Delete it? [y/N] ");
+    answered_yes()
+}
+
+/// Whether the answer typed in is a yes. One that can't be read is a no.
+fn answered_yes() -> bool {
     let mut answer = String::new();
     if std::io::stdin().lock().read_line(&mut answer).is_err() {
         return false;
@@ -970,8 +1051,7 @@ fn save(json: bool, args: SaveArgs, opened: &mut Option<Repository>) -> Result<(
                     format!("Nothing to save there: it matches {last_save}.\n")
                 };
                 if req.new_line.is_some() {
-                    text += "No line was made: a new line starts with a save, so change a file \
-                             first.\n";
+                    text += "No line was made: opalro line new <name> makes one without saving.\n";
                 }
                 text
             };
@@ -1309,26 +1389,38 @@ fn history_to(
     json: bool,
     unfinished: Option<Warning>,
 ) -> Result<Vec<Warning>, Failure> {
+    let (_, entry) = repo.current()?;
+    // Each save's tags, found once: an import can bring thousands.
+    let mut tags_at = tags::by_save(repo, &entry.state)?;
     if json {
-        let position = output::position_json(&repo.current()?.1.state.position);
+        let position = output::position_json(&entry.state.position);
+        let listed_tags: RefCell<Vec<(String, Id)>> = RefCell::default();
         // The document `json!` would make, in pieces and in alphabetical key order, as in `show`.
         return output::stream_document(
             out,
             &format!("{{\"opalro_json\":{OPALRO_JSON},\"position\":{position},\"saves\":["),
             |each| {
                 for_each_on_line(repo, |id, save, short| {
+                    if let Some(names) = tags_at.remove(id) {
+                        let mut listed = listed_tags.borrow_mut();
+                        listed.extend(names.into_iter().map(|name| (name, *id)));
+                    }
                     each(&output::save_json(id, save, short))
                 })
             },
             || {
+                let mut listed = listed_tags.take();
+                listed.sort_unstable_by(|a, b| a.0.cmp(&b.0));
+                let tags: Vec<serde_json::Value> = (listed.iter())
+                    .map(|(name, save)| json!({"name": name, "save": save.to_hex()}))
+                    .collect();
                 let mut warnings: Vec<Warning> = unfinished.into_iter().collect();
                 warnings.extend(repo.store().warnings());
-                (json!({}), warnings)
+                (json!({"tags": tags}), warnings)
             },
         );
     }
     let now = now_ms();
-    let (_, entry) = repo.current()?;
     let mut listed = history_output::History::new(match &entry.state.position {
         Position::OnLine(line) => Some(escape(line, false)),
         Position::AtSave(_) => None,
@@ -1345,6 +1437,9 @@ fn history_to(
             author: escape(&s.author.name, false),
             title: escape(s.message.lines().next().unwrap_or_default(), false),
             lines: heads.remove(id).unwrap_or_default(),
+            tags: (tags_at.remove(id).unwrap_or_default().iter())
+                .map(|name| tags::shown_name(name))
+                .collect(),
         };
         listed.add(out, row)?;
         Ok::<(), Failure>(())
@@ -1371,6 +1466,9 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
     let early = unfinished.clone();
     let store = repo.store();
     let save = store.save(&id, repo.signatures_allowed())?;
+    let tags = tags::by_save(repo, &repo.current()?.1.state)?
+        .remove(&id)
+        .unwrap_or_default();
     // Of the parent, only what is shown and the root the walk compares with.
     let (old_root, parent_title) = match save.parents.first() {
         Some(p) => {
@@ -1391,7 +1489,6 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
         Ok::<(), StoreError>(())
     })?;
     let mut out = output::Stdout::new();
-    let mut shown_as = String::new();
     let done = (|| -> Result<Vec<Warning>, Failure> {
         if json {
             // The document `json!` would make, in pieces: serde_json writes an object's keys in
@@ -1411,7 +1508,11 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
                     let short = short_or_whole(repo, &id, &save.change_id, &mut warnings);
                     warnings.extend(store.warnings());
                     (
-                        json!({"opalro_json": OPALRO_JSON, "save": output::save_json(&id, &save, &short)}),
+                        json!({
+                            "opalro_json": OPALRO_JSON,
+                            "save": output::save_json(&id, &save, &short),
+                            "tags": tags,
+                        }),
                         warnings,
                     )
                 },
@@ -1419,8 +1520,14 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
         }
         let mut warnings: Vec<Warning> = unfinished.into_iter().collect();
         let short = short_or_whole(repo, &id, &save.change_id, &mut warnings);
-        shown_as.clone_from(&short);
-        show_output::write_head(&mut out, &id, &save, &short, &parent_title, count, now_ms())?;
+        let head = show_output::Head {
+            id: &id,
+            save: &save,
+            short: &short,
+            parent_title: &parent_title,
+            tags: &tags,
+        };
+        show_output::write_head(&mut out, &head, count, now_ms())?;
         let s = style::out();
         for_each_change(store, old_root, save.root, |c| {
             writeln!(out, "{}", columns.line(s, &output::Row::of(&c)))?;
@@ -1430,10 +1537,13 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
         Ok(warnings)
     })();
     output::listed(done, || so_far(early, repo))?;
-    if !json && count > 0 {
+    if !json
+        && count > 0
+        && let Some(named) = id_for_command(repo, &id)
+    {
         style::next(&format!(
             "see its lines with: {}",
-            style::err().command(&format!("opalro changes --save {shown_as}"))
+            style::err().command(&format!("opalro changes --save {named}"))
         ));
     }
     Ok(())
@@ -1500,6 +1610,338 @@ fn line_command(json: bool, opened: &mut Option<Repository>) -> Result<(), Failu
     output::print_quietly(&shown, &warnings)
 }
 
+/// `opalro line new`, `rename` and `delete`.
+fn line_action(
+    json: bool,
+    action: LineAction,
+    opened: &mut Option<Repository>,
+) -> Result<(), Failure> {
+    let repo = opened.insert(with_users_key(Repository::discover(
+        &std::env::current_dir()?,
+    )?));
+    let who = now_person(&load_identity(Some(repo.root()))?);
+    let (mut warnings, document, text, recorded) = match action {
+        LineAction::New { name } => {
+            let made = lines::new_line(repo, &name, &who, &mut waiting)?;
+            let mut warnings = made.warnings;
+            let (save, at) = save_named(repo, &made.save, &mut warnings);
+            let document = json!({"line": made.line, "save": save});
+            (
+                warnings,
+                document,
+                line_output::started(&made.line, &at),
+                true,
+            )
+        }
+        LineAction::Rename { mut names } => {
+            let new = names.pop().unwrap_or_default();
+            let old = names.pop();
+            let done = lines::rename_line(repo, old.as_deref(), &new, &who, &mut waiting)?;
+            let document = json!({"from": done.from, "to": done.to, "renamed": done.renamed});
+            let text = line_output::renamed(&done.from, &done.to, done.renamed);
+            (done.warnings, document, text, done.renamed)
+        }
+        LineAction::Delete { name, yes } => {
+            let asked = Cell::new(false);
+            let mut confirm = |line: &str, only_here: u64| {
+                if yes || !style::may_ask() {
+                    return yes;
+                }
+                asked.set(true);
+                ask_delete_line(line, only_here)
+            };
+            let done = match lines::delete_line(repo, &name, &who, &mut waiting, &mut confirm) {
+                Err(LineError::Kept { .. }) if asked.get() => {
+                    return output::print_quietly(
+                        "Nothing was deleted.\n",
+                        &repo.store().warnings(),
+                    );
+                }
+                Err(LineError::Kept { line, only_here }) => {
+                    // A stored name could read as an option or as shell text.
+                    let named = if is_plain(&line) {
+                        escape(&line, false)
+                    } else {
+                        "<line>".to_owned()
+                    };
+                    let line = escape(&line, false);
+                    return Err(Failure {
+                        message: format!(
+                            "Line {line} holds {} that no other line or tag has, and Opalro can't \
+                             ask whether to delete it {}.",
+                            output::counted(only_here, "save", "saves"),
+                            unasked(json)
+                        ),
+                        hint: Some(format!("To delete it: opalro line delete {named} --yes")),
+                        printed: false,
+                    });
+                }
+                done => done?,
+            };
+            let mut warnings = done.warnings;
+            let (save, at) = save_named(repo, &done.save, &mut warnings);
+            let document = json!({"line": done.line, "save": save, "only_here": done.only_here});
+            let text = line_output::deleted(&done.line, &at, done.only_here);
+            (warnings, document, text, true)
+        }
+    };
+    warnings.extend(repo.store().warnings());
+    print_step(json, document, text, &warnings, recorded)
+}
+
+/// What a command that may record a step prints: its `--json` document, or `text` and, when it
+/// `recorded` one, how to take it back.
+fn print_step(
+    json: bool,
+    mut document: serde_json::Value,
+    text: String,
+    warnings: &[Warning],
+    recorded: bool,
+) -> Result<(), Failure> {
+    let text = if json {
+        document["opalro_json"] = OPALRO_JSON.into();
+        document["warnings"] = output::warnings_json(warnings);
+        format!("{document}\n")
+    } else {
+        text
+    };
+    output::print_done(&text, warnings)?;
+    if !json && recorded {
+        style::changed_your_mind();
+    }
+    Ok(())
+}
+
+/// Why a question couldn't be asked, for an error that names the flag that answers it.
+fn unasked(json: bool) -> &'static str {
+    if json {
+        "with --json"
+    } else {
+        "without a terminal"
+    }
+}
+
+/// `opalro tag`: the tags in name order.
+fn tag_list_command(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
+    let repo: &Repository = opened.insert(with_users_key(Repository::discover(
+        &std::env::current_dir()?,
+    )?));
+    let (_, entry) = repo.current()?;
+    let list = repo.tag_list(&entry.state)?;
+    let mut warnings: Vec<Warning> = unfinished_warning(repo).into_iter().collect();
+    warnings.extend(repo.store().warnings());
+    if json {
+        let tags: Vec<serde_json::Value> = (list.tags.iter())
+            .map(|(name, tag)| {
+                json!({"name": name, "save": tag.save.to_hex(), "message": tag.message})
+            })
+            .collect();
+        let document = json!({
+            "opalro_json": OPALRO_JSON,
+            "tags": tags,
+            "warnings": output::warnings_json(&warnings),
+        });
+        return output::print_quietly(&format!("{document}\n"), &warnings);
+    }
+    output::print_quietly(&tag_output::list(&list), &warnings)
+}
+
+/// What `tags::tag` and `tags::delete_tag` call before they move or delete a tag: yes with
+/// `--yes`, no where Opalro can't ask, and otherwise the answer, noting in `asked` that it asked.
+fn tag_confirm<'a>(
+    yes: bool,
+    root: &'a Path,
+    asked: &'a Cell<bool>,
+    noticed: &'a mut Vec<Warning>,
+) -> impl FnMut(&Ask<'_>) -> bool + 'a {
+    move |ask| {
+        if yes || !style::may_ask() {
+            return yes;
+        }
+        asked.set(true);
+        ask_about_tag(root, ask, noticed)
+    }
+}
+
+/// Asks in the terminal whether to move or delete a tag. The engine holds the project while it
+/// asks, so the saves are named through a look of their own, opened now that the lock is held.
+fn ask_about_tag(root: &Path, ask: &Ask<'_>, noticed: &mut Vec<Warning>) -> bool {
+    let e = style::err();
+    let reader = Repository::open_untouched(root).ok();
+    let mut at = |id: &Id| {
+        let (short, title) = match &reader {
+            Some(repo) => named_save(repo, id, noticed),
+            None => (id.short_hex(), None),
+        };
+        match title {
+            Some(title) => format!(
+                "{} \"{}\"",
+                e.paint(style::Role::ChangeId, &short),
+                escape(&title, false)
+            ),
+            None => e.paint(style::Role::Fingerprint, &short),
+        }
+    };
+    let question = match ask {
+        Ask::Move { name, from, to } => {
+            let name = tag_output::named(e, name);
+            output::tell(&format!("Tag {name} is at save {}.", at(from)));
+            format!("Move it to save {}? [y/N] ", at(to))
+        }
+        Ask::Delete { name, save } => format!(
+            "Delete tag {}, at save {}? [y/N] ",
+            tag_output::named(e, name),
+            at(save)
+        ),
+    };
+    let _ = write!(std::io::stderr(), "{question}");
+    if let Some(repo) = &reader {
+        noticed.extend(repo.store().warnings());
+    }
+    answered_yes()
+}
+
+/// What a question answered no prints.
+fn nothing_changed(repo: &Repository, mut warnings: Vec<Warning>) -> Result<(), Failure> {
+    warnings.extend(repo.store().warnings());
+    output::print_quietly("Nothing was changed.\n", &warnings)
+}
+
+/// `opalro tag <name> [message] [--save <save>]`: makes the tag, or moves it once asked.
+fn tag_command(
+    json: bool,
+    name: &str,
+    message: Option<&str>,
+    save: Option<&str>,
+    yes: bool,
+    opened: &mut Option<Repository>,
+) -> Result<(), Failure> {
+    let repo = opened.insert(with_users_key(Repository::discover(
+        &std::env::current_dir()?,
+    )?));
+    let who = now_person(&load_identity(Some(repo.root()))?);
+    let save = save.map(|text| resolve(repo, text)).transpose()?;
+    let root = repo.root().to_owned();
+    let (asked, mut noticed) = (Cell::new(false), Vec::new());
+    let mut confirm = tag_confirm(yes, &root, &asked, &mut noticed);
+    let done = tags::tag(repo, name, message, save, &who, &mut waiting, &mut confirm);
+    drop(confirm);
+    let (tagged, mut warnings) = match done {
+        Err(TagError::NotMoved { .. }) if asked.get() => return nothing_changed(repo, noticed),
+        Err(TagError::NotMoved { name, from, .. }) => {
+            let mut found = Vec::new();
+            let (was, _) = named_save(repo, &from, &mut found);
+            for warning in found {
+                repo.store().note(warning);
+            }
+            return Err(Failure {
+                message: format!(
+                    "Tag {} is at another save, {was}, and Opalro can't ask whether to move it {}.",
+                    tags::shown_name(&name),
+                    unasked(json)
+                ),
+                hint: Some("To move it, run the same command with --yes.".into()),
+                printed: false,
+            });
+        }
+        done => done?,
+    };
+    warnings.extend(noticed);
+    let (document, text, recorded) = match tagged {
+        Tagged::Made { save } => {
+            let (save, at) = save_named(repo, &save, &mut warnings);
+            let document = json!({"tag": name, "save": save, "moved_from": null, "changed": true});
+            (document, tag_output::made(name, &at), true)
+        }
+        Tagged::Already { save } => {
+            let (save, at) = save_named(repo, &save, &mut warnings);
+            let document = json!({"tag": name, "save": save, "moved_from": null, "changed": false});
+            (
+                document,
+                tag_output::already(name, &at, message.is_some()),
+                false,
+            )
+        }
+        Tagged::Moved { from, to } => {
+            let (save, at) = save_named(repo, &to, &mut warnings);
+            // The old save by its ID alone.
+            let was = match named_save(repo, &from, &mut warnings) {
+                (short, Some(_)) => style::out().paint(style::Role::ChangeId, &short),
+                (short, None) => goto_output::at_save(&short, None),
+            };
+            let document =
+                json!({"tag": name, "save": save, "moved_from": from.to_hex(), "changed": true});
+            (document, tag_output::moved(name, &at, &was), true)
+        }
+    };
+    warnings.extend(repo.store().warnings());
+    print_step(json, document, text, &warnings, recorded)
+}
+
+/// `opalro tag --delete <name>`, once asked.
+fn tag_delete_command(
+    json: bool,
+    name: &str,
+    yes: bool,
+    opened: &mut Option<Repository>,
+) -> Result<(), Failure> {
+    let repo = opened.insert(with_users_key(Repository::discover(
+        &std::env::current_dir()?,
+    )?));
+    let who = now_person(&load_identity(Some(repo.root()))?);
+    let root = repo.root().to_owned();
+    let (asked, mut noticed) = (Cell::new(false), Vec::new());
+    let mut confirm = tag_confirm(yes, &root, &asked, &mut noticed);
+    let done = tags::delete_tag(repo, name, &who, &mut waiting, &mut confirm);
+    drop(confirm);
+    let (save, mut warnings) = match done {
+        Err(TagError::NotDeleted { .. }) if asked.get() => return nothing_changed(repo, noticed),
+        Err(TagError::NotDeleted { .. }) => {
+            return Err(Failure {
+                message: format!(
+                    "Opalro asks before it deletes a tag, and can't {}.",
+                    unasked(json)
+                ),
+                // Never the name: a stored one may be anything, and a pasted hint runs it.
+                hint: Some("To delete it, run the same command with --yes.".into()),
+                printed: false,
+            });
+        }
+        done => done?,
+    };
+    warnings.extend(noticed);
+    let (document_save, at) = save_named(repo, &save, &mut warnings);
+    warnings.extend(repo.store().warnings());
+    let document = json!({"tag": name, "save": document_save});
+    print_step(
+        json,
+        document,
+        tag_output::deleted(name, &at),
+        &warnings,
+        true,
+    )
+}
+
+/// Save `id` as a `--json` document gives it (`null` if it can't be read back), and as an outcome
+/// line names it.
+fn save_named(
+    repo: &Repository,
+    id: &Id,
+    warnings: &mut Vec<Warning>,
+) -> (serde_json::Value, String) {
+    match repo.store().save(id, repo.signatures_allowed()) {
+        Ok(save) => {
+            let short = short_or_whole(repo, id, &save.change_id, warnings);
+            let named = goto_output::at_save(&short, Some(&save));
+            (output::save_json(id, &save, &short), named)
+        }
+        Err(_) => (
+            serde_json::Value::Null,
+            goto_output::at_save(&id.short_hex(), None),
+        ),
+    }
+}
+
 /// The name of the project's folder, as the system writes it.
 fn project_name(repo: &Repository) -> String {
     let root = repo.root();
@@ -1538,10 +1980,18 @@ fn goto_command(json: bool, text: &str, opened: &mut Option<Repository>) -> Resu
         None => done.save.short_hex(),
     };
     // Likewise, this only leaves out a line of advice if it fails.
-    let lines = repo
-        .current()
-        .map(|(_, e)| e.state.lines)
-        .unwrap_or_default();
+    let keep = match &done.position {
+        Position::AtSave(id) if !json => {
+            let lines = repo
+                .current()
+                .map(|(_, e)| e.state.lines)
+                .unwrap_or_default();
+            (lines.iter())
+                .find(|(_, tip)| *tip == id)
+                .and_then(|(line, _)| keep_saving(repo, line))
+        }
+        _ => None,
+    };
     warnings.extend(repo.store().warnings());
     let text = if json {
         let document = json!({
@@ -1558,7 +2008,7 @@ fn goto_command(json: bool, text: &str, opened: &mut Option<Repository>) -> Resu
         });
         format!("{document}\n")
     } else {
-        goto_output::switched(&done, &short, save.as_ref(), &lines)
+        goto_output::switched(&done, &short, save.as_ref(), keep.as_ref())
     };
     output::print_done(&text, &warnings)?;
     // A goto to where the project already is records no step, so has nothing to undo.
@@ -1566,6 +2016,25 @@ fn goto_command(json: bool, text: &str, opened: &mut Option<Repository>) -> Resu
         style::changed_your_mind();
     }
     Ok(())
+}
+
+/// How to keep saving on `line`, as its name reads now: only a name that goes onto it is
+/// advised.
+fn keep_saving(repo: &Repository, line: &str) -> Option<goto_output::KeepSaving> {
+    use goto_output::KeepSaving;
+    let rename = |why| {
+        Some(KeepSaving::Rename {
+            line: line.to_owned(),
+            why,
+        })
+    };
+    match resolve_target(repo, line) {
+        // A stored name can read as an option (`-x`): only a plain one goes in a command.
+        Ok(lines::Target::Line(_)) if is_plain(line) => Some(KeepSaving::Goto(line.to_owned())),
+        Err(ResolveError::LineOrTag { .. }) => rename("a tag at another save"),
+        Err(ResolveError::LineOrSave { .. }) => rename("the start of another save's ID"),
+        _ => None,
+    }
 }
 
 fn discard_command(
@@ -2367,7 +2836,32 @@ fn main() -> ExitCode {
         }
         Command::Import => import(cli.json, &mut opened),
         Command::Save(args) => save(cli.json, args, &mut opened),
-        Command::Line => line_command(cli.json, &mut opened),
+        Command::Line { action: None } => line_command(cli.json, &mut opened),
+        Command::Line {
+            action: Some(action),
+        } => line_action(cli.json, action, &mut opened),
+        Command::Tag {
+            name: None,
+            delete: None,
+            ..
+        } => tag_list_command(cli.json, &mut opened),
+        Command::Tag {
+            name,
+            message,
+            save,
+            delete,
+            yes,
+        } => match delete {
+            Some(name) => tag_delete_command(cli.json, &name, yes, &mut opened),
+            None => tag_command(
+                cli.json,
+                &name.unwrap_or_default(),
+                message.as_deref(),
+                save.as_deref(),
+                yes,
+                &mut opened,
+            ),
+        },
         Command::Status { full } => status_command(cli.json, full, &mut opened),
         Command::Changes { save, paths } => {
             changes_command(cli.json, save.as_deref(), &paths, &mut opened)

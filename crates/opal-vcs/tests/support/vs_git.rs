@@ -6,7 +6,9 @@ use std::fmt::Write as _;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::Path;
 use std::process::{Child, ChildStdin, ChildStdout, Stdio};
+use std::time::{Duration, Instant};
 
+use opal_core::ancestry::only_in;
 use opal_core::diary::{MAX_TAG_MESSAGE_BYTES, Position};
 use opal_core::git::{GitId, HashKind, ObjectType, object_id, rebuild_commit};
 use opal_core::id::Id;
@@ -304,6 +306,98 @@ pub fn assert_matches_git_counting(dir: &Path) -> Counted {
         headers,
         odd_people,
     }
+}
+
+/// Asserts that `only_in(a, [b])` counts what `git rev-list --count a ^b` does, for up to 64
+/// ordered pairs of tips: the lines in name order, then the server lines in name order, each
+/// standing for the commit its save records. Where a commit in the tips' history is dated before
+/// a parent the walk may count too many, though never too few and never a held tip as holding
+/// some, so only that is asserted there. Returns how many pairs it compared, whether the counts
+/// had to be equal, and how many of the walk's came out higher.
+pub fn assert_ancestry_matches_git(dir: &Path) -> (usize, bool, usize) {
+    let repo = Repository::open(dir).unwrap();
+    let state = repo.current().unwrap().1.state;
+    let servers = repo.server_lines(&state).unwrap().servers;
+    let mut named: Vec<(String, Id)> = state.lines.iter().map(|(n, t)| (n.clone(), *t)).collect();
+    for (server, own) in &servers {
+        named.extend(own.iter().map(|(n, t)| (format!("{server}/{n}"), *t)));
+    }
+    let tips: Vec<(String, Id, String)> = named
+        .into_iter()
+        .map(|(name, tip)| {
+            let save = repo.store().save(&tip, false).unwrap();
+            let Some(commit) = save.extra.get(EXTRA_GIT_COMMIT) else {
+                panic!("the save of {name} records no Git commit");
+            };
+            let commit = std::str::from_utf8(commit).unwrap().to_owned();
+            (name, tip, commit)
+        })
+        .collect();
+    let n = tips.len();
+    // Round the tips: each with its next neighbour, then with the one after, and so on, so every
+    // tip comes first once before the cap. Two tips at one save tell nothing.
+    let pairs: Vec<(usize, usize)> = (1..n)
+        .flat_map(|step| (0..n).map(move |a| (a, (a + step) % n)))
+        .filter(|&(a, b)| tips[a].1 != tips[b].1)
+        .take(64)
+        .collect();
+    if pairs.is_empty() {
+        println!("The ancestry walk has no pairs to compare.");
+        return (0, true, 0);
+    }
+    let compared: Vec<&str> = (0..n)
+        .filter(|&i| pairs.iter().any(|&(a, b)| a == i || b == i))
+        .map(|i| tips[i].2.as_str())
+        .collect();
+    let exact = !dated_before_a_parent(dir, &compared);
+    let (mut walking, mut equal) = (Duration::ZERO, 0);
+    for &(a, b) in &pairs {
+        let ((a_name, a_tip, a_commit), (b_name, b_tip, b_commit)) = (&tips[a], &tips[b]);
+        let began = Instant::now();
+        let ours = only_in(&repo, *a_tip, &[*b_tip]).unwrap();
+        walking += began.elapsed();
+        let not_b = format!("^{b_commit}");
+        let counted = text(&git(dir, &["rev-list", "--count", a_commit, &not_b]));
+        let theirs: u64 = counted.trim().parse().unwrap();
+        let at = format!("only_in({a_name}, [{b_name}]) is {ours} where Git counts {theirs}");
+        if exact {
+            assert_eq!(ours, theirs, "{at}");
+        } else {
+            assert_eq!(ours == 0, theirs == 0, "{at}");
+            assert!(ours >= theirs, "{at}");
+        }
+        equal += usize::from(ours == theirs);
+    }
+    let took = walking.as_secs_f64() * 1000.0;
+    if exact {
+        println!(
+            "The ancestry walk matches git rev-list on {} pairs of tips ({took:.1} ms walking).",
+            pairs.len()
+        );
+    } else {
+        println!(
+            "The ancestry walk on {} pairs of tips, where some commit is dated before a parent: \
+             {equal} equal to git rev-list's count, the rest higher ({took:.1} ms walking).",
+            pairs.len()
+        );
+    }
+    (pairs.len(), exact, pairs.len() - equal)
+}
+
+/// Whether a commit in the history of `tips` has a committer date earlier than a parent's.
+fn dated_before_a_parent(dir: &Path, tips: &[&str]) -> bool {
+    let args = [&["log", "--format=%H %ct %P"], tips].concat();
+    let log = text(&git(dir, &args));
+    let rows: Vec<Vec<&str>> = log
+        .lines()
+        .map(|l| l.split_whitespace().collect())
+        .collect();
+    let time: HashMap<&str, i64> = rows
+        .iter()
+        .map(|row| (row[0], row[1].parse().unwrap()))
+        .collect();
+    rows.iter()
+        .any(|row| row[2..].iter().any(|parent| time[parent] > time[row[0]]))
 }
 
 /// `git cat-file --batch`, asked for one object at a time.

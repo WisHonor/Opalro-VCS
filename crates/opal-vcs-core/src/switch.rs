@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use crate::diary::{Action, DiaryEntry, FolderChange, MAX_SHELVES, Position, State};
+use crate::diary::{Action, DiaryEntry, FolderChange, MAX_SHELVES, Position, State, is_plain};
 use crate::drive::{self, Drive};
 use crate::history::{ResolveError, tip_of};
 use crate::id::Id;
@@ -169,9 +169,9 @@ pub struct ShelfCollisions {
     pub label: String,
     /// The save the shelf was made on.
     pub base: Id,
-    /// `opalro goto` reaches `base` by the first 12 hex digits of its ID; worked out only when the
-    /// save the project is on changed something in the way.
-    pub goto_reaches_base: bool,
+    /// What `opalro goto` reaches `base` by, if anything; worked out only when the save the
+    /// project is on changed something in the way.
+    pub goto_base: Option<String>,
     /// Unsaved work, or files Opalro ignores.
     pub unsaved: Vec<String>,
     /// What the save the project is on changed since `base`.
@@ -266,29 +266,37 @@ impl SwitchError {
                 Some("opalro shelf --list shows the shelves there are.".to_owned())
             }
             SwitchError::ShelfInTheWay(c) => {
-                let unshelf = format!("opalro unshelf {}", escape(&c.label, false));
+                // A planted label could be shell text; Opalro's own are numbers. Without it, the
+                // shelf is named by its label, since a new shelf would be the newest.
+                let (bring, bring_there, newest, list) = if is_plain(&c.label) {
+                    let run = format!("run opalro unshelf {}", c.label);
+                    let there = format!("{run} there");
+                    (run, there, " (a new shelf would be the newest)", "")
+                } else {
+                    let by_label = "bring this shelf back by its label with opalro unshelf <label>";
+                    let list = " opalro shelf --list shows the label.";
+                    (by_label.to_owned(), by_label.to_owned(), "", list)
+                };
                 let not_yet = "Opalro can't yet bring a shelf back onto changes saved since it was \
                                made";
-                let (elsewhere, newest) = if c.goto_reaches_base {
-                    let goto = format!("opalro goto {}", c.base.short_hex());
-                    let there = format!(
-                        "go to the save it was made on with {goto}, then run {unshelf} there"
-                    );
-                    (there, " (a new shelf would be the newest)")
+                let (elsewhere, newest_there, list_there) = if let Some(base) = &c.goto_base {
+                    let goto = format!("opalro goto {base}");
+                    let there = format!("go to the save it was made on with {goto}, then {bring_there}");
+                    (there, newest, list)
                 } else {
                     let gone = "opalro goto can't reach the save it was made on, and opalro undo \
                                 --list shows the steps that can bring it back";
-                    (gone.to_owned(), "")
+                    (gone.to_owned(), "", "")
                 };
                 Some(match (c.unsaved.is_empty(), c.changed.is_empty()) {
                     (false, true) => format!(
                         "Save, shelve or discard your changes there, and move ignored files \
-                         somewhere else, then run {unshelf} (a new shelf would be the newest)."
+                         somewhere else, then {bring}{newest}.{list}"
                     ),
-                    (true, _) => format!("{not_yet}: {elsewhere}."),
+                    (true, _) => format!("{not_yet}: {elsewhere}.{list_there}"),
                     (false, false) => format!(
                         "Save, shelve or discard your unsaved changes there, and move ignored files \
-                         somewhere else. {not_yet}: {elsewhere}{newest}."
+                         somewhere else. {not_yet}: {elsewhere}{newest_there}.{list_there}"
                     ),
                 })
             }

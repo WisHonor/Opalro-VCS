@@ -447,7 +447,7 @@ The owner decided that Opalro is closed source ([decision 140](decisions/140-bol
 
 ## v0.2: lines and combining
 
-Planned on 2026-11-14 ([decision 157](decisions/157-v0.2-in-four-milestones.md)). Claude decided 157 to 160 at the owner's request while the owner was away; each can be reversed. v0.2 is built on the branch `v0.2`: each milestone on a branch of its own, merged into `v0.2` after its red-team session. `main` stays what v0.1 is released from, and `v0.2` goes into it only by the owner's hand.
+Planned on 2026-11-14 ([decision 157](decisions/157-v0.2-in-four-milestones.md)). Claude decided 157 to 160 at the owner's request while the owner was away, and 161 to 163 while building milestone 7; each can be reversed. v0.2 is built on the branch `v0.2`: each milestone on a branch of its own, merged into `v0.2` after its red-team session. `main` stays what v0.1 is released from, and `v0.2` goes into it only by the owner's hand.
 
 | # | Milestone | Done when |
 |---|---|---|
@@ -462,23 +462,26 @@ Each milestone's own questions are decided before its plan is written, and each 
 
 Planned on 2026-11-14 after decisions [158](decisions/158-making-renaming-and-deleting-lines.md) to [160](decisions/160-whether-a-save-is-in-anothers-history.md): [plans/2026-11-14-milestone-7-lines-and-tags.md](plans/2026-11-14-milestone-7-lines-and-tags.md). Each step ends with tests passing on Windows, macOS and Linux; the plan's task numbers are in brackets. A ✅ marks a step that is done.
 
-**1. Whose history a save is in** (Task 1)
+**1. Whose history a save is in** ✅ (2026-11-14; Task 1)
 - One walk through every parent, newest first, that counts the saves a line has and nothing else has ([decision 160](decisions/160-whether-a-save-is-in-anothers-history.md)).
 - *Done when:* it agrees with a full walk on generated histories, whatever their clocks say about "held or not", and reads only what two sides don't share.
 
-**2. Lines made, renamed and deleted** (Tasks 2 to 5)
+**2. Lines made, renamed and deleted** ✅ (2026-11-14; Tasks 2 to 5)
 - `opalro line new`, `line rename`, `line delete`, and `save --line` from a line, each one diary step ([decision 158](decisions/158-making-renaming-and-deleting-lines.md)); `undo` says what came back without naming a save that was never made.
 - *Done when:* each works from the command line with `--json`, `line delete` asks exactly when nothing else holds the line's saves, and undo, redo and `tidy` treat the steps as any other.
 
-**3. Tags** (Tasks 6 to 9)
+**3. Tags** ✅ (2026-11-14; Tasks 6 to 9)
 - `opalro tag` makes, lists, moves and deletes tags; a tag's name is taken where a save is asked for; `history` and `show` name them ([decision 159](decisions/159-tags.md)).
 - *Done when:* moving and deleting ask first, an imported tag's name and message are shown escaped, and a project with 100,000 tags stays quick.
 
-**4. Git's words** (Task 10)
+**4. Git's words** ✅ (2026-11-14; Task 10)
 - `checkout -b`, `switch -c`, `branch -m`, `branch -d` and `tag -d` run Opalro's commands; `branch <name>` is still explained.
 
-**5. Proof** (Tasks 11 and 12)
+**5. Proof** ✅ (2026-11-14; Tasks 11 and 12)
 - The model test makes, renames and deletes lines and tags among its random steps; the ancestry walk is compared with `git rev-list` on every imported repository.
 
-**6. Docs, red team, review and merge** (Tasks 13 to 15)
+**6. Docs, red team, review and merge** ✅ (2026-11-14; Tasks 13 to 15)
+- **Docs** ✅: the design, the guide, [terminal.md](terminal.md), [json.md](json.md), [security.md](security.md), [testing.md](testing.md) and [benchmarks.md](benchmarks.md) §11 say what is built.
+- **Red team** ✅ (2026-11-14): two sessions from the sandbox, RT17 (2 Medium, 3 Low) and RT18 on its fixes (1 Medium, 5 Low), every finding fixed ([decisions 162](decisions/162-red-team-m7-rulings.md) and [163](decisions/163-red-team-m7-session-2-rulings.md); [security.md](security.md) §6).
+- **Review and merge** ✅ (2026-11-14): a whole-branch review found nothing that had to be fixed first; the calls made on the way, with twelve for the owner to confirm, are in [the rulings](plans/2026-11-14-milestone-7-rulings.md); merged into `v0.2`.
 - *Done when:* every proven finding is fixed or ruled on, every document matches the code, and the branch is merged into `v0.2`.

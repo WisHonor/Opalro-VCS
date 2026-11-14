@@ -163,6 +163,13 @@ fn without_a_terminal_opals_own_words_are_plain() {
         &["undo", "--list"],
         &["undo"],
         &["redo"],
+        &["line", "new", "x"],
+        &["line", "rename", "x", "y"],
+        &["goto", "main"],
+        &["line", "delete", "y"],
+        &["tag", "v1", "First"],
+        &["tag"],
+        &["tag", "--delete", "v1", "--yes"],
     ] {
         run(args);
     }
@@ -579,6 +586,21 @@ fn history_marks_the_current_save_and_cuts_long_messages_at_the_end() {
     }
 }
 
+#[cfg(feature = "fault-injection")]
+#[test]
+fn history_keeps_tag_marks_whole_and_cuts_the_message() {
+    let env = started();
+    put(&env, "a.txt", "a\n");
+    run_at(&env, None, &["save", "word ".repeat(30).trim_end()]);
+    run_at(&env, None, &["tag", "v1"]);
+    run_at(&env, None, &["tag", "v2"]);
+    let (shown, _) = run_at(&env, Some(60), &["history"]);
+    let row = shown.lines().nth(2).unwrap();
+    assert!(row.ends_with("...  [main]  [tag v1]  [tag v2]"), "{shown}");
+    assert!(row.contains("  word"), "{shown}");
+    assert!(shown.lines().all(|l| l.len() <= 60), "{shown}");
+}
+
 #[test]
 fn show_lists_what_a_save_changed_with_sizes_in_1024_units() {
     let env = started();
@@ -619,6 +641,47 @@ fn show_lists_what_a_save_changed_with_sizes_in_1024_units() {
             "{said}"
         );
     }
+}
+
+/// The save `opalro show name` at a terminal says to see with `opalro changes --save <id>`: the
+/// `<id>`, after checking that command runs.
+#[cfg(feature = "fault-injection")]
+fn shows_next_id(env: &Env, name: &str) -> String {
+    let (_, said) = run_at(env, Some(80), &["show", name]);
+    let (_, rest) = said
+        .split_once("Next: see its lines with: opalro changes --save ")
+        .unwrap_or_else(|| panic!("{said}"));
+    let id = rest.split_whitespace().next().unwrap().to_owned();
+    run_at(env, None, &["changes", "--save", &id]);
+    id
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn shows_next_step_names_a_save_off_the_line_by_its_fingerprint() {
+    // origin/main is ahead of main, and line feat, with tag rel at its save, past main.
+    let env = Env::new();
+    let one = env.commit("a.txt", "one", "one");
+    let two = env.commit("a.txt", "two", "two");
+    env.git(&["update-ref", "refs/remotes/origin/main", &two]);
+    env.git(&["reset", "-q", "--hard", &one]);
+    env.import();
+    run_at(&env, None, &["line", "new", "feat"]);
+    put(&env, "a.txt", "feat\n");
+    run_at(&env, None, &["save", "Feat"]);
+    run_at(&env, None, &["tag", "rel"]);
+    run_at(&env, None, &["goto", "main"]);
+    let (repo, state) = env.state();
+    let server = repo.server_lines(&state).unwrap().servers["origin"]["main"];
+    let (feat, main) = (state.lines["feat"], state.lines["main"]);
+    let main_change = repo.store().save(&main, false).unwrap().change_id;
+    let short = opal_core::history::short_change_id(&repo, &main, &main_change).unwrap();
+    drop(repo);
+    for (name, save) in [("rel", feat), ("feat", feat), ("main@origin", server)] {
+        assert_eq!(shows_next_id(&env, name), save.to_hex()[..12], "{name}");
+    }
+    // On the line the project is on, the short change ID.
+    assert_eq!(shows_next_id(&env, "main"), short);
 }
 
 #[cfg(feature = "fault-injection")]
@@ -1708,6 +1771,13 @@ fn project_text_is_escaped_with_colour_on() {
     assert_eq!(saved.status.code(), Some(0), "{}", text(&saved.stderr));
     let author = "Ada\\x1b[2J\\u{202e}";
     std::fs::write(env.root().join(name), format!("{TITLE}changed\n")).unwrap();
+    // Only an import brings in a tag named like this; the tag command refuses it.
+    env.plant_tags(
+        std::iter::once(format!("v1{CLEAR}\u{202e}")),
+        support::main_tip(&env),
+    );
+    // The name's own `[` is marked too, so it can't open a line's mark.
+    let shown_tag = "v1\\x1b\\[2J\\u{202e}";
 
     let said = same_with_colour_on(&env, &["status"], 0);
     assert!(said.contains(shown_name), "{said}");
@@ -1715,9 +1785,11 @@ fn project_text_is_escaped_with_colour_on() {
     let said = same_with_colour_on(&env, &["changes"], 0);
     assert!(said.contains(shown_name), "{said}");
     let said = same_with_colour_on(&env, &["history"], 0);
-    assert!(said.contains(author) && said.contains("\\x1b[2J"), "{said}");
+    for part in [author, "\\x1b[2J", shown_tag] {
+        assert!(said.contains(part), "{part}: {said}");
+    }
     let said = same_with_colour_on(&env, &["show"], 0);
-    for part in [shown_name, shown_message, author] {
+    for part in [shown_name, shown_message, author, shown_tag] {
         assert!(said.contains(part), "{part}: {said}");
     }
     let said = same_with_colour_on(&env, &["undo", "--list"], 0);

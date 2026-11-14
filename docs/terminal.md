@@ -122,14 +122,17 @@ A question is asked only when stdin and stderr are both terminals and `--json` w
 | A save away from a line | `Name a new line for this save:` | `--line <name>` | stops, saving nothing |
 | Which preset (`opalro start`) | `Choice [N]:` | `--preset <name>` | stops, starting nothing |
 | A preset switch (`opalro setup --preset`) | `Apply these changes? [y/N]` | `--yes` | stops after showing the changes |
+| A line no other line or tag holds (`opalro line delete`) | `Delete it? [y/N]` | `--yes` | stops, deleting nothing |
+| Moving a tag that is at another save (`opalro tag <name>`) | `Move it to save <id> "<message>"? [y/N]` | `--yes` | stops, moving nothing |
+| Deleting a tag (`opalro tag --delete`) | `Delete tag <tag>, at save <id> "<message>"? [y/N]` | `--yes` | stops, deleting nothing |
 
 Every stop is an `error:` whose `hint:` names the flag.
 
 ## 11. Help
 
-- `opalro` alone, `opalro help` and `opalro --help` print one screen: a sentence about Opalro, the usage line, and the commands in three groups, one line each: every day (`status`, `save`, `changes`, `history`, `goto`, `undo`); lines, shelves and details (`line`, `shelf`, `discard`, `show`); the project (`start`, `setup`, `import`, `tidy`, `verify`). `redo` and `unshelf` are named beside `undo` and `shelf`, as `(and: redo)`. The last line says `Help on one command: opalro help <command>    Version: opalro --version`. Each command's name is padded to 10.
+- `opalro` alone, `opalro help` and `opalro --help` print one screen: a sentence about Opalro, the usage line, and the commands in three groups, one line each: every day (`status`, `save`, `changes`, `history`, `goto`, `undo`); lines, shelves and details (`line`, `tag`, `shelf`, `discard`, `show`); the project (`start`, `setup`, `import`, `tidy`, `verify`). `redo` and `unshelf` are named beside `undo` and `shelf`, as `(and: redo)`. The last line says `Help on one command: opalro help <command>    Version: opalro --version`. Each command's name is padded to 10.
 - `opalro help` and `opalro --help` end with exit code 0. `opalro` alone prints the same screen, also on stdout, and ends with 2, as before milestone 6: a command line with no command is one Opalro couldn't use.
-- `opalro help <command>` and `opalro <command> --help` print the same page: `opalro <command>: ` and the command's one-line description, then `Examples` (each a command line, then what it does, the lines padded to the longest), `Usage`, `Arguments` (when the command takes any) and `Options`, each a title on a line of its own, its lines under it flush left, one line each. The usage, the arguments and the options are read from the command line's own definitions, so only options the command really takes are listed. Every example is a command line Opalro takes.
+- `opalro help <command>` and `opalro <command> --help` print the same page: `opalro <command>: ` and the command's one-line description, then `Examples` (each a command line, then what it does, the lines padded to the longest), `Usage`, `Forms` (when the command has forms, as `opalro line new` is one of `opalro line`'s), `Arguments` (when the command takes any) and `Options`, each a title on a line of its own, its lines under it flush left, one line each. A command with forms lists them under `Forms`, each with its usage naming its own options (`opalro line delete [--yes] <NAME>`), then its one-line description, padded as the examples are; each of a form's own options is explained on a line under it, indented. `Options` holds only what the command itself takes. The usage, the forms, the arguments and the options are read from the command line's own definitions, so only options the command or form really takes are listed. Every example is a command line Opalro takes.
 - Git's words appear nowhere in help. A command line Opalro can't use (an unknown command or option) gets the command-line reader's own message on stderr and exit code 2, as before.
 - Help is plain text on stdout, with section titles in bold on a terminal, and nothing else styled. It is never wrapped or cut: it reads the same at any width and in a pipe.
 
@@ -256,7 +259,7 @@ While it works, a terminal's stderr shows the turning mark `Saving` (§8).
 | Saved what paths name | the same | `Only what you named was saved: opalro status lists the changes left out.` | |
 | Updated (`--amend`) | `Updated save <id> "<message's first line>" on <line>  (2 files)` | `The ID stays the same.` | |
 | The files couldn't be counted | the same, ending `(couldn't count the changed files)` | | |
-| Nothing to save | `Nothing to save: no changes since your last save, <id> "<message>".` (`Nothing to save there: it matches your last save, …` with paths) | `No line was made: …` when `--line` was given | |
+| Nothing to save | `Nothing to save: no changes since your last save, <id> "<message>".` (`Nothing to save there: it matches your last save, …` with paths) | `No line was made: opalro line new <name> makes one without saving.` when `--line` was given | |
 | Nothing to amend | `Nothing to amend: your files match your last save, <id> "<message>", and so does the message.` (`what you named matches` with paths) | | |
 
 - The count is files, never lines: counting lines would slow every save. `on <line>` is left out for a save that names no line.
@@ -298,13 +301,13 @@ While it works, a terminal's stderr shows the turning mark `Saving` (§8).
 Saves on line main, newest first:
 
 ▸ ptvz   2 h ago     Ana Lima    Add double jump  [main]
-  kxqmz  3 days ago  Ana Lima    First playable
+  kxqmz  3 days ago  Ana Lima    First playable  [tag v1.0]
   kxqmr  5 days ago  Ben Okafor  Add rock textures
 ```
 
 - **The heading:** `Saves on line <line>, newest first:`; at a save, `At save <id>, not on a line. Saves back from it, newest first:`. Every save is listed, from where you are back. When the first save can't be read, stdout gets nothing, not even the heading; when a later one can't, the rows before it are printed, then the error.
-- **A row:** the place marker on the save you're at (the first row), the ID, when it was written, its author, its message's first line, then `[<line>]` for each line whose newest save it is. Columns are as wide as the first rows need, up to 1,000 rows or 1 MiB of their text (escaped), whichever comes first: `history` never holds a whole line, so a wider value after them runs long. On a terminal the message is cut at its end to fit, never the ID or the names.
-- **Colour:** the marker bold, IDs magenta and bold, the time and the author dim, line names blue.
+- **A row:** the place marker on the save you're at (the first row), the ID, when it was written, its author, its message's first line, then `[<line>]` for each line whose newest save it is, then `[tag <name>]` for each tag at it, in name order, the name shown as `opalro tag` shows it (between quotes when it doesn't fit the rules for line names), and measured as shown; every tag is listed, however many a save has. Columns are as wide as the first rows need, up to 1,000 rows or 1 MiB of their text (escaped, the line and tag names too), whichever comes first: `history` never holds a whole line, so a wider value after them runs long. On a terminal the message is cut at its end to fit, never the ID or the names.
+- **Colour:** the marker bold, IDs magenta and bold, the time and the author dim, line and tag names blue.
 
 ### `opalro show`
 
@@ -314,6 +317,7 @@ Save ptvz "Add double jump"
     Author       Ana Lima <ana@example.com>, 2026-11-08 12:14 +01:00  (2 h ago)
     Saved by     Ana Lima <ana@example.com>, 2026-11-08 12:14 +01:00  (2 h ago)
     Line         main
+    Tags         release/2026-11, v1.1
     After        3f9a0c2e7b04 "First playable"
     Fingerprint  d77a81f736da0b96a75602567a49fa760764e22213b6852cda7b6660f926f3ed
 
@@ -325,12 +329,13 @@ Save ptvz "Add double jump"
     modified  Assets/Scripts/Player.cs      6 B → 7 B
 ```
 
-then, on a terminal, `Next: see its lines with: opalro changes --save <id>` when it changed files.
+then, on a terminal, `Next: see its lines with: opalro changes --save <id>` when it changed files. `<id>` is one that command takes from where the project is: the save's short change ID when the save is on the line the project is on, otherwise the first 12 hex digits of its fingerprint; when neither reaches the save, the line is left out.
 
-- **The facts:** the author and the saver, each with the date and time in the save's own zone and how long ago; `Line` is the line the save was made on, `none` for an imported save; `After` names the save before it by the first 12 hex digits of its fingerprint, and its message (a merge brought in from Git adds the other parents' fingerprints); `opalro show` takes such digits back exactly when some line's history, along first parents, reaches that save: not, say, for a merge's other parent whose Git branch was gone before the import, or for the parent of a save an import left you at past every line (a detached Git `HEAD`), unless another line reaches it; no change ID is shortened for it, as that could read the whole line; the fingerprint is whole.
+- **The facts:** the author and the saver, each with the date and time in the save's own zone and how long ago; `Line` is the line the save was made on, `none` for an imported save; `Tags`, only when the save has tags, names them in name order, in blue like line names; `After` names the save before it by the first 12 hex digits of its fingerprint, and its message (a merge brought in from Git adds the other parents' fingerprints); `opalro show` takes such digits back exactly when the history of some line, server line or tag, along first parents, reaches that save: not, say, for a merge's other parent whose Git branch was gone before the import, or for the parent of a save an import left you at past every line (a detached Git `HEAD`), unless something else reaches it; no change ID is shortened for it, as that could read the whole line; the fingerprint is whole.
+- **An ID inside a hint's command** is always one the command takes from where the project is, worked out by asking the resolver: the save's short change ID when that reaches it, otherwise the first 12 hex digits of its fingerprint. When neither reaches it, `show` leaves its `Next:` line out, and `unshelf`'s hint says instead that `opalro goto can't reach the save it was made on`, and that `opalro undo --list` shows the steps that can bring it back.
 - **The message** after its first line is indented 8, so no line of it can pass for a change row, which is indented 4; its blank lines stay blank.
 - **The changes** are rows as in `opalro status`, after `N files changed:`; `No files changed.` when there are none. The columns are measured by the walk that checks the save before anything is printed; a path cut on a terminal leaves its column as wide as the terminal lets it be.
-- **Colour:** IDs magenta and bold, the line blue, the fingerprints blue, the rows as in `opalro status`, the times in brackets dim.
+- **Colour:** IDs magenta and bold, the line and tag names blue, the fingerprints blue, the rows as in `opalro status`, the times in brackets dim.
 
 ### `opalro goto`
 
@@ -339,7 +344,7 @@ While it writes, a terminal's stderr shows the turning mark `Writing files` (§8
 | State | Outcome line | Details | Next step |
 |---|---|---|---|
 | On a line | `Switched to line <line> at save <id> "<message>".` | what was written: `2 files written, 1 removed.` (`No file needed changing.` when nothing was); `Your unsaved changes in 2 files came along.` when some did | `Changed your mind? opalro undo` |
-| At a save | `Switched to save <id> "<message>". You are not on a line.` | the same, then `Saving here asks for a new line's name.`, and `To keep saving on <line>: opalro goto <line>` when the save is a line's newest | the same |
+| At a save | `Switched to save <id> "<message>". You are not on a line.` | the same, then `Saving here asks for a new line's name.`, and `To keep saving on <line>: opalro goto <line>` when the save is a line's newest and `opalro goto <line>` would go onto that line | the same |
 | Already on that line | `Already on line <line>, at save <id> "<message>".` | | |
 | Already at that save | `Already at save <id> "<message>".` | | |
 | Unsaved work in the way | stdout gets nothing; `error: Your unsaved changes, or files Opalro ignores, are in the way, so nothing was changed:` with the paths under it, the first 5 and how many more | `hint:` save them, shelve them (`opalro shelf`) or discard them, then run `opalro goto` again | |
@@ -347,6 +352,8 @@ While it writes, a terminal's stderr shows the turning mark `Writing files` (§8
 
 - The save is named by its change ID, or by the first 12 hex digits of its fingerprint when it can't be read. Counts are of what the switch wrote and removed; it doesn't say how many were added or changed, nor list the unsaved changes that came along.
 - A switch a crash stopped is a `warning:` (`switch_unfinished`) until a command finishes it; there is no `--continue`.
+- **A name that is a line's and a tag's:** when a tag at another save has the name of a line, the goto is refused: `error: "v1" is the name of a line and also of a tag at another save (line 3f9a1c2b4d5e, tag 9b8c7d6e5f4a), so Opalro didn't pick either.`, with `hint: To reach one of them, type its ID as shown here. To end the double meaning, rename the line (opalro line rename <old> <new>) or delete the tag (opalro tag --delete <name>).`. For a server line it reads `"main@origin" is the name of a server line and also of a tag at another save (server line …, tag …), …`, with `hint: To reach one of them, type its ID as shown here. To end the double meaning, delete the tag: opalro tag --delete <name>`. `<old>`, `<new>` and `<name>` are printed as they stand, never the stored names. The IDs are the first 12 hex digits of each save's fingerprint, and both reach their saves, since a fingerprint is looked for among the saves lines, server lines and tags reach. A tag at the line's own save changes nothing. `opalro show`, `opalro changes --save` and `opalro tag --save` read a name the same way, in the same order (a line, a server line, a tag, a change ID, a fingerprint), and refuse it alike.
+- **Keeping on a line whose name is refused:** after a goto by ID to a save that is a line's newest, when `opalro goto <line>` would be refused, the advice to use it is replaced: `Line v1 is here too, but v1 is also a tag at another save. To keep saving on the line, rename it first: opalro line rename <old> <new>` (`but v1 is also the start of another save's ID` when the name is refused for that).
 - **Already there:** a goto to where the project already is changes nothing and records no step, so it says so plainly, names the save as `Switched to` would, and offers no `opalro undo`, which would take back the step before it. The engine says whether the goto recorded a step of its own. A goto that first finishes a stopped command and then finds the project already there says the same: the step it finished is the stopped command's, not its own. A goto from a save to the line whose newest it is changes only the position: that is a step, and says `Switched to`.
 - **Colour:** `Switched` green and bold, the ID magenta and bold, the line blue, the `opalro goto` of the last detail cyan.
 
@@ -380,6 +387,53 @@ On the server (origin):
 - **A row** is the line's name, the place marker on the one you are on; the others start with two spaces. Each server's lines follow after an empty line, under `On the server (<server>):`, named `<line>@<server>` as `opalro goto` takes them. Rows show only names: a line's newest save, its time and message would mean reading every line.
 - **Colour:** the marker bold, line names blue, the server's name in brackets dim.
 
+`opalro line new <name>`, `opalro line rename [<old>] <new>` and `opalro line delete <name>` make, rename and delete a line:
+
+| State | Outcome line | Details | Next step |
+|---|---|---|---|
+| A new line | `Started line <line> at save <id> "<message>".` | `You're on it: your next save goes on <line>.` | `Changed your mind? opalro undo` |
+| Renamed | `Renamed line <old> to <new>.` | `Saves already made keep <old> as the line they were made on.` | `Changed your mind? opalro undo` |
+| The same name | `Line <line> already has that name.` | | |
+| Deleted | `Deleted line <line>, which was at save <id> "<message>".` | when nothing else had its saves: `No other line or tag has its 3 saves. opalro tidy frees them once the undo window has passed.` (`its 1 save`) | `Changed your mind? opalro undo` |
+| The question, answered no | `Nothing was deleted.` | | |
+| No terminal and no `--yes` | stdout gets nothing; `error: Line <line> holds 3 saves that no other line or tag has, and Opalro can't ask whether to delete it without a terminal.` (`… with --json.`) | `hint: To delete it: opalro line delete <line> --yes` | |
+
+- **A history that can't be read:** when the walk meets a save it can't read (missing from the store, another kind of object, undecodable, or not matching its fingerprint), it can't tell what the holders keep, so nothing is deleted, `--yes` or not. Opalro then looks through the other lines, the tags and the server lines, in that order, for the first whose history, through every parent, holds a save that can't be read, reading each save at most once, and names it in the damage message: `error: This project's Opalro data looks damaged: the tag ghost names a save that can't be read: …` when it is the holder's own save, `… the tag ghost names a save whose history can't be read: …` when it is further back (`the line <line> …`, `the server line <line>@<server> …`); when none holds it, it is in the deleted line's own history: `… line feat's history can't be read: …`. The hint is the one all damage gets.
+- **The question** comes only when no other line, tag or server line has the line's newest save in its history. On stderr, as §10 asks one: `Line <line> holds 3 saves that no other line or tag has.`, then `Delete it? [y/N] `. With `--yes` it isn't asked.
+- The save is named as `opalro goto` names it: its change ID and its message's first line, or the first 12 hex digits of its fingerprint when it can't be read.
+- **Colour:** `Started`, `Renamed` and `Deleted` green and bold, line names blue, IDs magenta and bold.
+
+### `opalro tag`
+
+```text
+3 tags:
+
+  release/2026-11  4f9c2e81a7b3  "November build"
+  v1.0             9d02c3aa41f0  "First playable"
+  v1.1             1b7e55d0c9a2
+```
+
+- **The list:** `3 tags:` (`1 tag:`), then a row a tag in name order: two spaces, the name, the first 12 hex digits of its save's fingerprint, and its message's first line in quotes when it has one. No save is read. On a terminal the message is cut at its end to fit. With no tags: `No tags: opalro tag <name> names the save you're at.`
+
+`opalro tag <name> ["<message>"] [--save <save>]` tags the save you're at, or another, and `opalro tag --delete <name>` deletes a tag:
+
+| State | Outcome line | Next step |
+|---|---|---|
+| Made | `Tagged save <id> "<message>" as <tag>.` | `Changed your mind? opalro undo` |
+| Already there | `Tag <tag> is already at save <id> "<message>".` | |
+| Already there, with a message typed | `Tag <tag> is already at save <id> "<message>".`, then the detail `Its message was left as it is.` | |
+| Moved | `Moved tag <tag> to save <id> "<message>". It was at save <old id>.` | `Changed your mind? opalro undo` |
+| Deleted | `Deleted tag <tag>, which was at save <id> "<message>".` | `Changed your mind? opalro undo` |
+| A question answered no | `Nothing was changed.` | |
+| A move with no terminal and no `--yes` | stdout gets nothing; `error: Tag <tag> is at another save, <old id>, and Opalro can't ask whether to move it without a terminal.` (`… with --json.`); `hint: To move it, run the same command with --yes.` | |
+| A delete with no terminal and no `--yes` | `error: Opalro asks before it deletes a tag, and can't without a terminal.` (`… with --json.`); `hint: To delete it, run the same command with --yes.` (no hint carries a tag's name inside a command: an imported one may be any text, and a pasted hint would run it) | |
+
+- **The questions,** on stderr, as §10 asks one: moving a tag that is at another save asks `Tag <tag> is at save <old id> "<message>".`, then `Move it to save <id> "<message>"? [y/N] `; deleting one asks `Delete tag <tag>, at save <id> "<message>"? [y/N] `. With `--yes` neither is asked.
+- A save is named as `opalro goto` names it: its change ID and its message's first line, or the first 12 hex digits of its fingerprint when it can't be read.
+- A tag's name and message can be any text a Git import brought in, so both are escaped wherever they are shown, and the list shows only a message's first line. A name that fits the rules for line names is shown as it is; any other is shown between double quotes, escaped, with each `"` inside it written `\"`, each `\` written `\\`, and each `[` and `]` written `\[` and `\]`, so that neither its end nor a line's mark can be forged (`"x\]  \[main\]  \[tag y"`, `"a, b"`). Where a row is fitted to a width, the name is measured as shown. This holds wherever a tag's name is text: the list, the outcome lines, the questions, `history`'s `[tag …]` marks, `show`'s `Tags` row and the messages; `--json` gives the name as it is stored.
+- **Text from the project inside a hint's command** is there only when it is plain: only the characters a line's name may have, not starting with `-` (or `line@server` with both parts so). Anything else is left out: the hint shows a placeholder (`<line>`, `<label>`, `<name>`) or says to run the same command again. When a shelf that can't be brought back has a label that isn't plain, its hint says `then bring this shelf back by its label with opalro unshelf <label>. opalro shelf --list shows the label.` in place of `then run opalro unshelf <label>`, with `<label>` as it stands: a bare `opalro unshelf` run again could bring back a newer shelf. `line delete`'s hints show `opalro line delete <line> --yes` for a stored line name that isn't plain, and `goto` gives no `To keep saving on <line>: opalro goto <line>` for a line whose name isn't plain. What you typed on the command line and Opalro repeats back isn't stored text.
+- **Colour:** `Tagged`, `Moved` and `Deleted` green and bold, tag names blue like line names, IDs magenta and bold, the list's fingerprints blue.
+
 ### `opalro undo` and `opalro redo`
 
 While they write, a terminal's stderr shows the turning mark `Writing files` (§8).
@@ -397,7 +451,7 @@ While they write, a terminal's stderr shows the turning mark `Writing files` (§
 | Nothing to take | `Nothing to undo.` (`Nothing to redo.`; `Nothing changed: things are already as they were right after entry <entry>.` for `--to`) | | |
 | `undo --to` with `head` lost | `Made entry <entry> (<command>) the current one: on <line> at <id> "<message>". No file was changed: …` | | |
 
-- A step is named as the diary has it: its command, the save it made with its message, then what changed (`main is back at <id>`, `2 files back`, `shelf 1 is gone`; `its changes show as unsaved` for a save undone, which changes no file).
+- A step is named as the diary has it: its command, the save it made with its message, then what changed (`main is back at <id>`, `2 files back`, `shelf 1 is gone`; `its changes show as unsaved` for a save undone, which changes no file). Only `save` (an amend too) makes a save: `line new`, `line rename` and `line delete` name none, only what changed (`Undid line new: line wall-run is gone, back on main at <id>.`).
 - `undo` and `redo` end with no "Changed your mind?" line: each is the other's way back.
 - **Colour:** `Undid`, `Redid`, `Went`, `Shelved`, `Finished` and `Made` green and bold.
 
