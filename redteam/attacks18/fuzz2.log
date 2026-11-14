@@ -1,0 +1,120 @@
+   Compiling opal-vcs v0.1.0 (/work/crates/opal-vcs)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.45s
+     Running tests/rt19_fuzz.rs (target/debug/deps/rt19_fuzz-74dc5e02800f3537)
+
+running 1 test
+REFUSED 200:  a: moved to q2 on main, where side has something else
+REFUSED 200:  c/x: moved to p2 on side, removed on main
+REFUSED 200:  f/g/h: moved to d1/e/p6 on main, and to p4 on side
+REFUSED 200:  q2: added on both lines, differently
+REFUSED 207:  a: moved to d0/p4 on main, and to d1/e/p1 on side
+REFUSED 208:  b: moved to p7 on main, and to p1 on side
+REFUSED 210:  c/y: changed on side, removed on main
+REFUSED 213:  b: moved to d1/e/p7 on main, removed on side
+REFUSED 216:  c/y: changed on main, removed on side
+REFUSED 217:  a: moved to p5 on main, removed on side
+REFUSED 217:  b: moved to q1 on main, and to d0/e/p1 on side
+REFUSED 221:  a: moved to d0/p4 on main, and to q5 on side
+REFUSED 222:  b: moved to d1/e/p4 on main, and to d0/e/p2 on side
+REFUSED 222:  c/y: moved to q0 on main, and to d1/e/p3 on side
+REFUSED 223:  c/y: moved to p7 on main, and to p4 on side
+REFUSED 224:  c/x: moved to p2 on side, removed on main
+REFUSED 226:  c/y: changed on main, removed on side
+REFUSED 226:  f/g/h: moved to d1/e/p4 on main, and to d0/e/p3 on side
+REFUSED 231:  a: moved to q1 on main, where side has something else
+REFUSED 231:  c/y: moved to p3 on main, and to q1 on side
+REFUSED 231:  q1: added on both lines, differently
+REFUSED 232:  c/y: moved to d0/e/p6 on main, and to d0/p3 on side
+REFUSED 236:  b: changed on side, removed on main
+REFUSED 236:  c/x: moved to q2 on main, and to d1/e/p2 on side
+REFUSED 236:  c/y: moved to q1 on main, and to d0/e/p1 on side
+REFUSED 236:  f/g/h: changed on side, removed on main
+REFUSED 238:  f/g/h: changed on main, removed on side
+test rt19_random_combines has been running for over 60 seconds
+REFUSED 241:  a: moved to p0 on main, and to p1 on side
+REFUSED 241:  b: moved to p8 on main, and to d1/p4 on side
+REFUSED 241:  c/x: moved to q0 on main, and to d0/e/p2 on side
+REFUSED 241:  c/y: moved to d0/p1 on main, and to p6 on side
+REFUSED 242:  a: moved to d1/p2 on main, and to d0/p1 on side
+REFUSED 243:  c/y: moved to q0 on main, and to d0/p1 on side
+REFUSED 244:  b: moved to d1/p6 on main, and to p3 on side
+REFUSED 247:  a: moved to q3 on main, and to d0/e/p3 on side
+REFUSED 250:  b: moved to p4 on side, removed on main
+REFUSED 253:  c/x: moved to d0/p3 on main, and to d0/e/p1 on side
+REFUSED 254:  b: moved to p3 on main, and to q4 on side
+REFUSED 257:  b: moved to d0/e/p1 on side, removed on main
+REFUSED 257:  c/y: changed on side, removed on main
+REFUSED 258:  b: moved to d0/p5 on main, and to q5 on side
+REFUSED 258:  c/y: changed on main, removed on side
+REFUSED 258:  f/g/h: moved to d1/p2 on side, removed on main
+REFUSED 261:  c/x: changed on main, removed on side
+REFUSED 261:  f/g/h: moved to d0/p7 on main, and to d1/e/p4 on side
+REFUSED 267:  b: changed on side, removed on main
+REFUSED 270:  c/y: changed on main, removed on side
+REFUSED 271:  a: moved to p5 on main, and to d1/e/p1 on side
+REFUSED 271:  b: moved to d1/e/p4 on main, and to d0/e/p3 on side
+REFUSED 274:  c/x: moved to q0 on side, where main has something else
+REFUSED 274:  f/g/h: moved to q0 on main, where side has something else
+REFUSED 274:  q0: added on both lines, differently
+REFUSED 275:  c/y: moved to q2 on main, and to q5 on side
+REFUSED 276:  c/y: moved to p2 on main, and to d0/e/p1 on side
+REFUSED 278:  a: moved to q2 on side, removed on main
+REFUSED 278:  c/y: changed on main, removed on side
+REFUSED 279:  c/x: moved to q3 on main, and to d0/p1 on side
+REFUSED 279:  f/g/h: moved to q4 on main, and to q5 on side
+REFUSED 281:  c/x: moved to q5 on main, and to d1/e/p3 on side
+REFUSED 284:  c/x: moved to d0/e/p5 on main, removed on side
+REFUSED 288:  a: changed on main, removed on side
+REFUSED 288:  c/y: moved to d1/p5 on main, and to d1/e/p2 on side
+REFUSED 288:  f/g/h: moved to p3 on side, removed on main
+REFUSED 293:  c/x: moved to d1/p3 on main, and to d0/e/p2 on side
+REFUSED 294:  a: moved to d1/e/p7 on main, and to d0/e/p1 on side
+REFUSED 295:  a: moved to q2 on main, removed on side
+REFUSED 295:  b: moved to d0/p5 on main, removed on side
+REFUSED 296:  b: moved to p4 on main, and to q2 on side
+REFUSED 296:  c/x: moved to p3 on main, and to p2 on side
+REFUSED 299:  a: moved to q1 on main, removed on side
+REFUSED 300:  a: moved to d0/p4 on main, and to d0/p1 on side
+REFUSED 303:  f/g/h: moved to q4 on main, and to d0/e/p5 on side
+REFUSED 305:  b: moved to d0/p5 on main, and to d0/e/p2 on side
+REFUSED 305:  c/x: moved to q4 on main, and to p1 on side
+REFUSED 306:  a: moved to p2 on main, and to d1/p1 on side
+REFUSED 307:  a: moved to q4 on side, removed on main
+REFUSED 307:  c/y: moved to q4 on main, and to d1/e/p2 on side
+REFUSED 307:  f/g/h: moved to d0/e/p5 on main, removed on side
+REFUSED 307:  q4: added on both lines, differently
+REFUSED 308:  b: moved to d0/p5 on main, and to p3 on side
+REFUSED 308:  f/g/h: moved to p6 on main, and to d1/e/p2 on side
+REFUSED 309:  a: moved to d0/e/p5 on main, and to p4 on side
+REFUSED 309:  c/x: moved to q5 on side, removed on main
+REFUSED 310:  a: moved to p3 on main, and to d1/p1 on side
+REFUSED 316:  a: changed on main, removed on side
+REFUSED 316:  c/y: moved to d0/p5 on main, and to p2 on side
+REFUSED 319:  c/y: moved to d0/p7 on main, and to q0 on side
+REFUSED 319:  f/g/h: moved to d1/e/p1 on side, removed on main
+REFUSED 320:  b: changed on side, removed on main
+REFUSED 320:  c/y: moved to d0/e/p1 on side, removed on main
+REFUSED 322:  b: moved to d0/e/p0 on main, and to p2 on side
+REFUSED 322:  c/x: moved to q0 on main, and to d1/e/p6 on side
+REFUSED 326:  b: changed on main, removed on side
+REFUSED 326:  f/g/h: moved to p6 on main, and to d1/p1 on side
+REFUSED 329:  a: moved to p1 on side, removed on main
+REFUSED 329:  c/y: moved to d0/p5 on main, and to d0/e/p2 on side
+REFUSED 330:  f/g/h: changed on main, removed on side
+REFUSED 332:  a: moved to d1/p7 on main, and to q1 on side
+REFUSED 333:  a: moved to q4 on side, removed on main
+REFUSED 333:  f/g/h: moved to q3 on main, and to d1/p4 on side
+REFUSED 334:  a: moved to d1/e/p2 on side, removed on main
+REFUSED 335:  f/g/h: moved to q0 on main, and to d0/e/p1 on side
+REFUSED 337:  d0/e/p2: added on both lines, differently
+REFUSED 337:  f/g/h: moved to d0/e/p2 on main, and to q5 on side
+REFUSED 343:  a: moved to d0/e/p5 on side, removed on main
+REFUSED 343:  b: changed on main, removed on side
+REFUSED 344:  b: moved to d0/e/p2 on main, and to p1 on side
+REFUSED 346:  f/g/h: moved to d0/p7 on main, removed on side
+REFUSED 348:  c/y: moved to p1 on side, removed on main
+made 83, refused 67
+test rt19_random_combines ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 223.59s
+
