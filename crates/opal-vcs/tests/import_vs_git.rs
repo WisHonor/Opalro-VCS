@@ -120,7 +120,7 @@ fn everyday_history_matches_git() {
     // Nine lines and three server lines across the merges: held ones, ones that hold some, and
     // ones parted at a fork.
     assert_eq!(assert_ancestry_matches_git(env.root()), (64, true, 0));
-    assert_eq!(assert_starts_match_git(env.root()), 64);
+    assert_eq!(assert_starts_match_git(env.root()), (64, 0));
     // The renaming rule, pinned: `+` becomes `-`, and of names alike but for letter case, the
     // later one in byte order takes a suffix.
     let (repo, state) = env.state();
@@ -153,7 +153,7 @@ fn everyday_history_matches_git() {
         .success();
     assert_eq!(assert_matches_git(detached.path()), 0);
     assert_eq!(assert_ancestry_matches_git(detached.path()), (64, true, 0));
-    assert_eq!(assert_starts_match_git(detached.path()), 64);
+    assert_eq!(assert_starts_match_git(detached.path()), (64, 0));
 }
 
 #[test]
@@ -249,7 +249,7 @@ fn unusual_commits_match_git() {
     env.import();
     let counted = assert_matches_git_counting(env.root());
     assert_eq!(assert_ancestry_matches_git(env.root()), (0, true, 0));
-    assert_eq!(assert_starts_match_git(env.root()), 0);
+    assert_eq!(assert_starts_match_git(env.root()), (0, 0));
     // All but the plain two, the one in no encoding and the one without a newline keep their
     // Git header.
     assert_eq!(counted.headers, 8);
@@ -296,7 +296,7 @@ fn packed_and_loose_objects_match_git() {
     env.import();
     assert_eq!(assert_matches_git(env.root()), 0);
     assert_eq!(assert_ancestry_matches_git(env.root()), (2, true, 0));
-    assert_eq!(assert_starts_match_git(env.root()), 2);
+    assert_eq!(assert_starts_match_git(env.root()), (2, 0));
 }
 
 #[test]
@@ -345,7 +345,7 @@ fn a_history_dated_backwards_matches_git() {
     // counts 1): the one count that comes out high.
     let (pairs, exact, higher) = assert_ancestry_matches_git(env.root());
     assert_eq!((pairs, exact, higher), (20, false, 1));
-    assert_eq!(assert_starts_match_git(env.root()), 20);
+    assert_eq!(assert_starts_match_git(env.root()), (20, 0));
 }
 
 #[test]
@@ -370,7 +370,7 @@ fn a_criss_cross_matches_git() {
     env.import();
     assert_eq!(assert_matches_git(env.root()), 0);
     assert_eq!(assert_ancestry_matches_git(env.root()), (6, true, 0));
-    assert_eq!(assert_starts_match_git(env.root()), 6);
+    assert_eq!(assert_starts_match_git(env.root()), (6, 0));
 }
 
 #[test]
@@ -414,7 +414,7 @@ fn sha256_repositories_match_git() {
     env.import();
     assert_eq!(assert_matches_git(env.root()), 0);
     assert_eq!(assert_ancestry_matches_git(env.root()), (6, true, 0));
-    assert_eq!(assert_starts_match_git(env.root()), 6);
+    assert_eq!(assert_starts_match_git(env.root()), (6, 0));
 }
 
 #[test]
@@ -451,7 +451,7 @@ fn optional_git_files_are_ignored() {
     env.import();
     assert_eq!(assert_matches_git(env.root()), 0);
     assert_eq!(assert_ancestry_matches_git(env.root()), (2, true, 0));
-    assert_eq!(assert_starts_match_git(env.root()), 2);
+    assert_eq!(assert_starts_match_git(env.root()), (2, 0));
 }
 
 #[test]
@@ -481,7 +481,7 @@ fn windows_cant_hold_some_names_and_saving_keeps_them() {
     env.import();
     assert_eq!(assert_matches_git(env.root()), 0);
     assert_eq!(assert_ancestry_matches_git(env.root()), (0, true, 0));
-    assert_eq!(assert_starts_match_git(env.root()), 0);
+    assert_eq!(assert_starts_match_git(env.root()), (0, 0));
 
     // What Git would write out here: each name this system can hold. Where letter case doesn't
     // count, the second of the twins is written over the first.
@@ -593,7 +593,8 @@ fn a_real_repository_matches_git() {
     );
     // A clone's server lines give the walk tips enough, without a branch of its own beside main.
     let (pairs, ..) = assert_ancestry_matches_git(work.path());
-    assert_eq!(assert_starts_match_git(work.path()), pairs);
+    let (matched, refused) = assert_starts_match_git(work.path());
+    assert_eq!(matched + refused, pairs);
     assert!(
         pairs > 0,
         "no pairs of tips to compare the ancestry walk on"

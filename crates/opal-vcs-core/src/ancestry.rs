@@ -552,7 +552,9 @@ mod tests {
             Starts::Found(vec![ids[main[990]]])
         );
         let read = repo.store().saves_read() - before;
-        assert!(read <= 140, "{read} saves read by common_starts");
+        // 14: the two tips, main 998 down to 990, the feature's other two, and main 989, which
+        // 990 marks as under a shared save before the walk stops. The side line is never read.
+        assert!(read <= 16, "{read} saves read by common_starts");
     }
 
     fn found(mut ids: Vec<Id>) -> Starts {
@@ -896,7 +898,9 @@ mod tests {
                     prop_assert_eq!(*n, candidates);
                 }
             }
-            if matches!(clock, Clock::Forwards | Clock::Ties) {
+            // Only saves dated after their parents make the candidates the answer itself; with
+            // ties there can be more, which the match above already checks against.
+            if clock == Clock::Forwards {
                 prop_assert_eq!(
                     matches!(got, Starts::TooMany(_)),
                     answer.len() > MAX_STARTS

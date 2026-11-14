@@ -357,8 +357,9 @@ pub fn assert_ancestry_matches_git(dir: &Path) -> (usize, bool, usize) {
 
 /// Asserts that `common_starts([a], [b])`, as the Git commits its saves record, is what
 /// `git merge-base --all a b` prints, for the pairs `assert_ancestry_matches_git` takes.
-/// Returns how many pairs it compared.
-pub fn assert_starts_match_git(dir: &Path) -> usize {
+/// Returns how many pairs it compared with Git's answer, and how many it refused as `TooMany`
+/// where Git prints 16 or fewer.
+pub fn assert_starts_match_git(dir: &Path) -> (usize, usize) {
     let repo = Repository::open(dir).unwrap();
     let pairs = tip_pairs(&repo);
     let mut refused = Vec::new();
@@ -387,21 +388,19 @@ pub fn assert_starts_match_git(dir: &Path) -> usize {
         }
     }
     if !refused.is_empty() {
-        // Only clocks that ran backwards make extra candidates past the cap.
+        // Extra candidates come only from commits dated before a parent or at the same time.
         assert!(
-            dated_before_a_parent(dir, &compared(&pairs)),
-            "refused though no commit is dated before a parent: {refused:?}"
+            dated_at_or_before_a_parent(dir, &compared(&pairs)),
+            "refused though every commit is dated after its parents: {refused:?}"
         );
         println!(
-            "Refused where Git finds {MAX_STARTS} or fewer, as a commit is dated before a \
+            "Refused where Git finds {MAX_STARTS} or fewer, as a commit is dated at or before a \
              parent: {refused:?}"
         );
     }
-    println!(
-        "The common starting points match git merge-base --all on {} pairs of tips.",
-        pairs.len() - refused.len()
-    );
-    pairs.len()
+    let matched = pairs.len() - refused.len();
+    println!("The common starting points match git merge-base --all on {matched} pairs of tips.");
+    (matched, refused.len())
 }
 
 /// A tip's name, its save, and the Git commit that save records.
@@ -455,6 +454,17 @@ fn commit_of(repo: &Repository, id: Id) -> String {
 
 /// Whether a commit in the history of `tips` has a committer date earlier than a parent's.
 fn dated_before_a_parent(dir: &Path, tips: &[&str]) -> bool {
+    parent_dated(dir, tips, |parent, child| parent > child)
+}
+
+/// Whether a commit in the history of `tips` has a committer date no later than a parent's.
+fn dated_at_or_before_a_parent(dir: &Path, tips: &[&str]) -> bool {
+    parent_dated(dir, tips, |parent, child| parent >= child)
+}
+
+/// Whether some commit in the history of `tips` and one of its parents have committer dates
+/// for which `found(parent, child)` holds.
+fn parent_dated(dir: &Path, tips: &[&str], found: impl Fn(i64, i64) -> bool) -> bool {
     let args = [&["log", "--format=%H %ct %P"], tips].concat();
     let log = text(&git(dir, &args));
     let rows: Vec<Vec<&str>> = log
@@ -465,8 +475,11 @@ fn dated_before_a_parent(dir: &Path, tips: &[&str]) -> bool {
         .iter()
         .map(|row| (row[0], row[1].parse().unwrap()))
         .collect();
-    rows.iter()
-        .any(|row| row[2..].iter().any(|parent| time[parent] > time[row[0]]))
+    rows.iter().any(|row| {
+        row[2..]
+            .iter()
+            .any(|parent| found(time[parent], time[row[0]]))
+    })
 }
 
 /// `git cat-file --batch`, asked for one object at a time.
