@@ -407,13 +407,13 @@ fn a_combine_of_many_large_text_files_stays_within_memory() {
         }
     };
     write(&[]);
-    run(&env, &["save", "Base"], 0);
+    run(&env, &["save", "--yes", "Base"], 0);
     run(&env, &["line", "new", "side"], 0);
     write(&[(LINES - 10, "side")]);
-    run(&env, &["save", "Side"], 0);
+    run(&env, &["save", "--yes", "Side"], 0);
     run(&env, &["goto", "main"], 0);
     write(&[(10, "main")]);
-    run(&env, &["save", "Main"], 0);
+    run(&env, &["save", "--yes", "Main"], 0);
     let mut cmd = env.opal_process_in(env.root());
     cmd.args(["combine", "side"]);
     let ended = support::run_limited(cmd, 600);
