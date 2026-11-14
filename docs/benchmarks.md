@@ -1022,7 +1022,7 @@ The Nightly workflow's differential job ([run 43640086187](https://github.com/Wi
 - **Common starting points:** on the 64 pairs of tips the ancestry walk compares, `common_starts` gave exactly the commits `git merge-base --all` prints, every pair.
 - **The ancestry walk** on those 64 pairs: 19,136.5 ms in all, each count equal to `git rev-list --count`'s (§11: 17,850.1 ms).
 - **A change ID no save has** (`zzzzzzzzzzzzzzzz`) took 1.44 s to look for: the first step looks on the line, and the second reads every save that a line, a server line or a tag reaches, through every parent. A line or tag named only with the letters k to z pays it each time it is named, since the check that the name isn't also the start of a save's ID takes both steps. A table of every reachable save's change ID would end it (the follow-ups list).
-- The nightly run's fuzz job was still running when these numbers were read, so nothing is said of it here.
+- The nightly run's fuzz job passed after these numbers were read; the run's only failure was the Linux speed gate above.
 
 ### The gate after milestone 8
 

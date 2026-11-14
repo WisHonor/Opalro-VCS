@@ -499,7 +499,7 @@ Planned on 2026-11-14 after decisions [164](decisions/164-where-two-lines-parted
 - *Done when:* the text merge gives `git merge-file`'s result wherever lines don't repeat (where they repeat, the two can differ, and the differences are counted: decision 170), the tree merge agrees with a model written apart from it, and nothing is stored when a merge is refused.
 
 **3. Moves** ✅ (2026-11-14; Tasks 5 and 6)
-- `save` notes a move when Opalro is certain of it, within bounds, and never fails for its notes; a combine follows the notes true of their own saves, and identical contents where notes can't reach, warning when that was too much to follow ([decisions 168](decisions/168-moves-in-saves-and-in-combines.md) and 170).
+- `save` notes a move when Opalro is certain of it, within bounds, and never fails for its notes; a combine follows the notes true of their own saves, and identical contents for the files the notes don't account for, warning when that was too much to follow ([decisions 168](decisions/168-moves-in-saves-and-in-combines.md) and 170).
 - *Done when:* a change to a moved file lands where the file went, and a move against a removal is a conflict.
 
 **4. `opalro combine`** ✅ (2026-11-14; Tasks 7 and 8)
