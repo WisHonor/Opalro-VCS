@@ -623,23 +623,24 @@ pub fn save_folder(
     };
     // The files are counted in the same walk as the moves, while the new listings are at hand;
     // without them, after the commit, from the store.
+    let (_, most_bytes, most_left) = note_limits();
     let compared = match (&before, held) {
         (Ok(Some(from)), Some(held)) => Some(moves::count_and_moves(
             repo.store(),
             &held.listings,
             *from,
             root,
+            most_left,
         )),
         _ => None,
     };
+    // Notes say only what is certain and never stop a save: one that can't be compared with the
+    // save before it notes nothing, and is told it couldn't count its files only if it couldn't.
     let (mut move_notes, counted) = match compared {
-        Some(Ok((count, notes))) => (notes, Some(Ok(count))),
-        // Notes say only what is certain and never stop a save: one that can't be compared
-        // with the save before it notes nothing, and is told it couldn't count its files.
+        Some(Ok((count, notes))) => (notes.unwrap_or_default(), Some(Ok(count))),
         Some(Err(why)) => (vec![], Some(Err(why))),
         None => (vec![], None),
     };
-    let (_, most_bytes) = note_limits();
     let most = usize::try_from(MAX_MOVE_NOTES).unwrap_or(usize::MAX);
     moves::first_that_fit(&mut move_notes, most, most_bytes);
     let save = if req.amend {
@@ -1209,20 +1210,26 @@ const MAX_HELD_LISTINGS: usize = 64 << 20;
 
 #[cfg(test)]
 thread_local! {
-    /// The listings a save may hold, and the path bytes its notes may have, on this thread.
-    static NOTE_LIMITS: std::cell::Cell<(usize, usize)> =
-        const { std::cell::Cell::new((MAX_HELD_LISTINGS, moves::MAX_NOTED_BYTES)) };
+    /// The listings a save may hold, the path bytes its notes may have, and the path bytes of the
+    /// files that left it may hold, on this thread.
+    static NOTE_LIMITS: std::cell::Cell<(usize, usize, usize)> = const {
+        std::cell::Cell::new((MAX_HELD_LISTINGS, moves::MAX_NOTED_BYTES, moves::MAX_LEFT_BYTES))
+    };
     /// The most bytes of listings held on this thread.
     static HELD_MOST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(not(test))]
-fn note_limits() -> (usize, usize) {
-    (MAX_HELD_LISTINGS, moves::MAX_NOTED_BYTES)
+fn note_limits() -> (usize, usize, usize) {
+    (
+        MAX_HELD_LISTINGS,
+        moves::MAX_NOTED_BYTES,
+        moves::MAX_LEFT_BYTES,
+    )
 }
 
 #[cfg(test)]
-fn note_limits() -> (usize, usize) {
+fn note_limits() -> (usize, usize, usize) {
     NOTE_LIMITS.get()
 }
 
@@ -3283,7 +3290,7 @@ mod tests {
             fs::rename(dir.path().join(from), dir.path().join(to)).unwrap();
         }
         // Each note is 5 + 6 bytes of paths: two fit in 25, not three.
-        NOTE_LIMITS.set((MAX_HELD_LISTINGS, 25));
+        NOTE_LIMITS.set((MAX_HELD_LISTINGS, 25, moves::MAX_LEFT_BYTES));
         assert_eq!(changed(save_now(&mut repo).unwrap()), Some(8));
         let notes = newest_save(&repo).1.move_notes;
         assert_eq!(notes, [note("a.txt", "a2.txt"), note("b.txt", "b2.txt")]);
@@ -3315,9 +3322,31 @@ mod tests {
         write(dir.path(), "a.txt", b"hello");
         saved_root(save_now(&mut repo).unwrap());
         fs::rename(dir.path().join("a.txt"), dir.path().join("b.txt")).unwrap();
-        NOTE_LIMITS.set((1, moves::MAX_NOTED_BYTES));
+        NOTE_LIMITS.set((1, moves::MAX_NOTED_BYTES, moves::MAX_LEFT_BYTES));
         // Its files are still counted, from the store once it is written.
         assert_eq!(changed(save_now(&mut repo).unwrap()), Some(2));
+        assert!(newest_save(&repo).1.move_notes.is_empty());
+    }
+
+    #[test]
+    fn a_save_that_removes_more_than_it_may_hold_counts_them_and_notes_nothing() {
+        let (dir, mut repo) = project();
+        for name in ["gone1", "gone2", "gone3", "moved"] {
+            write(dir.path(), name, name.as_bytes());
+        }
+        saved_root(save_now(&mut repo).unwrap());
+        for name in ["gone1", "gone2", "gone3"] {
+            fs::remove_file(dir.path().join(name)).unwrap();
+        }
+        fs::rename(dir.path().join("moved"), dir.path().join("there")).unwrap();
+        // Paths of 20 bytes left, past the 12 it may hold.
+        NOTE_LIMITS.set((MAX_HELD_LISTINGS, moves::MAX_NOTED_BYTES, 12));
+        let outcome = save_now(&mut repo).unwrap();
+        let SaveOutcome::Saved { warnings, .. } = &outcome else {
+            panic!("nothing was saved");
+        };
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(changed(outcome), Some(5));
         assert!(newest_save(&repo).1.move_notes.is_empty());
     }
 

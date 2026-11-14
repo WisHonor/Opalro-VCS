@@ -52,21 +52,34 @@ pub(crate) fn same_contents(
     from_root: Id,
     to_root: Id,
 ) -> Result<Vec<MoveNote>, StoreError> {
-    count_and_moves(store, unstored, from_root, to_root).map(|(_, notes)| notes)
+    count_and_moves(store, unstored, from_root, to_root, usize::MAX)?.1
+}
+
+/// At most this many bytes of paths of files that left a save are held to pair them; past it, a
+/// save notes no moves.
+pub(crate) const MAX_LEFT_BYTES: usize = 64 << 20;
+
+#[cfg(test)]
+thread_local! {
+    /// How many comparisons on this thread walked the folders a second time, for arrivals.
+    pub(crate) static SECOND_WALKS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// How many files differ between the two roots, counted as [`crate::diff::count_changes`]
-/// counts them, and [`same_contents`]' moves. The folders that differ are walked once, and again
-/// only if a file left with contents no other file that left has.
+/// counts them, and [`same_contents`]' moves: none when the paths of the files that left come
+/// to more than `most_left_bytes`. The folders that differ are walked once, and again only if a
+/// file arrived and a file left with contents no other file that left has. The moves have their
+/// own result, so a second walk that fails leaves the count.
 pub(crate) fn count_and_moves(
     store: &Store,
     unstored: &HashMap<Id, Listing>,
     from_root: Id,
     to_root: Id,
-) -> Result<(usize, Vec<MoveNote>), StoreError> {
+    most_left_bytes: usize,
+) -> Result<(usize, Result<Vec<MoveNote>, StoreError>), StoreError> {
     // The files that left first: arrivals are worth keeping only for the contents of one, and a
     // save that adds a great deal often has none.
-    let (mut changed, mut left) = (0, Places::new());
+    let (mut changed, mut left, mut left_bytes, mut arrivals) = (0, Places::new(), 0usize, false);
     for_each_entry_change_in(
         store,
         unstored,
@@ -74,16 +87,38 @@ pub(crate) fn count_and_moves(
         to_root,
         |path, old, new| {
             changed += usize::from(file_change(old, new).is_some());
-            if let (Some(f), None) = (file(old), new) {
-                seen(&mut left, f.id, path);
+            arrivals |= matches!((old, file(new)), (None, Some(_)));
+            if let (Some(f), None) = (file(old), new)
+                && left_bytes <= most_left_bytes
+            {
+                left_bytes = left_bytes.saturating_add(path.len());
+                if left_bytes > most_left_bytes {
+                    left = Places::new();
+                } else {
+                    seen(&mut left, f.id, path);
+                }
             }
             Ok::<(), StoreError>(())
         },
     )?;
     left.retain(|_, from| from.is_some());
-    if left.is_empty() {
-        return Ok((changed, vec![]));
+    if left.is_empty() || !arrivals {
+        return Ok((changed, Ok(vec![])));
     }
+    Ok((changed, paired(store, unstored, from_root, to_root, left)))
+}
+
+/// The moves of the files in `left` (contents to the one path that left with them), from a
+/// second walk for the files that arrived with those contents.
+fn paired(
+    store: &Store,
+    unstored: &HashMap<Id, Listing>,
+    from_root: Id,
+    to_root: Id,
+    mut left: Places,
+) -> Result<Vec<MoveNote>, StoreError> {
+    #[cfg(test)]
+    SECOND_WALKS.set(SECOND_WALKS.get() + 1);
     let mut arrived = Places::new();
     for_each_entry_change_in(
         store,
@@ -113,7 +148,7 @@ pub(crate) fn count_and_moves(
         .filter(|n| validate_path(&n.from).is_ok() && validate_path(&n.to).is_ok())
         .collect();
     notes.sort_unstable_by(|a, b| a.to.cmp(&b.to));
-    Ok((changed, notes))
+    Ok(notes)
 }
 
 /// One version a merge reads: its root listing, and its save, `None` when it is made up.
@@ -394,6 +429,47 @@ mod tests {
         assert_eq!(ARRIVALS_KEPT.get(), 1);
     }
 
+    /// `count_and_moves` between `from` and `to`, with at most `most_left_bytes` of paths left.
+    fn counted(
+        from: &[(&str, EntryKind, &[u8])],
+        to: &[(&str, EntryKind, &[u8])],
+        most_left_bytes: usize,
+    ) -> (usize, Vec<(String, String)>) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut unstored = HashMap::new();
+        let (a, b) = (tree(&mut unstored, from), tree(&mut unstored, to));
+        let (count, notes) = count_and_moves(&store, &unstored, a, b, most_left_bytes).unwrap();
+        let notes = notes.unwrap().into_iter().map(|n| (n.from, n.to)).collect();
+        (count, notes)
+    }
+
+    #[test]
+    fn past_the_bytes_of_paths_left_nothing_is_paired_and_all_is_counted() {
+        let from: &[(&str, EntryKind, &[u8])] = &[
+            ("gone1", File, b"1"),
+            ("gone2", File, b"2"),
+            ("moved", File, b"m"),
+        ];
+        let to: &[(&str, EntryKind, &[u8])] = &[("there", File, b"m")];
+        // 15 bytes of paths left: they fit in 15, not in 14.
+        assert_eq!(counted(from, to, 15), (4, vec![pair("moved", "there")]));
+        assert_eq!(counted(from, to, 14), (4, vec![]));
+    }
+
+    #[test]
+    fn a_comparison_where_nothing_arrived_walks_once() {
+        SECOND_WALKS.set(0);
+        let from: &[(&str, EntryKind, &[u8])] = &[("a", File, b"a"), ("b", File, b"b")];
+        assert_eq!(counted(from, &[("a", File, b"a")], usize::MAX), (1, vec![]));
+        // An edit in place isn't an arrival either.
+        assert_eq!(counted(from, &[("a", File, b"A")], usize::MAX), (2, vec![]));
+        assert_eq!(SECOND_WALKS.get(), 0);
+        let got = counted(from, &[("a", File, b"a"), ("c", File, b"b")], usize::MAX);
+        assert_eq!(got, (2, vec![pair("b", "c")]));
+        assert_eq!(SECOND_WALKS.get(), 1);
+    }
+
     #[test]
     fn the_count_is_the_one_count_changes_gives() {
         type Files<'a> = &'a [(&'a str, EntryKind, &'a [u8])];
@@ -426,7 +502,7 @@ mod tests {
                 Ok::<(), StoreError>(())
             })
             .unwrap();
-            let (got, _) = count_and_moves(&store, &unstored, a, b).unwrap();
+            let (got, _) = count_and_moves(&store, &unstored, a, b, usize::MAX).unwrap();
             assert_eq!(got, want, "{from:?} -> {to:?}");
         }
     }
