@@ -2797,6 +2797,7 @@ fn a_combined_save_has_both_parents_and_says_what_it_combined() {
     assert_eq!(entry.parent, Some(head));
     assert_eq!(entry.command, "combine");
     assert_eq!(h.folder(), both_tree());
+    h.assert_as_goto_gives();
 }
 
 #[test]
@@ -2818,6 +2819,124 @@ fn a_combined_save_notes_the_moves_it_brought_in() {
         ("Other.cs", f("other, changed\n")),
     ]);
     assert_eq!(h.folder(), want);
+    h.assert_as_goto_gives();
+}
+
+impl Hist {
+    /// Every file and folder of the project's folder, as `read_tree` gives a save's.
+    fn disk(&self) -> Tree {
+        let mut t = self.folder();
+        let mut todo = vec![self.dir.path().to_path_buf()];
+        while let Some(at) = todo.pop() {
+            for e in fs::read_dir(&at).unwrap() {
+                let e = e.unwrap();
+                if e.file_name() != ".opalro" && e.file_type().unwrap().is_dir() {
+                    let path = e.path();
+                    let rel = path.strip_prefix(self.dir.path()).unwrap();
+                    t.insert(rel.to_string_lossy().replace('\\', "/"), V::Folder);
+                    todo.push(path);
+                }
+            }
+        }
+        t
+    }
+
+    /// Checks that the folder is what `goto` to `main`'s save writes into a clean folder.
+    fn assert_as_goto_gives(&mut self) {
+        use crate::lines::Target;
+        use crate::switch::goto;
+        let now = self.disk();
+        let first = self.first;
+        goto(
+            &mut self.repo,
+            &Target::Save(first),
+            &ada(),
+            "goto",
+            None,
+            &mut |_| {},
+        )
+        .unwrap();
+        self.write(&Tree::new());
+        let main = Target::Line("main".into());
+        goto(&mut self.repo, &main, &ada(), "goto", None, &mut |_| {}).unwrap();
+        assert_eq!(self.disk(), now);
+    }
+}
+
+/// `base`, then `side` and `main` made from it, saved from the folder (with notes) or planted
+/// without notes; `side` combined into `main`. Gives the combined save's files and folders, and
+/// checks the folder holds the same.
+fn combined_tree(h: &mut Hist, base: &Tree, side: &Tree, main: &Tree, noted: bool) -> Tree {
+    let first = h.first;
+    if noted {
+        let b = h.save("main", first, base);
+        h.save("side", b, side);
+        h.save("main", b, main);
+    } else {
+        let b = h.plant(&[first], base, Some(&[]));
+        let t = h.plant(&[b], side, Some(&[]));
+        let o = h.plant(&[b], main, Some(&[]));
+        h.set(|s| {
+            s.lines.insert("side".into(), t);
+            s.lines.insert("main".into(), o);
+        });
+        h.on("main", main);
+    }
+    let done = combine_in(h, "side").unwrap();
+    assert!(matches!(done.result, Combined::Made { .. }));
+    let saved = read_tree(h.repo.store(), h.save_of(done.save).root, &HashMap::new());
+    assert_eq!(h.disk(), saved);
+    h.assert_as_goto_gives();
+    saved
+}
+
+#[test]
+fn a_folder_both_lines_moved_the_files_out_of_is_gone() {
+    // `side` moves `doc/g.txt` out, `main` moves `doc/b.txt` out.
+    let base = tree(&[("doc/b.txt", f("b\n")), ("doc/g.txt", f("g\n"))]);
+    let side = tree(&[("doc/b.txt", f("b\n")), ("a.txt", f("g\n"))]);
+    let main = tree(&[("e.txt", f("b\n")), ("doc/g.txt", f("g\n"))]);
+    let want = tree(&[("a.txt", f("g\n")), ("e.txt", f("b\n"))]);
+    for noted in [true, false] {
+        let mut h = Hist::new();
+        assert_eq!(combined_tree(&mut h, &base, &side, &main, noted), want);
+    }
+}
+
+#[test]
+fn a_folder_two_levels_deep_emptied_by_moves_is_gone() {
+    let base = tree(&[("a/b/x.txt", f("x\n")), ("a/b/y.txt", f("y\n"))]);
+    let side = tree(&[("x.txt", f("x\n")), ("a/b/y.txt", f("y\n"))]);
+    let main = tree(&[("a/b/x.txt", f("x\n")), ("y.txt", f("y\n"))]);
+    let want = tree(&[("x.txt", f("x\n")), ("y.txt", f("y\n"))]);
+    let mut h = Hist::new();
+    assert_eq!(combined_tree(&mut h, &base, &side, &main, true), want);
+}
+
+#[test]
+fn a_folder_left_holding_a_file_after_the_moves_stays() {
+    let keep = ("doc/keep.txt", f("keep\n"));
+    let base = tree(&[
+        ("doc/b.txt", f("b\n")),
+        ("doc/g.txt", f("g\n")),
+        keep.clone(),
+    ]);
+    let side = tree(&[("doc/b.txt", f("b\n")), ("a.txt", f("g\n")), keep.clone()]);
+    let main = tree(&[("e.txt", f("b\n")), ("doc/g.txt", f("g\n")), keep.clone()]);
+    let want = with_folders(&tree(&[("a.txt", f("g\n")), ("e.txt", f("b\n")), keep]));
+    let mut h = Hist::new();
+    assert_eq!(combined_tree(&mut h, &base, &side, &main, true), want);
+}
+
+#[test]
+fn a_folder_the_other_line_put_a_new_file_in_stays() {
+    let new = ("doc/new.txt", f("new\n"));
+    let base = tree(&[("doc/b.txt", f("b\n")), ("doc/g.txt", f("g\n"))]);
+    let side = tree(&[("doc/b.txt", f("b\n")), ("a.txt", f("g\n")), new.clone()]);
+    let main = tree(&[("e.txt", f("b\n")), ("doc/g.txt", f("g\n"))]);
+    let want = with_folders(&tree(&[("a.txt", f("g\n")), ("e.txt", f("b\n")), new]));
+    let mut h = Hist::new();
+    assert_eq!(combined_tree(&mut h, &base, &side, &main, true), want);
 }
 
 #[test]

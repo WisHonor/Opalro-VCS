@@ -518,11 +518,19 @@ pub(crate) fn merge_three(
             continue;
         }
         let mut built = Vec::new();
-        *root = overlay_with(store, &made.listings, *root, changes, &mut |listing| {
-            let id = store_listing(store, packs, listing)?;
-            built.push((id, listing.clone()));
-            Ok(id)
-        })?;
+        // A folder emptied only by putting moved files in place is no version's own.
+        *root = overlay_with(
+            store,
+            &made.listings,
+            *root,
+            changes,
+            true,
+            &mut |listing| {
+                let id = store_listing(store, packs, listing)?;
+                built.push((id, listing.clone()));
+                Ok(id)
+            },
+        )?;
         made.listings.extend(built);
     }
     let [s, o, t] = roots;
