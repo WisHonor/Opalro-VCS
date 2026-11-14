@@ -192,8 +192,8 @@ pub(crate) struct Version {
 pub(crate) struct Followed {
     /// Start path to side path, each move checked.
     pub went: BTreeMap<String, String>,
-    /// Paths where the side's notes show another file arriving: whatever the side holds there,
-    /// the start's file at such a path is removed on that side.
+    /// Paths where the side's notes show another file arriving, and a file is still there at
+    /// the side's end: the start's file at such a path is removed on that side.
     pub replaced: BTreeSet<String>,
     /// Too many files left on the side to match them by their contents, so only notes count.
     pub too_many_left: bool,
@@ -213,12 +213,14 @@ pub(crate) fn followed(
     };
     let mut at_start = Tree::new(store, &made.listings, start.root, EXACT);
     let mut on_side = Tree::new(store, &made.listings, side.root, EXACT);
-    let mut out = Followed {
-        replaced: noted.values().cloned().collect(),
-        ..Followed::default()
-    };
+    let mut out = Followed::default();
     // A side whose notes moved a file has moved it, whatever it holds where the file was.
     for (from, to) in noted {
+        // The place counts as replaced only while a file is still there; edits in place keep
+        // it the file that arrived.
+        if on_side.entry(&to)?.is_some_and(|e| is_file(&e)) {
+            out.replaced.insert(to.clone());
+        }
         if fits(&mut at_start, &mut on_side, &from, &to)? {
             out.went.insert(from, to);
         }

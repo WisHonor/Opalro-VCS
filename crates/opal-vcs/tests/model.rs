@@ -2295,7 +2295,7 @@ fn noted(m: &Model, start: usize, tip: usize) -> BTreeMap<String, String> {
 }
 
 /// Where the start's files went on one side, and the places where the side's notes show another
-/// file arriving.
+/// file arriving that a file still holds at the side's end.
 struct Went {
     went: BTreeMap<String, String>,
     replaced: BTreeSet<String>,
@@ -2336,7 +2336,10 @@ fn followed(m: &Model, start: &Ver, side: &Ver) -> Went {
             went.insert(from, to);
         }
     }
-    let replaced = noted.into_values().collect();
+    // A place a note brought a file to counts only while a file is still there at the side's end.
+    let replaced = (noted.into_values())
+        .filter(|to| side.tree.files.contains_key(to))
+        .collect();
     Went { went, replaced }
 }
 
