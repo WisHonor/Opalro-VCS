@@ -115,7 +115,6 @@ pub(crate) fn merge_trees(
     let root = GoIn {
         ids: [Some(start), Some(ours), Some(theirs)],
         counted: [false; 3],
-        keep_empty: true,
     };
     let mut folders = vec![walk.enter(String::new(), String::new(), 0, root)?];
     loop {
@@ -141,14 +140,16 @@ pub(crate) fn merge_trees(
         let Some(done) = folders.pop() else {
             return Ok(walk.merged);
         };
-        let (keep_empty, name) = (done.keep_empty, done.name.clone());
+        let name = done.name.clone();
         let (id, empty) = walk.leave(done)?;
         match folders.last_mut() {
             None => {
                 walk.merged.root = id;
                 return Ok(walk.merged);
             }
-            Some(up) if keep_empty || !empty => up.entries.push(Entry {
+            // An empty folder only the merge made is no side's own; one a side holds empty is
+            // taken whole before this.
+            Some(up) if !empty => up.entries.push(Entry {
                 name,
                 kind: EntryKind::Folder,
                 id,
@@ -201,8 +202,6 @@ struct GoIn {
     ids: Three<Option<Id>>,
     /// Each version counted whole already.
     counted: Three<bool>,
-    /// Both sides have the folder, so it stays though nothing is left in it.
-    keep_empty: bool,
 }
 
 /// A name in a folder that the walk has still to work out.
@@ -225,7 +224,6 @@ struct Folder {
     path: String,
     name: String,
     depth: usize,
-    keep_empty: bool,
     /// Ours' and theirs' listings here, for the names check.
     ours: Listing,
     theirs: Listing,
@@ -306,7 +304,6 @@ impl Walk<'_> {
             path,
             name,
             depth,
-            keep_empty: into.keep_empty,
             ours,
             theirs,
             entries,
@@ -511,19 +508,16 @@ fn unheld_clash(folder: &Folder) -> Option<PortabilityProblem> {
 /// The folder a name both sides changed is merged as, if it is one: two folders, or a folder
 /// against a removal where the start has the folder.
 fn going_into([s, o, t]: Three<Option<&Entry>>) -> Option<GoIn> {
-    let ids = [folder_id(s), folder_id(o), folder_id(t)];
-    let keep_empty = if is_folder(o) && is_folder(t) {
-        true
-    } else if is_folder(s) && ((is_folder(o) && t.is_none()) || (o.is_none() && is_folder(t))) {
-        false
-    } else {
+    let both = is_folder(o) && is_folder(t);
+    let against_removal =
+        is_folder(s) && ((is_folder(o) && t.is_none()) || (o.is_none() && is_folder(t)));
+    if !both && !against_removal {
         return None;
-    };
+    }
     Some(GoIn {
         // The start's folder only if it is one: else the folders merge from nothing.
-        ids,
+        ids: [folder_id(s), folder_id(o), folder_id(t)],
         counted: [false; 3],
-        keep_empty,
     })
 }
 

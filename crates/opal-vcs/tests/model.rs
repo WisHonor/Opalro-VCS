@@ -2493,15 +2493,12 @@ impl PathMerge<'_> {
             return self.out.take(path, t);
         }
         match (at(s, path), at(o, path), at(t, path)) {
-            // Two folders merge inside, and stay though nothing is left in them.
-            (_, At::Folder, At::Folder) => {
-                self.out.add_folder(path);
-                for c in self.children(path) {
-                    self.merge_at(&c);
-                }
-            }
-            // A folder against its removal: each file judged by itself, gone if nothing is left.
-            (At::Folder, At::Folder, At::Nothing) | (At::Folder, At::Nothing, At::Folder) => {
+            // Two folders, or a folder against its removal, merge inside: what is left there keeps
+            // the folder, and a folder left with nothing is gone. A side's own empty folder comes
+            // only whole, above.
+            (_, At::Folder, At::Folder)
+            | (At::Folder, At::Folder, At::Nothing)
+            | (At::Folder, At::Nothing, At::Folder) => {
                 for c in self.children(path) {
                     self.merge_at(&c);
                 }

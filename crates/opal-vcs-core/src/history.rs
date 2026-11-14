@@ -1206,6 +1206,26 @@ mod tests {
     }
 
     #[test]
+    fn a_line_named_like_a_save_reached_only_through_a_second_parent_is_refused() {
+        let (_dir, mut repo, ids) = project_with(&["kkkk"]);
+        let lone = plant(&mut repo, &[ids[0]], "mnopqr", None);
+        plant(&mut repo, &[ids[1], lone], "nopqrs", Some("main"));
+        // No line has `lone` on its first parents; a line elsewhere takes the start of its ID.
+        let name = repo
+            .store()
+            .save(&lone, false)
+            .unwrap()
+            .change_id
+            .to_letters()[..12]
+            .to_owned();
+        name_line(&mut repo, &name, ids[1]);
+        match resolve(&repo, &name) {
+            Err(ResolveError::LineOrSave { saves, .. }) => assert_eq!(saves, [letters("mnopqr")]),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
     fn the_line_comes_first_so_a_short_id_history_printed_still_works() {
         let (_dir, mut repo, ids) = project_with(&["lmnopl"]);
         let lone = plant(&mut repo, &[ids[0]], "lmnopk", None);

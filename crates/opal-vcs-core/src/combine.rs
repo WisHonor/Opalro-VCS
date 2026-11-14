@@ -518,7 +518,8 @@ pub(crate) fn merge_three(
             continue;
         }
         let mut built = Vec::new();
-        // A folder emptied only by putting moved files in place is no version's own.
+        // A folder emptied only by these changes (moved files put in place, a conflict's path
+        // cleared) is no version's own.
         *root = overlay_with(
             store,
             &made.listings,

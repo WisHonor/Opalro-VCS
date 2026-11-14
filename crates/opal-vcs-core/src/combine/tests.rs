@@ -411,14 +411,90 @@ fn two_new_files_at_one_path_conflict() {
 }
 
 #[test]
-fn two_folders_that_merge_to_nothing_stay_as_an_empty_folder() {
+fn a_folder_each_side_took_a_different_file_out_of_is_gone() {
     let mut fx = Fixture::new();
     let got = fx.merged(
         &tree(&[("d/a", f("a")), ("d/b", f("b"))]),
         &tree(&[("d/b", f("b"))]),
         &tree(&[("d/a", f("a"))]),
     );
-    assert_eq!(got, tree(&[("d", V::Folder)]));
+    assert_eq!(got, tree(&[]));
+}
+
+#[test]
+fn a_folder_one_side_moved_a_file_out_of_and_the_other_removed_one_from_is_gone() {
+    let base = tree(&[("doc/a.txt", f("a\n")), ("doc/b.txt", f("b\n"))]);
+    let side = tree(&[("a.txt", f("a\n")), ("doc/b.txt", f("b\n"))]);
+    let main = tree(&[("doc/a.txt", f("a\n"))]);
+    for noted in [true, false] {
+        let mut h = Hist::new();
+        let got = combined_tree(&mut h, &base, &side, &main, noted);
+        assert_eq!(got, tree(&[("a.txt", f("a\n"))]));
+    }
+}
+
+#[test]
+fn an_empty_folder_a_line_saved_is_kept() {
+    let empty = ("d", V::Folder);
+    // Both lines hold it empty.
+    let base = tree(&[("d/a", f("a\n"))]);
+    let side = tree(&[empty.clone(), ("s", f("s\n"))]);
+    let main = tree(&[empty.clone(), ("m", f("m\n"))]);
+    let want = tree(&[empty.clone(), ("m", f("m\n")), ("s", f("s\n"))]);
+    assert_eq!(
+        combined_tree(&mut Hist::new(), &base, &side, &main, true),
+        want
+    );
+    // One emptied it by hand and the other left it alone.
+    let base = tree(&[("d/a", f("a\n")), ("x", f("x\n"))]);
+    let side = tree(&[empty.clone(), ("x", f("x\n"))]);
+    let main = tree(&[("d/a", f("a\n")), ("x", f("x2\n"))]);
+    let want = tree(&[empty.clone(), ("x", f("x2\n"))]);
+    assert_eq!(
+        combined_tree(&mut Hist::new(), &base, &side, &main, true),
+        want
+    );
+    // One emptied it by hand and the other put a new file in.
+    let base = tree(&[("d/a", f("a\n"))]);
+    let side = tree(std::slice::from_ref(&empty));
+    let main = tree(&[("d/a", f("a\n")), ("d/new", f("new\n"))]);
+    let want = tree(&[empty.clone(), ("d/new", f("new\n"))]);
+    assert_eq!(
+        combined_tree(&mut Hist::new(), &base, &side, &main, true),
+        want
+    );
+    // One made it new.
+    let base = tree(&[("x", f("x\n"))]);
+    let side = tree(&[empty.clone(), ("x", f("x\n"))]);
+    let main = tree(&[("x", f("x2\n"))]);
+    let want = tree(&[empty, ("x", f("x2\n"))]);
+    assert_eq!(
+        combined_tree(&mut Hist::new(), &base, &side, &main, true),
+        want
+    );
+}
+
+#[test]
+fn a_folder_left_empty_two_levels_deep_is_gone_and_so_is_its_parent_if_nothing_else_is_in_it() {
+    let base = tree(&[("a/b/x", f("x\n")), ("a/b/y", f("y\n"))]);
+    let side = tree(&[("a/b/y", f("y\n"))]);
+    let main = tree(&[("a/b/x", f("x\n"))]);
+    let got = combined_tree(&mut Hist::new(), &base, &side, &main, true);
+    assert_eq!(got, tree(&[]));
+    let keep = ("a/keep", f("keep\n"));
+    let with_keep = |t: &Tree| {
+        let mut t = t.clone();
+        t.insert(keep.0.to_owned(), keep.1.clone());
+        t
+    };
+    let got = combined_tree(
+        &mut Hist::new(),
+        &with_keep(&base),
+        &with_keep(&side),
+        &with_keep(&main),
+        true,
+    );
+    assert_eq!(got, with_folders(&tree(&[keep])));
 }
 
 #[test]
@@ -1107,9 +1183,10 @@ struct Model {
     clash: bool,
 }
 
-/// Merges the folder at `path` (`""` the top) whose contents are `s`, `o` and `t`; `keep` when
-/// it stays though empty. Adds to `m` what it holds.
-fn model_folder(path: &str, s: &Tree, o: &Tree, t: &Tree, keep: bool, m: &mut Model) {
+/// Merges the folder at `path` (`""` the top) whose contents are `s`, `o` and `t`, and adds to
+/// `m` what it holds. A folder below the top is there only when something is left in it: an empty
+/// folder comes only from a side that held it so, taken as it was.
+fn model_folder(path: &str, s: &Tree, o: &Tree, t: &Tree, m: &mut Model) {
     let before = m.files.len();
     let mut kept_names = BTreeSet::new();
     let all: BTreeSet<String> = [s, o, t].iter().flat_map(|x| names(x)).collect();
@@ -1134,7 +1211,7 @@ fn model_folder(path: &str, s: &Tree, o: &Tree, t: &Tree, keep: bool, m: &mut Mo
             }
         }
     }
-    if !path.is_empty() && (keep || m.files.len() > before) {
+    if !path.is_empty() && m.files.len() > before {
         m.files.insert(path.to_owned(), V::Folder);
     }
 }
@@ -1168,21 +1245,15 @@ fn model_entry(path: &str, s: &Node, o: &Node, t: &Node, m: &mut Model) -> bool 
         _ => None,
     };
     let start = folder(s).unwrap_or_default();
+    let merge_folders = |a: &Tree, b: &Tree, m: &mut Model| {
+        let before = m.files.len();
+        model_folder(path, &start, a, b, m);
+        m.files.len() > before
+    };
     match (s, o, t) {
-        (_, Node::Folder(a), Node::Folder(b)) => {
-            model_folder(path, &start, a, b, true, m);
-            return true;
-        }
-        (Node::Folder(_), Node::Folder(a), Node::Missing) => {
-            let before = m.files.len();
-            model_folder(path, &start, a, &empty, false, m);
-            return m.files.len() > before;
-        }
-        (Node::Folder(_), Node::Missing, Node::Folder(b)) => {
-            let before = m.files.len();
-            model_folder(path, &start, &empty, b, false, m);
-            return m.files.len() > before;
-        }
+        (_, Node::Folder(a), Node::Folder(b)) => return merge_folders(a, b, m),
+        (Node::Folder(_), Node::Folder(a), Node::Missing) => return merge_folders(a, &empty, m),
+        (Node::Folder(_), Node::Missing, Node::Folder(b)) => return merge_folders(&empty, b, m),
         (Node::Leaf(V::File(sc, sx)), Node::Leaf(V::File(oc, ox)), Node::Leaf(V::File(tc, tx))) => {
             // Contents both sides changed are merged line by line, which the text merge's own
             // tests check; one-line files always conflict.
@@ -1213,7 +1284,7 @@ fn model(s: &Tree, o: &Tree, t: &Tree) -> Model {
     } else if t == s {
         m.files = with_folders(o);
     } else {
-        model_folder("", s, o, t, true, &mut m);
+        model_folder("", s, o, t, &mut m);
     }
     m
 }
