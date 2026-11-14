@@ -17,12 +17,12 @@ use std::time::Duration;
 
 use crate::ancestry::{Starts, common_starts, only_in};
 use crate::changes::deadline;
-use crate::diary::{Action, Position, State};
+use crate::diary::{Position, State};
 use crate::history::tip_of;
 use crate::id::{ChangeId, Id};
-use crate::kept::{self, EXACT, Put, overlay_with};
+use crate::kept::{EXACT, Put, overlay_with};
 use crate::lines::Target;
-use crate::listing::{Listing, SaveLimits};
+use crate::listing::{Entry, Listing, SaveLimits};
 use crate::moves::{
     MAX_LEFT_BYTES, MAX_NOTED_BYTES, Version, first_that_fit, followed, is_file, room_at,
     same_contents,
@@ -34,10 +34,10 @@ use crate::rules::RuleMatcher;
 use crate::save::{EXTRA_LINE, MAX_MOVE_NOTES, Person, Save};
 use crate::snapshot::{NAMED, SaveError, listed, store_listing};
 use crate::store::StoreError;
-use crate::switch::{Earlier, Switch, SwitchError, kept_on, landing, locked, switch};
+use crate::switch::{Earlier, Planned, SwitchError, landing, locked, make_switch, plan_switch};
 use crate::text::{escape, thousands};
 use crate::warning::{self, Warning};
-use crate::writeout::{self, Applied, Tree};
+use crate::writeout::{Applied, Tree};
 
 /// The most inner combines one combine makes to combine its common starting points.
 pub const MAX_INNER: usize = 64;
@@ -408,10 +408,12 @@ pub(crate) fn merge_three(
     rules: &RuleMatcher,
 ) -> Result<Merged, CombineError> {
     let store = repo.store();
-    let went = [
-        followed(repo, made, start, ours)?,
-        followed(repo, made, start, theirs)?,
-    ];
+    let went = match followed(repo, made, start, ours)
+        .and_then(|o| Ok([o, followed(repo, made, start, theirs)?]))
+    {
+        Ok(went) => went,
+        Err(e) => return Err(past_limits(repo, made, [start, ours, theirs]).unwrap_or(e.into())),
+    };
     // Each version's files moved first, in the order of `Which`.
     let mut puts: [BTreeMap<String, Option<Put>>; 3] = Default::default();
     let mut clashes = Vec::new();
@@ -478,6 +480,11 @@ pub(crate) fn merge_three(
                 continue;
             };
             if went.iter().any(|w| w.went.contains_key(at)) {
+                continue;
+            }
+            // What both sides hold alike is the result, whatever the notes say.
+            let version = |e: Option<Entry>| e.map(|e| (e.kind, e.id));
+            if version(trees[1].entry(at)?) == version(trees[2].entry(at)?) {
                 continue;
             }
             let on = went.each_ref().map(|w| w.replaced.contains(at));
@@ -559,6 +566,26 @@ fn clash_at(
         clash,
     });
     Ok(())
+}
+
+/// The first of the three versions past a save's limits, as the tree merge would name it: what
+/// stopped following moves may have been one of them, which that walk can't tell.
+fn past_limits(repo: &Repository, made: &Made, three: [&Version; 3]) -> Option<CombineError> {
+    let store = repo.store();
+    let read = |id: &Id| match made.listings.get(id) {
+        Some(l) => Ok(l.clone()),
+        None => store.listing(id),
+    };
+    three.into_iter().zip(tree::WHICH).find_map(|(v, which)| {
+        match SaveLimits::default().add_all(v.root, 0, 0, read) {
+            Ok(Err(detail)) => Some(CombineError::Past {
+                names: Names::default(),
+                which,
+                detail,
+            }),
+            _ => None,
+        }
+    })
 }
 
 /// Sets `to` in `puts` to what `tree` holds at `from`, and `from` to nothing.
@@ -701,6 +728,12 @@ fn combine_locked(
         );
         Warning::new(warning::MOVES_NOT_FOLLOWED, message)
     }));
+    if made.starts_unfollowed {
+        let message = "Too many files left their places between the two lines' common starting \
+                       points for Opalro to match them by their contents, so files that moved \
+                       there without a note were not followed.";
+        warnings.push(Warning::new(warning::MOVES_NOT_FOLLOWED, message));
+    }
     let done = to.switch(repo, lock, earlier, asked, made.save, warnings)?;
     let result = Combined::Made {
         starts: made.starts,
@@ -731,36 +764,25 @@ impl Landing<'_> {
         to: Id,
         warnings: Vec<Warning>,
     ) -> Result<(Applied, usize, usize), CombineError> {
-        let saving = |e: SaveError| CombineError::Switch(e.into());
-        let drive = repo.drive()?;
-        let mut plan = writeout::plan(repo, self.from, to, None, false, drive, asked.git_excludes)
-            .map_err(saving)?;
-        if !plan.collisions.is_empty() {
-            return Err(CombineError::Collisions {
-                paths: plan.collisions,
-            });
-        }
+        let (mut plan, drive) =
+            plan_switch(repo, self.from, to, asked.git_excludes).map_err(|e| match e {
+                SwitchError::Collisions { paths } => CombineError::Collisions { paths },
+                e => CombineError::Switch(e),
+            })?;
         plan.warnings.splice(0..0, warnings);
         let mut state = self.state.clone();
         state.lines.insert(self.line.to_owned(), to);
-        let carried = plan.carried;
-        let mut packs = repo.new_packs()?;
-        let kept_from = kept_on(self.state, self.from, "combine", &[], asked.who);
-        let (folder_change, safety_copies) =
-            kept::switch_saves(repo, &plan, self.from, to, &kept_from, drive, &mut packs)
-                .map_err(saving)?;
-        let to_make = Switch {
+        let planned = Planned {
             head: self.head,
-            action: Action::Command,
+            before: self.state,
             state,
-            folder_change,
+            from: self.from,
+            to,
             plan,
             drive,
-            packs,
         };
-        let applied = switch(repo, lock, to_make, asked.who, "combine", earlier)
-            .map_err(CombineError::Switch)?;
-        Ok((applied, safety_copies, carried))
+        make_switch(repo, lock, planned, asked.who, "combine", earlier)
+            .map_err(CombineError::Switch)
     }
 }
 
@@ -771,6 +793,8 @@ struct MadeSave {
     merged_files: Vec<String>,
     timed_out: Vec<String>,
     unfollowed: Vec<Side>,
+    /// Whether moves weren't followed by contents while the starting points were combined.
+    starts_unfollowed: bool,
 }
 
 /// Merges `with` into `from` and stores the combined save, made on `line`. Everything is built in
@@ -785,7 +809,6 @@ fn make_save(
     mut bounds: Bounds,
 ) -> Result<MadeSave, CombineError> {
     let rules = RuleMatcher::new(&repo.rules().rules);
-    let mut packs = repo.new_packs()?;
     let mut made = Made {
         max_held: bounds.max_held,
         deadline: bounds.deadline,
@@ -801,14 +824,18 @@ fn make_save(
         }
         Starts::Found(starts) => starts,
     };
+    // Only now: a combine refused before it builds anything makes no temporary file.
+    let mut packs = repo.new_packs()?;
     let mut inner = Inner {
         repo,
         packs: &mut packs,
         made: &mut made,
         rules: &rules,
         left: bounds.max_inner,
+        unfollowed: false,
     };
     let start = inner.start_from(&starts)?;
+    let starts_unfollowed = inner.unfollowed;
     let (ours, theirs) = (version_of(repo, from)?, version_of(repo, with)?);
     let merged = merge_three(
         repo, &mut packs, &mut made, false, &start, &ours, &theirs, &rules,
@@ -872,7 +899,27 @@ fn make_save(
         merged_files: merged.merged_files,
         timed_out: merged.timed_out,
         unfollowed: merged.unfollowed,
+        starts_unfollowed,
     })
+}
+
+/// A refusal met while combining starting points, in words about them: two names that clash
+/// there are their own conflict, and a version past the limits there is under the starting point.
+fn of_starts(e: CombineError) -> CombineError {
+    match e {
+        CombineError::NamesClash { names, .. } => CombineError::StartsConflict { names },
+        CombineError::Past { names, detail, .. } => CombineError::Past {
+            names,
+            which: Which::Start,
+            detail,
+        },
+        CombineError::TooBig { detail } => CombineError::Past {
+            names: Names::default(),
+            which: Which::Start,
+            detail,
+        },
+        e => e,
+    }
 }
 
 fn tangled() -> CombineError {
@@ -897,6 +944,8 @@ struct Inner<'a> {
     made: &'a mut Made,
     rules: &'a RuleMatcher,
     left: usize,
+    /// Whether an inner combine followed no moves by contents on a side too many files left.
+    unfollowed: bool,
 }
 
 impl Inner<'_> {
@@ -924,7 +973,9 @@ impl Inner<'_> {
             let theirs = version_of(self.repo, next)?;
             let merged = merge_three(
                 self.repo, self.packs, self.made, true, &start, &acc, &theirs, self.rules,
-            )?;
+            )
+            .map_err(of_starts)?;
+            self.unfollowed |= !merged.unfollowed.is_empty();
             if !merged.conflicts.is_empty() {
                 return Err(CombineError::StartsConflict {
                     names: Names::default(),

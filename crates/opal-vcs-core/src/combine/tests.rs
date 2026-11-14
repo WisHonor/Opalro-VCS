@@ -1404,11 +1404,14 @@ impl Hist {
     /// Stores a save of `t` after `parents` noting `notes`, or what `save` would note against
     /// the first parent when `None`: a history from Git, a damaged one, or a combined save.
     fn plant(&mut self, parents: &[Id], t: &Tree, notes: Option<&[(&str, &str)]>) -> Id {
-        let lock = self.repo.lock_for_change("test", &mut |_| {}).unwrap();
-        let first = self.repo.store().save(&self.first, false).unwrap();
-        let mut packs = self.repo.new_packs().unwrap();
-        let root = put(self.repo.store(), first.root, t, &mut packs);
-        self.repo.store_packs(&lock, packs).unwrap();
+        let root = {
+            let lock = self.repo.lock_for_change("test", &mut |_| {}).unwrap();
+            let first = self.repo.store().save(&self.first, false).unwrap();
+            let mut packs = self.repo.new_packs().unwrap();
+            let root = put(self.repo.store(), first.root, t, &mut packs);
+            self.repo.store_packs(&lock, packs).unwrap();
+            root
+        };
         let move_notes = match notes {
             Some(notes) => notes
                 .iter()
@@ -1430,6 +1433,13 @@ impl Hist {
                 .unwrap()
             }
         };
+        self.plant_root(parents, root, move_notes)
+    }
+
+    /// Stores a save of the stored listing `root` after `parents`, noting `move_notes`.
+    fn plant_root(&mut self, parents: &[Id], root: Id, move_notes: Vec<MoveNote>) -> Id {
+        let lock = self.repo.lock_for_change("test", &mut |_| {}).unwrap();
+        let first = self.repo.store().save(&self.first, false).unwrap();
         let save = Save {
             root,
             parents: parents.to_vec(),
@@ -2508,7 +2518,7 @@ fn following_moves_agrees_with_a_model() {
             let arrived: BTreeSet<&String> = replaced[0].union(&replaced[1]).copied().collect();
             for at in arrived {
                 let moved = went.iter().any(|w| w.contains_key(at));
-                if !file_at(&three[0], at) || moved {
+                if !file_at(&three[0], at) || moved || three[1].get(at) == three[2].get(at) {
                     continue;
                 }
                 let clash = match [0, 1].map(|i| replaced[i].contains(at)) {
@@ -2963,30 +2973,6 @@ fn many_conflicts_are_counted_after_the_first_100() {
 }
 
 #[test]
-fn unsaved_work_where_the_combine_writes_stops_it() {
-    let mut h = Hist::new();
-    let (_, main, _) = diverged(&mut h);
-    fs::write(h.dir.path().join("a.txt"), "mine\n").unwrap();
-    let err = combine_in(&mut h, "side").unwrap_err();
-    let CombineError::Collisions { paths } = &err else {
-        panic!("{err:?}");
-    };
-    assert_eq!(paths, &["a.txt"]);
-    assert_eq!(
-        err.to_string(),
-        "Your unsaved changes, or files Opalro ignores, are in the way of the combine, so nothing \
-         was changed:\n  a.txt"
-    );
-    assert!(
-        err.hint()
-            .unwrap()
-            .ends_with("then run opalro combine again.")
-    );
-    assert_eq!(h.entry().1.state.lines["main"], main);
-    assert_eq!(fs::read(h.dir.path().join("a.txt")).unwrap(), b"mine\n");
-}
-
-#[test]
 fn unsaved_work_elsewhere_comes_along() {
     let mut h = Hist::new();
     diverged(&mut h);
@@ -3412,4 +3398,418 @@ fn a_combine_after_a_stopped_goto_finishes_it_first() {
         return;
     }
     panic!("no goto stopped between its journal and its head");
+}
+
+/// `side` changed `a.txt`, removed `c.txt` and added `out.log`; `main` changed `b.txt` and
+/// ignores `out.log`. The project is on `main`.
+fn crowded(h: &mut Hist) {
+    let first = h.first;
+    let c = ("c.txt", f("c\n"));
+    let base = tree(&[("a.txt", f(BODY)), ("b.txt", f("b\n")), c.clone()]);
+    let b = h.save("main", first, &base);
+    let side = tree(&[
+        ("a.txt", edit(0, "side")),
+        ("b.txt", f("b\n")),
+        ("out.log", f("theirs\n")),
+    ]);
+    h.save("side", b, &side);
+    let main = tree(&[
+        ("a.txt", f(BODY)),
+        ("b.txt", f("main b\n")),
+        c,
+        (".opalroignore", f("out.log\n")),
+    ]);
+    h.save("main", b, &main);
+}
+
+#[test]
+fn unsaved_work_where_the_combine_writes_stops_it() {
+    // A change where the combine writes, an ignored file where it adds one, and a change to a
+    // file it removes.
+    for path in ["a.txt", "out.log", "c.txt"] {
+        let mut h = Hist::new();
+        crowded(&mut h);
+        fs::write(h.dir.path().join(path), "mine\n").unwrap();
+        let (head, entry) = h.entry();
+        let folder = h.folder();
+        let err = combine_in(&mut h, "side").unwrap_err();
+        let CombineError::Collisions { paths } = &err else {
+            panic!("{path}: {err:?}");
+        };
+        assert_eq!(paths, &[path]);
+        assert_eq!(
+            err.to_string(),
+            format!(
+                "Your unsaved changes, or files Opalro ignores, are in the way of the combine, so \
+                 nothing was changed:\n  {path}"
+            )
+        );
+        assert!(
+            err.hint()
+                .unwrap()
+                .ends_with("then run opalro combine again.")
+        );
+        let (head_now, entry_now) = h.entry();
+        assert_eq!((head_now, &entry_now.state), (head, &entry.state), "{path}");
+        assert_eq!(h.folder(), folder, "{path}");
+    }
+}
+
+#[test]
+fn undo_takes_a_line_moved_forward_back_and_redo_brings_it_again() {
+    use crate::undo::{StepRequest, redo, undo};
+    let mut h = Hist::new();
+    let first = h.first;
+    let base = h.save("main", first, &base_tree());
+    let side = h.save("side", base, &side_tree());
+    h.on("main", &base_tree());
+    assert_eq!(
+        combine_in(&mut h, "side").unwrap().result,
+        Combined::Forward
+    );
+    let who = ada();
+    let req = StepRequest {
+        n: 1,
+        shelve: false,
+        who: &who,
+        git_excludes: None,
+    };
+    undo(&mut h.repo, &req, &mut |_| {}).unwrap();
+    assert_eq!(h.entry().1.state.lines["main"], base);
+    assert_eq!(h.folder(), base_tree());
+    redo(&mut h.repo, &req, &mut |_| {}).unwrap();
+    assert_eq!(h.entry().1.state.lines["main"], side);
+    assert_eq!(h.folder(), side_tree());
+}
+
+#[test]
+fn undo_after_tidy_still_takes_a_combine_back() {
+    use crate::undo::{StepRequest, redo, undo};
+    use std::time::{SystemTime, UNIX_EPOCH};
+    const DAY: i64 = 86_400_000;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap();
+    let now = i64::try_from(now.as_millis()).unwrap();
+    let mut h = Hist::new();
+    let (_, main, _) = diverged(&mut h);
+    let who = Person {
+        time_ms: now,
+        ..ada()
+    };
+    let to = crate::lines::resolve_target(&h.repo, "side").unwrap();
+    let named = Named {
+        raw: "side".into(),
+        shown: "side".into(),
+    };
+    let asked = Asked {
+        target: &to,
+        named: &named,
+        message: None,
+        who: &who,
+        git_excludes: None,
+    };
+    let done = combine_with(&mut h.repo, &asked, &mut |_| {}, bounds()).unwrap();
+    // Two days on, inside a 30-day window, and past the day a new pack is left alone.
+    crate::tidy::tidy(&mut h.repo, 30, now + 2 * DAY, &mut |_| {}, &mut |_| {}).unwrap();
+    let req = StepRequest {
+        n: 1,
+        shelve: false,
+        who: &who,
+        git_excludes: None,
+    };
+    undo(&mut h.repo, &req, &mut |_| {}).unwrap();
+    assert_eq!(h.entry().1.state.lines["main"], main);
+    assert_eq!(h.folder(), main_tree());
+    redo(&mut h.repo, &req, &mut |_| {}).unwrap();
+    assert_eq!(h.entry().1.state.lines["main"], done.save);
+    assert_eq!(h.folder(), both_tree());
+}
+
+/// Two first saves holding `one` and `two`, then a save of `both` after them in each order:
+/// two tips whose common starting points share no save.
+fn two_roots(h: &mut Hist, one: &Tree, two: &Tree, both: &Tree) -> (Id, Id) {
+    let none: &[(&str, &str)] = &[];
+    let roots = [h.plant(&[], one, Some(none)), h.plant(&[], two, Some(none))];
+    let m = h.plant(&roots, both, Some(none));
+    (m, h.plant(&[roots[1], roots[0]], both, Some(none)))
+}
+
+#[test]
+fn starting_points_with_no_save_in_common_are_combined_from_nothing() {
+    let mut h = Hist::new();
+    let one = tree(&[("same.txt", f("same\n")), ("one.txt", f("1\n"))]);
+    let two = tree(&[("same.txt", f("same\n")), ("two.txt", f("2\n"))]);
+    let mut both = one.clone();
+    both.extend(two.clone());
+    let tips_at = two_roots(&mut h, &one, &two, &both);
+    // What only one starting point holds is in the start, so taking it away is kept; what both
+    // hold alike is in it once, so changing it is a change, not two adds.
+    let main = tree(&[("same.txt", f("main\n")), ("two.txt", f("2\n"))]);
+    let side = with(&both, &[("s.txt", f("s\n"))]);
+    tips(&mut h, tips_at, &main, &side);
+    let done = combine_in(&mut h, "side").unwrap();
+    let Combined::Made { starts, .. } = &done.result else {
+        panic!("{done:?}");
+    };
+    assert_eq!(starts.len(), 2);
+    assert_eq!(h.folder(), with(&main, &[("s.txt", f("s\n"))]));
+
+    // A file the two hold differently is their own conflict.
+    let mut h = Hist::new();
+    let one = tree(&[("f.txt", f("one\n"))]);
+    let two = tree(&[("f.txt", f("two\n"))]);
+    let both = tree(&[("f.txt", f("both\n"))]);
+    let tips_at = two_roots(&mut h, &one, &two, &both);
+    let main = with(&both, &[("m.txt", f("m\n"))]);
+    let side = with(&both, &[("s.txt", f("s\n"))]);
+    tips(&mut h, tips_at, &main, &side);
+    let before = h.untouched();
+    let err = combine_in(&mut h, "side").unwrap_err();
+    assert!(
+        matches!(err, CombineError::StartsConflict { .. }),
+        "{err:?}"
+    );
+    assert_untouched(&h, &before);
+}
+
+#[test]
+fn names_that_clash_between_starting_points_are_their_conflict() {
+    let mut h = Hist::new();
+    let base = tree(&[("f.txt", f("f\n"))]);
+    let b1 = with(&base, &[("Readme.md", f("one\n"))]);
+    let b2 = with(&base, &[("README.md", f("two\n"))]);
+    let both = with(&base, &[("Readme.md", f("one\n"))]);
+    let crossed = crossed(&mut h, &base, &[b1, b2], &both);
+    tips(
+        &mut h,
+        crossed,
+        &with(&both, &[("m.txt", f("m\n"))]),
+        &with(&both, &[("s.txt", f("s\n"))]),
+    );
+    let before = h.untouched();
+    let err = combine_in(&mut h, "side").unwrap_err();
+    assert!(
+        matches!(err, CombineError::StartsConflict { .. }),
+        "{err:?}"
+    );
+    assert_eq!(err.hint(), None);
+    assert_untouched(&h, &before);
+}
+
+/// A listing whose folders `x` and `y` are one listing 4,097 folders deep.
+fn too_deep(h: &mut Hist) -> Id {
+    let lock = h.repo.lock_for_change("test", &mut |_| {}).unwrap();
+    let mut packs = h.repo.new_packs().unwrap();
+    let store = h.repo.store();
+    let text = b"3";
+    let file = Entry {
+        name: "f".into(),
+        kind: EntryKind::File,
+        id: packs.add_content(text).unwrap(),
+        size: text.len() as u64,
+    };
+    let mut at = Listing::new(vec![file]).unwrap();
+    for _ in 1..4097 {
+        let id = store_listing(store, &mut packs, &at).unwrap();
+        at = Listing::new(vec![folder("d", id)]).unwrap();
+    }
+    let deep = store_listing(store, &mut packs, &at).unwrap();
+    let top = Listing::new(vec![folder("x", deep), folder("y", deep)]).unwrap();
+    let root = store_listing(store, &mut packs, &top).unwrap();
+    h.repo.store_packs(&lock, packs).unwrap();
+    root
+}
+
+#[test]
+fn a_starting_point_past_the_limits_is_named_as_where_the_lines_parted() {
+    let mut h = Hist::new();
+    let first = h.first;
+    let o = h.save("main", first, &tree(&[("x/f", f("1")), ("y/f", f("1"))]));
+    let two = tree(&[("x/f", f("2")), ("y/f", f("2"))]);
+    let b2 = h.save("start1", o, &two);
+    let root = too_deep(&mut h);
+    let b1 = h.plant_root(&[o], root, vec![]);
+    let none: &[(&str, &str)] = &[];
+    let m = h.plant(&[b1, b2], &two, Some(none));
+    let s = h.plant(&[b2, b1], &two, Some(none));
+    tips(
+        &mut h,
+        (m, s),
+        &with(&two, &[("m.txt", f("m\n"))]),
+        &with(&two, &[("s.txt", f("s\n"))]),
+    );
+    let before = h.untouched();
+    let err = combine_in(&mut h, "side").unwrap_err();
+    assert!(
+        matches!(
+            err,
+            CombineError::Past {
+                which: Which::Start,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    let words = err.to_string();
+    let parted = "The save where main and side parted is past Opalro's limits for a save (";
+    assert!(words.starts_with(parted), "{words}");
+    assert_untouched(&h, &before);
+}
+
+#[test]
+fn a_too_large_folder_in_a_made_up_starting_point_reads_as_where_the_lines_parted() {
+    let err = of_starts(CombineError::TooBig {
+        detail: "a folder in it would hold more than 1,000,000 entries".into(),
+    })
+    .named(&Names {
+        line: "main".into(),
+        target: "side".into(),
+    });
+    assert_eq!(
+        err.to_string(),
+        "The save where main and side parted is past Opalro's limits for a save (a folder in it \
+         would hold more than 1,000,000 entries), so nothing was changed."
+    );
+}
+
+/// Starting points `c0`… of `b1` and `b2`, the starting points of `main` and `side`: `n` of
+/// them, each adding a file of its own.
+fn nested(h: &mut Hist, n: usize) {
+    let first = h.first;
+    let base = tree(&[("base.txt", f("base\n"))]);
+    let o = h.save("main", first, &base);
+    let mut all = base.clone();
+    let cs: Vec<Id> = (0..n)
+        .map(|i| {
+            let t = with(&base, &[(&format!("{i}.txt"), f("i\n"))]);
+            all.extend(t.clone());
+            h.save(&format!("c{i}"), o, &t)
+        })
+        .collect();
+    let back: Vec<Id> = cs.iter().rev().copied().collect();
+    let none: &[(&str, &str)] = &[];
+    let bs = [
+        h.plant(&cs, &all, Some(none)),
+        h.plant(&back, &all, Some(none)),
+    ];
+    let m = h.plant(&bs, &all, Some(none));
+    let s = h.plant(&[bs[1], bs[0]], &all, Some(none));
+    tips(
+        h,
+        (m, s),
+        &with(&all, &[("m.txt", f("m\n"))]),
+        &with(&all, &[("s.txt", f("s\n"))]),
+    );
+}
+
+#[test]
+fn the_budget_is_kept_inside_the_starting_points_own_starting_points() {
+    let mut h = Hist::new();
+    nested(&mut h, 2);
+    let before = h.untouched();
+    // One inner combine for `b1` and `b2`, and one for their own two starting points.
+    let one = Bounds {
+        max_inner: 1,
+        ..bounds()
+    };
+    let err = combine_by(&mut h, "side", None, one).unwrap_err();
+    assert!(matches!(err, CombineError::Tangled { .. }), "{err:?}");
+    assert_untouched(&h, &before);
+    let two = Bounds {
+        max_inner: 2,
+        ..bounds()
+    };
+    let done = combine_by(&mut h, "side", None, two).unwrap();
+    assert!(matches!(done.result, Combined::Made { .. }), "{done:?}");
+}
+
+#[test]
+fn too_many_starting_points_under_the_starting_points_are_refused() {
+    let mut h = Hist::new();
+    nested(&mut h, 17);
+    let before = h.untouched();
+    let err = combine_in(&mut h, "side").unwrap_err();
+    assert!(matches!(err, CombineError::Tangled { .. }), "{err:?}");
+    assert_untouched(&h, &before);
+}
+
+#[test]
+fn moves_not_followed_while_combining_starting_points_are_told_once() {
+    let mut h = Hist::new();
+    let base = tree(&[("Player.cs", f(BODY)), ("Other.cs", f("other\n"))]);
+    let b1 = moved_to("src/Player.cs", f(BODY));
+    let b2 = tree(&[("Player.cs", f(BODY)), ("Other.cs", f("other, changed\n"))]);
+    let both = tree(&[
+        ("src/Player.cs", f(BODY)),
+        ("Other.cs", f("other, changed\n")),
+    ]);
+    let crossed = crossed(&mut h, &base, &[b1, b2], &both);
+    tips(
+        &mut h,
+        crossed,
+        &with(&both, &[("m.txt", f("m\n"))]),
+        &with(&both, &[("s.txt", f("s\n"))]),
+    );
+    let short = Bounds {
+        max_left_bytes: HELD_PER_LEFT,
+        ..bounds()
+    };
+    let done = combine_by(&mut h, "side", None, short).unwrap();
+    let told: Vec<&str> = done
+        .applied
+        .warnings
+        .iter()
+        .filter(|w| w.kind == warning::MOVES_NOT_FOLLOWED)
+        .map(|w| w.message.as_str())
+        .collect();
+    assert_eq!(
+        told,
+        [
+            "Too many files left their places between the two lines' common starting points for \
+          Opalro to match them by their contents, so files that moved there without a note were \
+          not followed."
+        ]
+    );
+}
+
+#[test]
+fn what_both_sides_hold_alike_is_taken_whatever_the_notes_say() {
+    let mut h = Hist::new();
+    let first = h.first;
+    let (a, b) = (f("a text\n"), f("b text\n"));
+    let s = h.save("main", first, &tree(&[("A.txt", a), ("B.txt", b.clone())]));
+    // One line gives A.txt the contents of B.txt; the other removes A.txt, then moves B.txt
+    // there, which its save notes.
+    let o = h.save(
+        "main",
+        s,
+        &tree(&[("A.txt", b.clone()), ("B.txt", b.clone())]),
+    );
+    let emptied = h.save("side", s, &tree(&[("B.txt", b.clone())]));
+    let t = h.save("side", emptied, &tree(&[("A.txt", b.clone())]));
+    let note = MoveNote {
+        from: "B.txt".into(),
+        to: "A.txt".into(),
+    };
+    assert_eq!(h.save_of(t).move_notes, [note]);
+    assert_eq!(h.merged(s, o, t), tree(&[("A.txt", b)]));
+}
+
+#[test]
+fn a_side_past_the_limits_is_named_though_following_moves_meets_it_first() {
+    let mut h = Hist::new();
+    let first = h.first;
+    let o = h.save("main", first, &tree(&[("x/f", f("1")), ("y/f", f("1"))]));
+    h.save("side", o, &tree(&[("x/f", f("2")), ("y/f", f("2"))]));
+    let root = too_deep(&mut h);
+    let deep = h.plant_root(&[o], root, vec![]);
+    h.set(|s| {
+        s.lines.insert("main".into(), deep);
+        s.position = Position::OnLine("main".into());
+    });
+    let before = h.untouched();
+    let err = combine_in(&mut h, "side").unwrap_err();
+    let words = err.to_string();
+    let newest = "Line main's newest save is past Opalro's limits for a save (";
+    assert!(words.starts_with(newest), "{words}");
+    assert_untouched(&h, &before);
 }

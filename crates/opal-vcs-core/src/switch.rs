@@ -619,13 +619,7 @@ fn go(
     let (head, entry) = repo.current()?;
     let from = tip_of(&entry)?;
     let (position, to) = landing(repo, &entry.state, target)?;
-    let drive = drive::probe(repo.tmp_folder()).map_err(RepoError::from)?;
-    let plan = writeout::plan(repo, from, to, None, false, drive, git_excludes)?;
-    if !plan.collisions.is_empty() {
-        return Err(SwitchError::Collisions {
-            paths: plan.collisions,
-        });
-    }
+    let (plan, drive) = plan_switch(repo, from, to, git_excludes)?;
     let mut state = entry.state.clone();
     state.position = position.clone();
     if state == entry.state && plan.actions.is_empty() {
@@ -639,21 +633,17 @@ fn go(
             recorded: false,
         });
     }
-    let carried = plan.carried;
-    let mut packs = repo.new_packs()?;
-    let kept_from = kept_on(&entry.state, from, command, &[], who);
-    let (folder_change, safety_copies) =
-        kept::switch_saves(repo, &plan, from, to, &kept_from, drive, &mut packs)?;
-    let to_make = Switch {
+    let planned = Planned {
         head,
-        action: Action::Command,
+        before: &entry.state,
         state,
-        folder_change,
+        from,
+        to,
         plan,
         drive,
-        packs,
     };
-    let applied = switch(repo, lock, to_make, who, command, earlier)?;
+    let (applied, safety_copies, carried) =
+        make_switch(repo, lock, planned, who, command, earlier)?;
     Ok(GotoOutcome {
         position,
         save: to,
@@ -662,6 +652,65 @@ fn go(
         carried,
         recorded: true,
     })
+}
+
+/// Plans switching the folder from the save `from` to `to`, as `goto` plans it: unsaved work in
+/// the way stops it with `Collisions`.
+pub(crate) fn plan_switch(
+    repo: &Repository,
+    from: Id,
+    to: Id,
+    git_excludes: Option<&Path>,
+) -> Result<(Plan, Drive), SwitchError> {
+    let drive = drive::probe(repo.tmp_folder()).map_err(RepoError::from)?;
+    let plan = writeout::plan(repo, from, to, None, false, drive, git_excludes)?;
+    if !plan.collisions.is_empty() {
+        return Err(SwitchError::Collisions {
+            paths: plan.collisions,
+        });
+    }
+    Ok((plan, drive))
+}
+
+/// A switch from the save `from` to `to`, planned, to be made as one diary step after `head`
+/// that records `state`; `before` is the state `head` records.
+pub(crate) struct Planned<'a> {
+    pub head: Id,
+    pub before: &'a State,
+    pub state: State,
+    pub from: Id,
+    pub to: Id,
+    pub plan: Plan,
+    pub drive: Drive,
+}
+
+/// Makes a planned switch as `goto` does: safety copies of unsaved work kept first, then the
+/// switch. Gives what was done, how many safety copies were kept, and how many unsaved changes
+/// came along.
+pub(crate) fn make_switch(
+    repo: &mut Repository,
+    lock: &ChangeLock,
+    p: Planned,
+    who: &Person,
+    command: &str,
+    earlier: &mut Earlier,
+) -> Result<(Applied, usize, usize), SwitchError> {
+    let carried = p.plan.carried;
+    let mut packs = repo.new_packs()?;
+    let kept_from = kept_on(p.before, p.from, command, &[], who);
+    let (folder_change, safety_copies) =
+        kept::switch_saves(repo, &p.plan, p.from, p.to, &kept_from, p.drive, &mut packs)?;
+    let to_make = Switch {
+        head: p.head,
+        action: Action::Command,
+        state: p.state,
+        folder_change,
+        plan: p.plan,
+        drive: p.drive,
+        packs,
+    };
+    let applied = switch(repo, lock, to_make, who, command, earlier)?;
+    Ok((applied, safety_copies, carried))
 }
 
 /// Where `target` leads now, read under the lock: the position and the save.

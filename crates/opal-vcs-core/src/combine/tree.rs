@@ -71,7 +71,7 @@ pub(crate) struct Merged {
 
 /// The three versions' entries, or listings, in the order of `Which`.
 type Three<T> = [T; 3];
-const WHICH: Three<Which> = [Which::Start, Which::Ours, Which::Theirs];
+pub(super) const WHICH: Three<Which> = [Which::Start, Which::Ours, Which::Theirs];
 
 /// Merges `ours` and `theirs` against `start`, all root listings. `inner`: this merge makes a
 /// made-up starting point, whose merged texts a later merge reads.
