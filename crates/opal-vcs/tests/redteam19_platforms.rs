@@ -49,10 +49,8 @@ mod case_drives {
         renamed_on_side(&env);
         let side = env.state().1.lines["side"];
         let saved: Vec<String> = support::saved_files(&env, side).into_keys().collect();
-        if saved != ["README"] {
-            eprintln!("this drive's save kept the old spelling ({saved:?}); nothing to try");
-            return;
-        }
+        // A save that kept the old spelling would leave nothing to try.
+        assert_eq!(saved, ["README"], "the save kept the old spelling");
         ok(&env, &["combine", "side"]);
         assert_eq!(names(&env), ["README"]);
         assert_eq!(
