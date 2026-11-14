@@ -46,7 +46,8 @@ fn file(e: Option<&Entry>) -> Option<&Entry> {
 /// same non-empty contents, no other file that left and none that arrived holding those
 /// contents; sorted by where they went. A path that left holds nothing at `to_root`, and one
 /// that arrived held nothing at `from_root`. Either side's listings may be in `unstored`. None
-/// when holding the files that left would take more than `most_left_bytes`.
+/// when holding the files that left, and those that arrived with their contents, would take more
+/// than `most_left_bytes`.
 pub(crate) fn same_contents(
     store: &Store,
     unstored: &HashMap<Id, Listing>,
@@ -57,16 +58,18 @@ pub(crate) fn same_contents(
     count_and_moves(store, unstored, from_root, to_root, most_left_bytes)?.1
 }
 
-/// Moves found by contents: none at all when there were too many files that left to hold.
+/// Moves found by contents: none at all when there were too many files to hold.
 pub(crate) type Moves = Result<Option<Vec<MoveNote>>, StoreError>;
 
-/// At most this many bytes of memory are taken to hold the files that left, to pair them; past
-/// it, a save notes no moves and a combine follows none by contents.
+/// At most this many bytes of memory are taken to hold the files that left, and those that
+/// arrived with their contents, to pair them; past it, a save notes no moves and a combine
+/// follows none by contents.
 pub(crate) const MAX_LEFT_BYTES: usize = 64 << 20;
 
-/// What holding one file that left takes beside its path: its entry in a map that may be half
-/// empty after it grows, and the path's own allocation.
-pub(crate) const HELD_PER_LEFT: usize = 2 * size_of::<(Id, Option<String>)>() + 16;
+/// What holding one file that left or arrived takes beside its path, at its peak. While a map
+/// grows, its old table and the new one twice as big are both alive: three buckets, each with a
+/// control byte. An allocator rounds a short path up to about 32 bytes.
+pub(crate) const HELD_PER_PLACE: usize = 3 * (size_of::<(Id, Option<String>)>() + 1) + 32;
 
 #[cfg(test)]
 thread_local! {
@@ -99,7 +102,7 @@ pub(crate) fn count_and_moves(
             if let (Some(f), None) = (file(old), new)
                 && left_bytes <= most_left_bytes
             {
-                left_bytes = left_bytes.saturating_add(HELD_PER_LEFT + path.len());
+                left_bytes = left_bytes.saturating_add(HELD_PER_PLACE + path.len());
                 if left_bytes > most_left_bytes {
                     left = Places::new();
                 } else {
@@ -116,24 +119,27 @@ pub(crate) fn count_and_moves(
     if left.is_empty() || !arrivals {
         return Ok((changed, Ok(Some(vec![]))));
     }
+    let room = most_left_bytes.saturating_sub(left_bytes);
     Ok((
         changed,
-        paired(store, unstored, from_root, to_root, left).map(Some),
+        paired(store, unstored, from_root, to_root, left, room),
     ))
 }
 
 /// The moves of the files in `left` (contents to the one path that left with them), from a
-/// second walk for the files that arrived with those contents.
+/// second walk for the files that arrived with those contents; none when holding those takes
+/// more than `room` bytes.
 fn paired(
     store: &Store,
     unstored: &HashMap<Id, Listing>,
     from_root: Id,
     to_root: Id,
     mut left: Places,
-) -> Result<Vec<MoveNote>, StoreError> {
+    room: usize,
+) -> Moves {
     #[cfg(test)]
     SECOND_WALKS.set(SECOND_WALKS.get() + 1);
-    let mut arrived = Places::new();
+    let (mut arrived, mut held) = (Places::new(), 0usize);
     for_each_entry_change_in(
         store,
         unstored,
@@ -142,14 +148,23 @@ fn paired(
         |path, old, new| {
             if let (None, Some(f)) = (old, file(new))
                 && left.contains_key(&f.id)
+                && held <= room
             {
-                #[cfg(test)]
-                ARRIVALS_KEPT.set(ARRIVALS_KEPT.get() + 1);
-                seen(&mut arrived, f.id, path);
+                held = held.saturating_add(HELD_PER_PLACE + path.len());
+                if held > room {
+                    arrived = Places::new();
+                } else {
+                    #[cfg(test)]
+                    ARRIVALS_KEPT.set(ARRIVALS_KEPT.get() + 1);
+                    seen(&mut arrived, f.id, path);
+                }
             }
             Ok::<(), StoreError>(())
         },
     )?;
+    if held > room {
+        return Ok(None);
+    }
     let mut notes: Vec<MoveNote> = arrived
         .into_iter()
         .filter_map(|(id, to)| {
@@ -162,7 +177,7 @@ fn paired(
         .filter(|n| validate_path(&n.from).is_ok() && validate_path(&n.to).is_ok())
         .collect();
     notes.sort_unstable_by(|a, b| a.to.cmp(&b.to));
-    Ok(notes)
+    Ok(Some(notes))
 }
 
 /// One version a merge reads: its root listing, and its save, `None` when it is made up.
@@ -500,8 +515,8 @@ mod tests {
             ("moved", File, b"m"),
         ];
         let to: &[(&str, EntryKind, &[u8])] = &[("there", File, b"m")];
-        // Three files with 15 bytes of paths left.
-        let all = 3 * HELD_PER_LEFT + 15;
+        // Three files with 15 bytes of paths left, and one arrived at a path of 5 bytes.
+        let all = 4 * HELD_PER_PLACE + 20;
         assert_eq!(counted(from, to, all), (4, vec![pair("moved", "there")]));
         assert_eq!(counted(from, to, all - 1), (4, vec![]));
     }
@@ -515,11 +530,30 @@ mod tests {
             .collect();
         from.push(("m", File, b"moved"));
         let to: &[(&str, EntryKind, &[u8])] = &[("x", File, b"moved")];
-        // Ten paths of one byte each: 10 bytes, but ten entries held.
-        let all = 10 * (HELD_PER_LEFT + 1);
+        // Ten paths of one byte each left and one arrived: 11 bytes, but eleven entries held.
+        let all = 11 * (HELD_PER_PLACE + 1);
         assert_eq!(counted(&from, to, all), (11, vec![pair("m", "x")]));
         assert_eq!(counted(&from, to, all - 1), (11, vec![]));
         assert_eq!(counted(&from, to, 1_000), (11, vec![]));
+    }
+
+    #[test]
+    fn files_that_arrived_at_long_paths_are_bounded_too() {
+        // Two files left from one-byte paths and arrived ten folders of 100 bytes down.
+        let deep = vec!["d".repeat(100); 10].join("/");
+        let (to_a, to_b) = (format!("{deep}/a"), format!("{deep}/b"));
+        let from: &[(&str, EntryKind, &[u8])] = &[("a", File, b"aa"), ("b", File, b"bb")];
+        let to: &[(&str, EntryKind, &[u8])] = &[(&to_a, File, b"aa"), (&to_b, File, b"bb")];
+        let left = 2 * (HELD_PER_PLACE + 1);
+        let all = left + 2 * (HELD_PER_PLACE + to_a.len());
+        let both = vec![pair("a", &to_a), pair("b", &to_b)];
+        assert_eq!(counted(from, to, all), (4, both));
+        assert_eq!(counted(from, to, all - 1), (4, vec![]));
+        // Far more than the files that left take: the arrivals alone are past it.
+        assert_eq!(
+            counted(from, to, left + HELD_PER_PLACE + 1_000),
+            (4, vec![])
+        );
     }
 
     #[test]

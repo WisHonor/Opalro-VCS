@@ -15,7 +15,7 @@ use crate::id::{ChangeId, Flavor, Id, hash_record};
 use crate::kept::overlay;
 use crate::link::ProjectLink;
 use crate::listing::{Entry, EntryKind, Listing};
-use crate::moves::{HELD_PER_LEFT, MAX_LEFT_BYTES, Version, followed, same_contents};
+use crate::moves::{HELD_PER_PLACE, MAX_LEFT_BYTES, Version, followed, same_contents};
 use crate::names::PortabilityProblem;
 use crate::pack::{ObjectKind, PackSet};
 use crate::presets::{Engine, Found, Preset, opal_toml};
@@ -1928,8 +1928,9 @@ fn following_by_contents_holds_a_bounded_amount() {
         save: None,
         ..h.version(o)
     };
-    // `Player.cs` is the only file that left, with a path of 9 bytes.
-    let fits = HELD_PER_LEFT + 9;
+    // `Player.cs` is the only file that left, with a path of 9 bytes, and it arrived at a path
+    // of 20.
+    let fits = 2 * HELD_PER_PLACE + 29;
     let at_most = |n: usize| {
         let made = Made {
             max_left_bytes: n,
@@ -3149,12 +3150,21 @@ fn inner_text_past_what_is_held_is_refused() {
         &with(&both, &[("s.txt", f("s\n"))]),
     );
     let before = h.untouched();
+    // A comparison past its deadline gives up and makes a conflict instead; a computer that
+    // stalls mustn't turn the refusal into one.
     let tight = Bounds {
         max_held: 10,
+        deadline: std::time::Duration::from_secs(600),
         ..bounds()
     };
-    let err = combine_by(&mut h, "side", None, tight).unwrap_err();
-    assert!(matches!(err, CombineError::HeldTooMuch { .. }), "{err:?}");
+    let err = match combine_by(&mut h, "side", None, tight) {
+        Err(err) => err,
+        Ok(done) => panic!("combined: {done:?}"),
+    };
+    assert!(
+        matches!(err, CombineError::HeldTooMuch { .. }),
+        "got: {err}; {err:?}"
+    );
     assert_eq!(
         err.to_string(),
         "Combining side into main needs their common starting points combined first, and that \
@@ -3162,7 +3172,11 @@ fn inner_text_past_what_is_held_is_refused() {
          was changed."
     );
     assert_untouched(&h, &before);
-    let done = combine_in(&mut h, "side").unwrap();
+    let patient = Bounds {
+        deadline: std::time::Duration::from_secs(600),
+        ..bounds()
+    };
+    let done = combine_by(&mut h, "side", None, patient).unwrap_or_else(|e| panic!("{e}"));
     assert!(matches!(done.result, Combined::Made { .. }), "{done:?}");
 }
 
@@ -3261,7 +3275,7 @@ fn a_combine_says_when_moves_werent_followed() {
     h.save("main", s, &moved_to(to, f(BODY)));
     // Too little to hold even the one file that left main; its note is still followed.
     let short = Bounds {
-        max_left_bytes: HELD_PER_LEFT,
+        max_left_bytes: HELD_PER_PLACE,
         ..bounds()
     };
     let done = combine_by(&mut h, "side", None, short).unwrap();
@@ -3750,7 +3764,7 @@ fn moves_not_followed_while_combining_starting_points_are_told_once() {
         &with(&both, &[("s.txt", f("s\n"))]),
     );
     let short = Bounds {
-        max_left_bytes: HELD_PER_LEFT,
+        max_left_bytes: HELD_PER_PLACE,
         ..bounds()
     };
     let done = combine_by(&mut h, "side", None, short).unwrap();
@@ -3791,7 +3805,9 @@ fn what_both_sides_hold_alike_is_taken_whatever_the_notes_say() {
         to: "A.txt".into(),
     };
     assert_eq!(h.save_of(t).move_notes, [note]);
-    assert_eq!(h.merged(s, o, t), tree(&[("A.txt", b)]));
+    let want = tree(&[("A.txt", b)]);
+    assert_eq!(h.merged(s, o, t), want);
+    assert_eq!(h.merged(s, t, o), want);
 }
 
 #[test]

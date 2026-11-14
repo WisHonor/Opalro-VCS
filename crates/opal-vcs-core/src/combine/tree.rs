@@ -34,7 +34,8 @@ pub(crate) struct Made {
     /// Their bytes, and the most allowed (`MAX_HELD_TEXT`; tests lower it).
     pub held: u64,
     pub max_held: u64,
-    /// The most memory taken to hold the files that left a side, to follow them by contents
+    /// The most memory taken to hold the files that left a side and arrived, to follow them by
+    /// contents
     /// (`moves::MAX_LEFT_BYTES`; tests lower it).
     pub max_left_bytes: usize,
     /// How long each file's comparison may take (`changes::deadline()`; tests lower it).
