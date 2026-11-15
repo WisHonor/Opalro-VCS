@@ -3812,6 +3812,53 @@ fn starting_points_that_conflict_stop_the_combine() {
     assert_untouched(&h, &before);
 }
 
+/// Two starting points that changed `a.txt` in different places, the lines combined criss-cross,
+/// then a file on each line; the project is on `main`.
+fn starts_changed_apart(h: &mut Hist) {
+    let base = tree(&[("a.txt", f(BODY))]);
+    let b1 = tree(&[("a.txt", edit(0, "ONE"))]);
+    let b2 = tree(&[("a.txt", edit(4, "FIVE"))]);
+    let both = tree(&[("a.txt", f("ONE\ntwo\nthree\nfour\nFIVE\n"))]);
+    let crossed = crossed(h, &base, &[b1, b2], &both);
+    tips(
+        h,
+        crossed,
+        &with(&both, &[("m.txt", f("m\n"))]),
+        &with(&both, &[("s.txt", f("s\n"))]),
+    );
+}
+
+#[test]
+fn starting_points_that_cant_be_combined_while_the_rules_are_not_read_whole_say_so() {
+    let mut h = Hist::new();
+    starts_changed_apart(&mut h);
+    rules_file(&h, NOT_WHOLE[2]);
+    let before = h.untouched();
+    let err = combine_in(&mut h, "side").unwrap_err();
+    assert!(
+        matches!(
+            err,
+            CombineError::StartsConflict {
+                rules_not_whole: true,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert_eq!(
+        err.to_string(),
+        "Combining side into main needs their common starting points combined first, and those \
+         conflict with each other, which Opalro can't keep yet, so nothing was changed."
+    );
+    assert_eq!(err.hint().unwrap(), RULES_HINT);
+    assert_untouched(&h, &before);
+    // Read whole, the same history combines as before.
+    rules_file(&h, "[[rule]]\nfiles = [\"*.unity\"]\n");
+    let done = combine_in(&mut h, "side").unwrap();
+    assert!(matches!(done.result, Combined::Made { .. }), "{done:?}");
+    assert!(done.applied.warnings.is_empty(), "{done:?}");
+}
+
 /// `n` common starting points, each adding a file of its own, then a file on each line.
 fn many_starts(h: &mut Hist, n: usize) {
     let base = tree(&[("base.txt", f("base\n"))]);

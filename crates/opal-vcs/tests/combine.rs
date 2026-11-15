@@ -727,3 +727,55 @@ fn a_combine_that_brings_in_the_fixed_opalro_toml_says_nothing_of_it() {
     let doc = json(&env, &["combine", "side"], 0);
     assert_eq!(doc["warnings"], serde_json::json!([]), "{doc}");
 }
+
+#[test]
+fn starting_points_that_cant_be_combined_while_opalro_toml_cant_be_read_whole_say_so() {
+    let env = project();
+    apart(
+        &env,
+        "one\n2\n3\n4\n5\n6\n7\n8\n",
+        "1\n2\n3\n4\n5\n6\n7\neight\n",
+    );
+    let main = tip(&env, "main").to_hex();
+    // Crossed: each line combines the other's save, so the two saves are both starting points.
+    run(&env, &["combine", "side"], 0);
+    run(&env, &["goto", "side"], 0);
+    run(&env, &["combine", &main], 0);
+    env.overwrite("opalro.toml", "colour = \"red\"\n");
+    env.overwrite("s.txt", "s\n");
+    run(&env, &["save", "S"], 0);
+    run(&env, &["goto", "main"], 0);
+    env.overwrite("opalro.toml", "colour = \"red\"\n");
+    env.overwrite("m.txt", "m\n");
+    run(&env, &["save", "M"], 0);
+    let before = env.standing();
+    let (shown, said) = run(&env, &["combine", "side"], 1);
+    assert_eq!(shown, "");
+    assert!(
+        said.contains(
+            "error: Combining side into main needs their common starting points combined first, \
+             and those conflict with each other, which Opalro can't keep yet, so nothing was \
+             changed.\n"
+        ),
+        "{said}"
+    );
+    assert!(
+        said.contains(
+            "hint: opalro setup says what is wrong with opalro.toml. Fix or remove it and save; \
+             then run opalro combine again."
+        ),
+        "{said}"
+    );
+    let doc = json(&env, &["combine", "side"], 1);
+    assert_eq!(
+        doc["error"]["message"],
+        "Combining side into main needs their common starting points combined first, and those \
+         conflict with each other, which Opalro can't keep yet, so nothing was changed."
+    );
+    assert_eq!(
+        doc["error"]["hint"],
+        "opalro setup says what is wrong with opalro.toml. Fix or remove it and save; then run \
+         opalro combine again."
+    );
+    assert_eq!(env.standing(), before);
+}

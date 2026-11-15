@@ -248,7 +248,8 @@ pub enum CombineError {
         names.target,
         names.line
     )]
-    StartsConflict { names: Names },
+    /// `rules_not_whole`: a file among them would have merged, but `opalro.toml` wasn't read whole.
+    StartsConflict { names: Names, rules_not_whole: bool },
     /// A merged folder would hold two names that clash; `folder` is `""` at the top.
     #[error(
         "Combining {} into {} would put two names in one folder that clash, so nothing was \
@@ -312,6 +313,10 @@ impl CombineError {
             CombineError::Conflicts {
                 rules_not_whole: true,
                 ..
+            }
+            | CombineError::StartsConflict {
+                rules_not_whole: true,
+                ..
             } => {
                 "opalro setup says what is wrong with opalro.toml. Fix or remove it and save; then \
                  run opalro combine again."
@@ -345,7 +350,7 @@ impl CombineError {
             CombineError::Unrelated { names }
             | CombineError::Tangled { names }
             | CombineError::Conflicts { names, .. }
-            | CombineError::StartsConflict { names }
+            | CombineError::StartsConflict { names, .. }
             | CombineError::NamesClash { names, .. }
             | CombineError::Past { names, .. }
             | CombineError::HeldTooMuch { names } => *names = given.clone(),
@@ -952,7 +957,10 @@ fn make_save(
 /// there are their own conflict, and a version past the limits there is under the starting point.
 fn of_starts(e: CombineError) -> CombineError {
     match e {
-        CombineError::NamesClash { names, .. } => CombineError::StartsConflict { names },
+        CombineError::NamesClash { names, .. } => CombineError::StartsConflict {
+            names,
+            rules_not_whole: false,
+        },
         CombineError::Past { names, detail, .. } => CombineError::Past {
             names,
             which: Which::Start,
@@ -1024,6 +1032,7 @@ impl Inner<'_> {
             if !merged.conflicts.is_empty() {
                 return Err(CombineError::StartsConflict {
                     names: Names::default(),
+                    rules_not_whole: merged.rules_not_whole,
                 });
             }
             acc = Version {
