@@ -441,10 +441,9 @@ In conflict (3 places):
     todo.txt            fixed, not yet recorded
 
 Next: record what you fixed with: opalro resolve
-      Fix the marked places in your editor, then run opalro resolve.
-      To pick a version: opalro resolve <path> --keep mine (or theirs); to look at theirs first:
-      opalro resolve <path> --copy theirs --to <file>
 ```
+
+The next step is the first that applies: record what you fixed; else fix the marked places in your editor; else pick a version with `opalro resolve <path> --keep mine` (or `theirs`).
 
 A place stays in this list, and out of the list of changes, until `opalro resolve` records how you settled it. `opalro changes` shows what you changed in such a file since the combine, under a line saying it is in conflict.
 

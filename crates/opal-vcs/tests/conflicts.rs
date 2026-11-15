@@ -4,7 +4,8 @@
 
 use opal_core::conflict::{Own, Record, Term};
 use opal_core::id::{Id, hash_content};
-use opal_core::listing::EntryKind;
+use opal_core::listing::{Entry, EntryKind, Listing};
+use opal_core::pack::ObjectKind;
 use serde_json::Value;
 
 mod support;
@@ -153,36 +154,58 @@ fn status_lists_the_places_in_conflict_first() {
     assert_eq!(rest.len(), 1, "{shown}");
     assert!(rest[0].starts_with("    modified  plain.txt  "), "{shown}");
 
-    // Nothing else changed: said first, as without conflicts.
+    // Nothing else changed: the places come straight after the first line, and nothing says
+    // that nothing changed.
     put(&env, "plain.txt", b"one\n");
     let (shown, _) = run(&env, &["status"], 0);
     let lines: Vec<&str> = shown.lines().collect();
-    assert_eq!(lines[1], "Nothing changed since then.", "{shown}");
-    assert_eq!(lines[2..5], ["", "In conflict (7 places):", ""], "{shown}");
-    assert_eq!(lines.len(), 12, "{shown}");
+    assert_eq!(lines[1..4], ["", "In conflict (7 places):", ""], "{shown}");
+    assert_eq!(lines.len(), 11, "{shown}");
+    assert!(!shown.contains("Nothing changed"), "{shown}");
 
-    // A name this computer can't hold: also among the entries not written here, as any is.
+    // A name this computer can't hold: listed once on screen, among the places; in `--json`
+    // among the entries not written here too.
     if cfg!(windows) {
         let env = started();
-        plant(&env, &[], &[("aux.txt", versions(Some(term(PICTURE))))]);
+        plant(
+            &env,
+            &[("plain.txt", b"one\n"), ("con.txt", b"x")],
+            &[("aux.txt", versions(Some(term(PICTURE))))],
+        );
+        put(&env, "plain.txt", b"two\n");
         let (shown, _) = run(&env, &["status"], 0);
         let lines: Vec<&str> = shown.lines().collect();
         assert_eq!(
-            lines[1..],
+            lines[1..9],
             [
-                "Nothing changed since then.",
                 "",
                 "In conflict (1 place):",
                 "",
                 "    aux.txt  can't be written on this computer, kept as it is",
                 "",
-                "Not written here, because this computer can't hold them as they are (saves \
-                 keep them as they were):",
+                "Changed since then (1 file):",
                 "",
-                "    aux.txt",
+                "    modified  plain.txt  4 B -> 4 B",
             ],
             "{shown}"
         );
+        assert_eq!(
+            lines[9..],
+            [
+                "",
+                "Not written here, because this computer can't hold them as they are (saves \
+                 keep them as they were):",
+                "",
+                "    con.txt",
+            ],
+            "{shown}"
+        );
+        let doc = json(&env, &["status"]);
+        assert_eq!(
+            doc["not_written"],
+            serde_json::json!(["aux.txt", "con.txt"])
+        );
+        assert_eq!(doc["conflicts"][0]["standing"], "not_here");
     }
 }
 
@@ -206,12 +229,26 @@ fn next_step(env: &Env) -> String {
 #[test]
 fn status_says_what_to_do_next_for_what_is_left() {
     let fixed = "record what you fixed with: opalro resolve";
-    let markers = "Fix the marked places in your editor, then run opalro resolve.";
-    let pick = "To pick a version: opalro resolve <path> --keep mine (or theirs); to look at theirs \
-                first: opalro resolve <path> --copy theirs --to <file>";
+    let markers = "fix the marked places in your editor, then run: opalro resolve";
+    let pick = "pick a version with: opalro resolve <path> --keep mine (or theirs); to look at \
+                theirs first: opalro resolve <path> --copy theirs --to <file>";
 
+    // Only the first that applies.
     let env = every_state();
-    assert_eq!(next_step(&env), format!("{fixed} {markers} {pick}"));
+    assert_eq!(next_step(&env), fixed);
+    let both = |conflicts: &[(&str, Record)], shows: &[(&str, &[u8])]| {
+        let env = started();
+        plant(&env, &[], conflicts);
+        for (path, bytes) in shows {
+            put(&env, path, bytes);
+        }
+        next_step(&env)
+    };
+    let two = [
+        ("a.txt", marked()),
+        ("b.png", versions(Some(term(PICTURE)))),
+    ];
+    assert_eq!(both(&two, &[("a.txt", HALF), ("b.png", PICTURE)]), markers);
 
     let only = |conflict: Record, shows: Option<&[u8]>| {
         let env = started();
@@ -234,10 +271,20 @@ fn status_says_what_to_do_next_for_what_is_left() {
     let env = started();
     plant(&env, &[("plain.txt", b"one\n")], &[]);
     put(&env, "plain.txt", b"two\n");
-    assert_eq!(
-        next_step(&env),
-        "save them with: opalro save \"describe your change\""
-    );
+    let save = "save them with: opalro save \"describe your change\"";
+    assert_eq!(next_step(&env), save);
+
+    // Only a place this computer can't hold, beside a change: the save step again.
+    if cfg!(windows) {
+        let env = started();
+        plant(
+            &env,
+            &[("plain.txt", b"one\n")],
+            &[("aux.txt", versions(Some(term(PICTURE))))],
+        );
+        put(&env, "plain.txt", b"two\n");
+        assert_eq!(next_step(&env), save);
+    }
 }
 
 #[test]
@@ -298,12 +345,16 @@ fn status_lists_150_conflicts_all() {
     }
     let (shown, _) = run(&env, &["status"], 0);
     let lines: Vec<&str> = shown.lines().collect();
-    assert_eq!(lines[3], "In conflict (150 places):", "{shown}");
+    assert_eq!(
+        lines[1..4],
+        ["", "In conflict (150 places):", ""],
+        "{shown}"
+    );
     let rows: Vec<String> = names
         .iter()
         .map(|n| row(n, 8, "your version, still to decide", 29))
         .collect();
-    assert_eq!(lines[5..], rows, "{shown}");
+    assert_eq!(lines[4..], rows, "{shown}");
 
     let doc = json(&env, &["status"]);
     let listed: Vec<&str> = doc["conflicts"]
@@ -364,6 +415,44 @@ fn changes_marks_a_file_in_conflict() {
 }
 
 #[test]
+fn changes_marks_a_file_below_a_conflict_standing_as_a_folder() {
+    let env = started();
+    let files: [(&str, EntryKind, &[u8]); 1] = [("x.txt", EntryKind::File, MINE)];
+    support::plant_save(env.root(), |pack| {
+        for bytes in [BASE, THEIRS] {
+            pack.add_content(bytes).unwrap();
+        }
+        let folder = support::listings(pack, &files);
+        let record = versions(Some(Term {
+            kind: EntryKind::Folder,
+            id: folder,
+            size: 0,
+        }));
+        support::listings_with_conflicts(pack, &[], &[("dir", &record)])
+    });
+    put(&env, "dir/x.txt", b"mine\nmore\n");
+    let (shown, _) = run(&env, &["changes"], 0);
+    let lines: Vec<&str> = shown.lines().collect();
+    assert_eq!(
+        lines[0],
+        "In conflict: dir/x.txt (compared with what your folder held for it after the last save)",
+        "{shown}"
+    );
+    assert!(
+        lines[1].starts_with("modified  dir/x.txt  +1 -0  "),
+        "{shown}"
+    );
+    let doc = json(&env, &["changes"]);
+    assert_eq!(doc["changes"][0]["path"], "dir/x.txt");
+    assert_eq!(doc["changes"][0]["in_conflict"], true);
+    // status names the place once, and no change.
+    let doc = json(&env, &["status"]);
+    assert_eq!(doc["conflicts"][0]["path"], "dir");
+    assert_eq!(doc["conflicts"][0]["standing"], "changed");
+    assert_eq!(doc["changes"], serde_json::json!([]));
+}
+
+#[test]
 fn a_hostile_path_in_conflict_is_escaped_in_status() {
     let env = started();
     let name = "evil\u{1b}[2J\u{202e}.png";
@@ -382,9 +471,28 @@ fn a_record_that_cant_be_read_stops_status_naming_the_place() {
     let missing = Id([0xab; 32]);
     support::plant_save(env.root(), |pack| {
         let inner = support::add_listing(pack, &["lost.png".into()], EntryKind::Conflict, missing);
-        support::add_listing(pack, &["art".into()], EntryKind::Folder, inner)
+        let a = pack.add_content(b"one\n").unwrap();
+        let top = Listing::new(vec![
+            Entry {
+                name: "a.txt".into(),
+                kind: EntryKind::File,
+                id: a,
+                size: 4,
+            },
+            Entry {
+                name: "art".into(),
+                kind: EntryKind::Folder,
+                id: inner,
+                size: 0,
+            },
+        ])
+        .unwrap();
+        pack.add_record(ObjectKind::FolderListing, &top.encode())
+            .unwrap()
     });
     put(&env, "art/lost.png", b"x");
+    // A change met before the bad place, in path order.
+    put(&env, "a.txt", b"two\n");
     for args in [&["status"][..], &["changes"]] {
         let (shown, said) = run(&env, args, 1);
         assert_eq!(shown, "", "{args:?}");
@@ -418,14 +526,18 @@ fn a_planted_conflict_inside_a_conflict_stops_status_as_damage() {
         support::listings_with_conflicts(pack, &[], &[("outer", &outer)])
     });
     put(&env, "outer/c.png", b"x");
-    let (shown, said) = run(&env, &["status"], 1);
-    assert_eq!(shown, "");
-    assert_eq!(
-        said,
-        "error: outer/c.png is a conflict inside a conflict, which Opalro never writes, so this \
-         project may be damaged.\n\nhint: Nothing was changed. Ask for help before trying to \
-         repair it.\n"
-    );
+    put(&env, "a.txt", b"new\n");
+    for args in [&["status"][..], &["changes"]] {
+        let (shown, said) = run(&env, args, 1);
+        assert_eq!(shown, "", "{args:?}");
+        assert_eq!(
+            said,
+            "error: outer/c.png is a conflict inside a conflict, which Opalro never writes, so \
+             this project may be damaged.\n\nhint: Nothing was changed. Ask for help before \
+             trying to repair it.\n",
+            "{args:?}"
+        );
+    }
 }
 
 #[test]

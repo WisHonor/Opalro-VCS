@@ -1902,6 +1902,115 @@ fn project_text_is_escaped_with_colour_on() {
     assert!(said.contains("evil\\x1b[2J\\u{202e}.png"), "{said}");
 }
 
+/// Plants a save on `main` with a conflict at each of `places`, each standing as the file it names
+/// (with markers when the bool says so).
+#[cfg(feature = "fault-injection")]
+fn plant_conflicts(env: &Env, places: &[(&str, &[u8], bool)]) {
+    use opal_core::conflict::{Own, Record, Term};
+    let term = |bytes: &[u8]| Term {
+        kind: opal_core::listing::EntryKind::File,
+        id: opal_core::id::hash_content(bytes),
+        size: bytes.len() as u64,
+    };
+    let records: Vec<(&str, Record)> = places
+        .iter()
+        .map(|&(path, bytes, marked)| {
+            let own = marked.then(|| Own {
+                version: Some(term(bytes)),
+                marker: 7,
+            });
+            // No bytes: your line has nothing there.
+            let mine = (!bytes.is_empty()).then(|| term(bytes));
+            let record = Record {
+                terms: vec![mine, None, None],
+                own,
+            };
+            (path, record)
+        })
+        .collect();
+    let records: Vec<(&str, &Record)> = records.iter().map(|(p, r)| (*p, r)).collect();
+    support::plant_save(env.root(), |pack| {
+        for (_, bytes, _) in places {
+            pack.add_content(bytes).unwrap();
+        }
+        support::listings_with_conflicts(pack, &[], &records)
+    });
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn status_paints_its_places_in_conflict_and_cuts_their_paths() {
+    let marked: &[u8] = b"<<<<<<< a\nx\n=======\ny\n>>>>>>> b\n";
+    let env = started();
+    let mut places: Vec<(&str, &[u8], bool)> = vec![
+        ("changed.png", b"picture", false),
+        ("fixed.txt", marked, true),
+        ("gone.png", b"", false),
+        ("marked.txt", marked, true),
+        ("yours.png", b"picture", false),
+    ];
+    if cfg!(windows) {
+        places.push(("aux.txt", b"picture", false));
+    }
+    plant_conflicts(&env, &places);
+    put(&env, "changed.png", "painted over");
+    put(&env, "fixed.txt", "x\n");
+    std::fs::write(env.root().join("marked.txt"), marked).unwrap();
+    put(&env, "yours.png", "picture");
+    let out = opal_on_a_terminal(&env, env.root())
+        .arg("status")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let shown = text(&out.stdout);
+    let (yellow, green, dim, blue) = ("\x1b[33m", "\x1b[32m", "\x1b[2m", "\x1b[34m");
+    let mut painted = vec![
+        (yellow, "changed in place, still to decide"),
+        (green, "fixed, not yet recorded"),
+        (dim, "not in your folder, still to decide"),
+        (yellow, "1 marked place left to fix"),
+        (dim, "your version, still to decide"),
+        (blue, "yours.png"),
+        (dim, "(5 places)"),
+    ];
+    if cfg!(windows) {
+        painted.push((dim, "can't be written on this computer, kept as it is"));
+        painted.push((dim, "(6 places)"));
+        painted.retain(|p| p.1 != "(5 places)");
+    }
+    for (code, words) in painted {
+        assert!(
+            shown.contains(&format!("{code}{words}\x1b[0m")),
+            "{words}: {shown:?}"
+        );
+    }
+
+    // On a narrow terminal a place's path loses folders from its middle, as a change's does.
+    let env = started();
+    plant_conflicts(
+        &env,
+        &[("art/very/deep/folder/inside/hero.png", b"picture", false)],
+    );
+    std::fs::create_dir_all(env.root().join("art/very/deep/folder/inside")).unwrap();
+    std::fs::write(
+        env.root().join("art/very/deep/folder/inside/hero.png"),
+        "picture",
+    )
+    .unwrap();
+    let (shown, _) = run_at(&env, Some(60), &["status"]);
+    assert!(
+        shown.contains("\n    art/.../inside/hero.png  your version, still to decide\n"),
+        "{shown}"
+    );
+    let (shown, _) = run_at(&env, None, &["status"]);
+    assert!(
+        shown.contains(
+            "\n    art/very/deep/folder/inside/hero.png  your version, still to decide\n"
+        ),
+        "{shown}"
+    );
+}
+
 /// A name holding an escape character can only be made where the system allows it, and only as a
 /// new file: Opalro shows it escaped, and refuses to save it, since Windows can't hold it.
 #[cfg(all(unix, feature = "fault-injection"))]

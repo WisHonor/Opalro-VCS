@@ -154,35 +154,34 @@ pub fn conflict_rows(s: style::Screen, conflicts: &[ConflictAt]) -> Vec<String> 
         .collect()
 }
 
-/// What `opalro status` says to do next about its places in conflict, a line for each step that
-/// applies; empty when none does.
-pub fn conflicts_next(conflicts: &[ConflictAt]) -> String {
+/// What `opalro status` says to do next about its places in conflict: the first step that
+/// applies, or `None`.
+pub fn conflicts_next(conflicts: &[ConflictAt]) -> Option<String> {
     let any = |f: fn(Standing) -> bool| conflicts.iter().any(|c| f(c.standing));
     let e = style::err();
-    let mut lines = Vec::new();
     if any(|s| s == Standing::Fixed) {
         let resolve = e.command("opalro resolve");
-        lines.push(format!("record what you fixed with: {resolve}"));
+        return Some(format!("record what you fixed with: {resolve}"));
     }
     if any(|s| matches!(s, Standing::Marked { .. })) {
         let resolve = e.command("opalro resolve");
-        lines.push(format!(
-            "Fix the marked places in your editor, then run {resolve}."
+        return Some(format!(
+            "fix the marked places in your editor, then run: {resolve}"
         ));
     }
-    if any(|s| {
+    let version = |s| {
         matches!(
             s,
             Standing::Yours | Standing::ChangedInPlace | Standing::NotInFolder
         )
-    }) {
-        lines.push(format!(
-            "To pick a version: {} (or theirs); to look at theirs first: {}",
+    };
+    any(version).then(|| {
+        format!(
+            "pick a version with: {} (or theirs); to look at theirs first: {}",
             e.command("opalro resolve <path> --keep mine"),
             e.command("opalro resolve <path> --copy theirs --to <file>")
-        ));
-    }
-    lines.join("\n")
+        )
+    })
 }
 
 /// A step undone or redone as JSON (docs/json.md, `opalro undo --json`).

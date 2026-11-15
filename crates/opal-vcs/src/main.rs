@@ -1281,7 +1281,7 @@ fn status_command(json: bool, full: bool, opened: &mut Option<Repository>) -> Re
             }
             Position::AtSave(_) => writeln!(out, "At save {at}, not on a line  {when}")?,
         }
-        if found.changes.is_empty() {
+        if found.changes.is_empty() && found.conflicts.is_empty() {
             writeln!(out, "Nothing changed since then.")?;
         }
         if !found.conflicts.is_empty() {
@@ -1308,13 +1308,17 @@ fn status_command(json: bool, full: bool, opened: &mut Option<Repository>) -> Re
                 writeln!(out, "{}", columns.line(s, row))?;
             }
         }
-        if !found.not_written_here.is_empty() {
+        // A place in conflict kept so already says it in its own row.
+        let not_written: Vec<&String> = (found.not_written_here.iter())
+            .filter(|p| !found.conflicts.iter().any(|c| &c.path == *p))
+            .collect();
+        if !not_written.is_empty() {
             writeln!(
                 out,
                 "\nNot written here, because this computer can't hold them as they are (saves keep \
                  them as they were):\n"
             )?;
-            for path in &found.not_written_here {
+            for path in not_written {
                 let room = s.width.map_or(usize::MAX, |w| w.saturating_sub(4));
                 let path = s.fit_path(&escape(path, false), room);
                 writeln!(out, "    {}", s.paint(style::Role::Path, &path))?;
@@ -1323,14 +1327,14 @@ fn status_command(json: bool, full: bool, opened: &mut Option<Repository>) -> Re
         Ok(())
     })();
     output::ended(None, String::new, &warnings, None)?;
-    let next = output::conflicts_next(&found.conflicts);
-    if !json && !next.is_empty() {
+    let next = output::conflicts_next(&found.conflicts).or_else(|| {
+        (!found.changes.is_empty()).then(|| {
+            let save = style::err().command("opalro save \"describe your change\"");
+            format!("save them with: {save}")
+        })
+    });
+    if let (false, Some(next)) = (json, next) {
         style::next(&next);
-    } else if !json && !found.changes.is_empty() {
-        style::next(&format!(
-            "save them with: {}",
-            style::err().command("opalro save \"describe your change\"")
-        ));
     }
     Ok(())
 }
