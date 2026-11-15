@@ -929,6 +929,33 @@ fn setup_upgrade_yes_turns_it_on() {
     ok(&env, &["status"]);
 }
 
+/// A project from before chunk lists gains `chunks` by itself, as any changing command adds it;
+/// only `conflicts` is offered, and what is said is what was asked.
+#[test]
+fn setup_upgrade_offers_only_conflicts_before_chunk_lists() {
+    for json_out in [false, true] {
+        let env = Env::empty();
+        ok(&env, &["start", "--preset", "custom"]);
+        fs::write(
+            env.root().join(".opalro/format"),
+            "opalro-repository 1\nhash blake3\n",
+        )
+        .unwrap();
+        if json_out {
+            let (code, doc) = json(&env, &["setup", "--upgrade", "--yes"]);
+            assert_eq!(code, Some(0), "{doc}");
+            assert_eq!(doc["result"], "upgraded", "{doc}");
+            assert_eq!(doc["features"], serde_json::json!(["conflicts"]), "{doc}");
+        } else {
+            assert_eq!(
+                ok(&env, &["setup", "--upgrade", "--yes"]),
+                format!("{OFFER}Turned on conflicts: this project can keep conflicts now.\n")
+            );
+        }
+        assert_eq!(format_of(&env), FORMAT_TEXT);
+    }
+}
+
 #[test]
 fn setup_upgrade_with_nothing_to_turn_on_says_so() {
     let env = Env::empty();
@@ -1025,7 +1052,7 @@ fn a_v01_project_never_gains_conflicts_by_itself() {
 #[cfg(feature = "fault-injection")]
 #[test]
 fn an_upgrade_stopped_before_the_rename_leaves_the_project_as_v01_made_it() {
-    let mut last = None;
+    let (mut last, mut before_rename) = (None, 0);
     for n in 1.. {
         assert!(n < 50, "the upgrade never finished");
         let env = v01_project();
@@ -1047,8 +1074,16 @@ fn an_upgrade_stopped_before_the_rename_leaves_the_project_as_v01_made_it() {
             "fault {n}: {format:?}"
         );
         ok(&env, &["status"]);
+        if said.contains("injected crash at write:before-rename") {
+            before_rename += 1;
+        }
         last = Some((said, format));
     }
+    // `lock-info` and `format` share the label, so a stop at each means `format` has its own.
+    assert!(
+        before_rename >= 2,
+        "stopped before a rename {before_rename} times"
+    );
     // The last point the upgrade reaches is its own write of `format`, just before the rename.
     let (said, format) = last.unwrap();
     assert!(

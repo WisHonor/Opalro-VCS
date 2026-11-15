@@ -7,6 +7,7 @@ use opal_core::changes::file_lines;
 use opal_core::diff::{ChangeKind, FileChange};
 use opal_core::listing::EntryKind;
 use opal_core::presets::{Engine, Found, Language, Looked, Preset, suggested};
+use opal_core::repo::CONFLICTS;
 use opal_core::rules::{Rules, RulesRead, size_text};
 use opal_core::setup::RuleFileChange;
 use opal_core::text::{bytes, escape, thousands};
@@ -296,9 +297,9 @@ pub fn upgrade_row(features: &[&str]) -> String {
 /// What a feature allows, in words.
 fn allows(feature: &str) -> &'static str {
     match feature {
-        "conflicts" => "a combine can keep conflicts, and you fix them when you choose.",
-        // Only a project made by a build from before chunk lists lacks it.
-        _ => "big files are stored in chunks, so a changed part is stored once.",
+        CONFLICTS => "a combine can keep conflicts, and you fix them when you choose.",
+        // Only `conflicts` is ever offered; a later feature gets its own words here.
+        _ => "a feature this version of Opalro adds.",
     }
 }
 
@@ -324,17 +325,11 @@ pub fn upgrade_offer(features: &[&str]) -> String {
 /// What `opalro setup --upgrade` says once it turned `features` on.
 pub fn upgraded(features: &[&str]) -> String {
     let s = style::out();
-    let mut text = format!(
-        "{} {}: this project can",
-        s.paint(Role::Ok, "Turned on"),
-        features.join(", ")
-    );
-    if features.contains(&"conflicts") {
-        text += " keep conflicts now.\n";
-    } else {
-        text += " use them now.\n";
+    let mut text = format!("{} {}", s.paint(Role::Ok, "Turned on"), features.join(", "));
+    if features.contains(&CONFLICTS) {
+        text += ": this project can keep conflicts now";
     }
-    text
+    text + ".\n"
 }
 
 /// A rule's pattern, escaped. One that holds a space of any kind or a double quote is between

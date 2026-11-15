@@ -1304,12 +1304,22 @@ impl Repository {
 
     /// `.opalro/format` as it is on disk now.
     fn read_format(&self) -> Result<FormatInfo, RepoError> {
+        self.read_format_if_there()?
+            .ok_or_else(|| damaged("the format file is missing"))
+    }
+
+    /// `read_format`, or `None` when there is no `format` yet.
+    fn read_format_if_there(&self) -> Result<Option<FormatInfo>, RepoError> {
         let (name, max) = ("format", safe_fs::MAX_FORMAT_BYTES);
         let shown = self.opalro.join(name);
-        let bytes = safe_fs::read_capped_in(&self.held.opalro, OsStr::new(name), &shown, max)
-            .map_err(refused)?;
+        let bytes = match safe_fs::read_capped_in(&self.held.opalro, OsStr::new(name), &shown, max)
+        {
+            Ok(bytes) => bytes,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(refused(e)),
+        };
         let text = String::from_utf8(bytes).map_err(|_| damaged("the format file is not text"))?;
-        parse_format(&text)
+        parse_format(&text).map(Some)
     }
 
     /// Whether this project keeps conflicts: its `format` lists `feature conflicts`. The only
@@ -1320,11 +1330,12 @@ impl Repository {
     }
 
     /// The features this version knows that the project doesn't list, in `FEATURES`' order.
+    /// Never `chunks`: any changing command adds that one by itself, so there is nothing to ask.
     #[must_use]
     pub fn features_to_turn_on(&self) -> Vec<&'static str> {
         FEATURES
             .into_iter()
-            .filter(|f| !self.format.features.contains(*f))
+            .filter(|f| *f != CHUNKS && !self.format.features.contains(*f))
             .collect()
     }
 
@@ -1334,8 +1345,7 @@ impl Repository {
         &mut self,
         lock: &ChangeLock,
     ) -> Result<Vec<&'static str>, RepoError> {
-        // Another command may have changed it since the project was opened.
-        self.format = self.read_format()?;
+        // `lock_for_change` read `format` again, so this is the file as it is now.
         let new = self.features_to_turn_on();
         if new.is_empty() {
             return Ok(new);
@@ -1732,6 +1742,11 @@ impl Repository {
         // Only ever a hint to a waiting command, so not flushed.
         fsio::write_unflushed(&held.tmp, &held.state, name, info.as_bytes())
             .map_err(|e| cant_write(self.state_dir().join(name), e))?;
+        // Another command may have changed `format` since this handle was opened. A project
+        // being started has none yet.
+        if let Some(format) = self.read_format_if_there()? {
+            self.format = format;
+        }
         // Before anything is stored: builds from before chunk lists must refuse this project now.
         // Every other feature the project lists stays, and none but `chunks` is added.
         if !self.format.features.contains(CHUNKS) {
@@ -2165,6 +2180,28 @@ mod tests {
         assert_eq!(std::fs::read_to_string(&format).unwrap(), FORMAT_TEXT);
         assert!(repo.keeps_conflicts());
         assert!(Repository::open(dir.path()).unwrap().keeps_conflicts());
+    }
+
+    /// A command that opened the project before an upgrade, and takes the lock after it, sees the
+    /// file as it is then: the `chunks` step keeps `conflicts`, and the command keeps conflicts.
+    #[test]
+    fn the_format_is_read_again_once_the_lock_is_held() {
+        let dir = tempdir();
+        drop(Repository::init(dir.path(), &entry(0).who).unwrap());
+        let format = format_path(dir.path());
+        std::fs::write(&format, OLDER_FORMAT).unwrap();
+        let mut waiting = Repository::open(dir.path()).unwrap();
+        let mut upgrading = Repository::open(dir.path()).unwrap();
+        // Offered `conflicts` only: `chunks` comes by itself.
+        assert_eq!(upgrading.features_to_turn_on(), [CONFLICTS]);
+        let lock = upgrading.lock_for_change("setup", &mut |_| {}).unwrap();
+        assert_eq!(upgrading.turn_on_features(&lock).unwrap(), [CONFLICTS]);
+        drop(lock);
+        assert_eq!(std::fs::read_to_string(&format).unwrap(), FORMAT_TEXT);
+        assert!(!waiting.keeps_conflicts());
+        drop(waiting.lock_for_change("save", &mut |_| {}).unwrap());
+        assert_eq!(std::fs::read_to_string(&format).unwrap(), FORMAT_TEXT);
+        assert!(waiting.keeps_conflicts());
     }
 
     #[test]
