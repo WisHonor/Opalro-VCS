@@ -357,9 +357,24 @@ pub fn act_point(label: &'static str) {
     let _ = label;
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread has opened each project file to read it, by path.
+    static OPENED: std::cell::RefCell<std::collections::HashMap<String, usize>> =
+        std::cell::RefCell::default();
+}
+
+/// How many times this thread has opened the project file at `path` to read it.
+#[cfg(test)]
+pub(crate) fn opened(path: &str) -> usize {
+    OPENED.with_borrow(|o| o.get(path).copied().unwrap_or(0))
+}
+
 /// Where a project file at `path` is opened to be read. A test can make it fail
 /// (`fault::unreadable`) to prove Opalro doesn't open a file. Does nothing without `fault-injection`.
 pub fn open_point(path: &str) -> io::Result<()> {
+    #[cfg(test)]
+    OPENED.with_borrow_mut(|o| *o.entry(path.to_owned()).or_default() += 1);
     #[cfg(feature = "fault-injection")]
     {
         fault::opening(path)

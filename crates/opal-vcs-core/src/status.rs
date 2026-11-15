@@ -49,7 +49,8 @@ pub struct ConflictAt {
     pub terms: usize,
     /// What the folder shows there, and whether the record has a version of its own: what
     /// `resolve` decides by, which `standing` alone can't tell apart.
-    pub(crate) seen: Seen,
+    /// `None` for a place this computer can't hold, which the folder can't show.
+    pub(crate) seen: Option<Seen>,
     pub(crate) has_own: bool,
 }
 
@@ -127,7 +128,8 @@ pub(crate) fn each_difference<E: From<StoreError>>(
     mut each: impl FnMut(Difference<'_>) -> Result<(), E>,
 ) -> Result<(), E> {
     let (store, keeps) = (repo.store(), repo.keeps_conflicts());
-    // The places standing as folders whose paths may still come, each with a `/` after it.
+    // The places with a folder on either side whose paths may still come, each with a `/` after
+    // it: what is below them is theirs.
     let mut folders: Vec<String> = Vec::new();
     for_each_entry_change_in(store, &now.listings, Some(root), now.root, |path, o, n| {
         folders.retain(|f| path.starts_with(f.as_str()) || path < f.as_str());
@@ -138,7 +140,8 @@ pub(crate) fn each_difference<E: From<StoreError>>(
             return change_at(path, o, n).map_or(Ok(()), |c| each(Difference::File(c)));
         };
         let record = record_at(store, records, path, &o.id)?;
-        if stands_as(record).is_some_and(|t| t.kind == EntryKind::Folder) {
+        let folder = |kind: Option<EntryKind>| kind == Some(EntryKind::Folder);
+        if folder(stands_as(record).map(|t| t.kind)) || folder(n.map(|e| e.kind)) {
             folders.push(format!("{path}/"));
         }
         each(Difference::Conflict {
@@ -179,6 +182,7 @@ fn markers_at(disk: &mut Option<Folders>, root: &Path, path: &str, len: u8) -> i
     };
     let (up, name) = path.rsplit_once('/').unwrap_or(("", path));
     disk.enter(up)?;
+    crate::fsio::open_point(path)?;
     let mut file = disk.here().open_file(OsStr::new(name))?;
     markers::scan(&mut file, len)
 }
@@ -218,7 +222,7 @@ fn conflict_at(
         record: id,
         standing,
         terms: record.terms.len(),
-        seen,
+        seen: Some(seen),
         has_own: record.own.is_some(),
     })
 }
@@ -284,7 +288,7 @@ pub fn status(
             record: *id,
             standing: Standing::NotHere,
             terms: record.terms.len(),
-            seen: Seen::Untouched,
+            seen: None,
             has_own: record.own.is_some(),
         });
     }
@@ -437,7 +441,7 @@ pub(crate) mod tests {
         write(root, "kept.png", b"theirs");
         let s = status_of(&repo);
         assert_eq!(rows(&s), [("kept.png", Standing::ChangedInPlace)]);
-        assert!(s.conflicts[0].has_own && s.conflicts[0].seen == Seen::Untouched);
+        assert!(s.conflicts[0].has_own && s.conflicts[0].seen == Some(Seen::Untouched));
     }
 
     #[test]
@@ -477,7 +481,10 @@ pub(crate) mod tests {
         for n in &names {
             write(dir.path(), n, b"picture");
         }
+        let asked = repo.store().conflicts_read();
         let s = status_of(&repo);
+        // One record at 150 places is read once.
+        assert_eq!(repo.store().conflicts_read() - asked, 1);
         assert_eq!(s.conflicts.len(), 150);
         assert!(s.conflicts.iter().all(|c| c.standing == Standing::Yours));
         let paths: Vec<&str> = s.conflicts.iter().map(|c| c.path.as_str()).collect();
@@ -612,6 +619,47 @@ pub(crate) mod tests {
         assert!(full.is_err());
     }
 
+    /// Sets the file at `rel` back a minute, so the file cache trusts what it learns of it.
+    #[cfg(feature = "fault-injection")]
+    fn age(root: &Path, rel: &str) {
+        let old = std::time::SystemTime::now() - std::time::Duration::from_secs(60);
+        let file = std::fs::File::options().write(true).open(root.join(rel));
+        file.unwrap().set_modified(old).unwrap();
+    }
+
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn a_marked_text_is_read_once_a_status_to_count_its_places() {
+        use crate::fsio::{fault, opened};
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        keep(&mut repo, &[b"mine\n", b"base", b"theirs", MARKED]);
+        plant_conflicted(&mut repo, &[], &[("story.txt", marked())]);
+        write(root, "story.txt", MARKED);
+        age(root, "story.txt");
+        status_of(&repo);
+        // The cache vouches for it, so only the count of its places reads it, once.
+        let before = opened("story.txt");
+        let s = status_of(&repo);
+        assert_eq!(opened("story.txt") - before, 1);
+        assert_eq!(rows(&s), [("story.txt", Standing::Marked { left: 2 })]);
+        fault::unreadable(Some("story.txt"));
+        let refused = status(&repo, false, None);
+        fault::unreadable(None);
+        assert!(refused.is_err());
+        // Fixed and saved, the place is no longer in conflict: the file isn't opened.
+        let fixed: &[u8] = b"a\nmine\nb\nmine 2\n";
+        plant_save(&mut repo, &[("story.txt", EntryKind::File, fixed)]);
+        write(root, "story.txt", fixed);
+        age(root, "story.txt");
+        status_of(&repo);
+        fault::unreadable(Some("story.txt"));
+        let s = status(&repo, false, None);
+        fault::unreadable(None);
+        let s = s.unwrap();
+        assert!(s.conflicts.is_empty() && s.changes.is_empty());
+    }
+
     #[test]
     fn a_conflict_standing_as_a_folder_is_compared_with_that_folder() {
         let (dir, mut repo) = project();
@@ -629,17 +677,55 @@ pub(crate) mod tests {
             size: 0,
         };
         keep(&mut repo, &[b"base", b"theirs"]);
-        plant_conflicted(&mut repo, &[], &[("dir", versions(Some(folder)))]);
+        let beside: &[(&str, EntryKind, &[u8])] = &[
+            ("dir-2/x", EntryKind::File, b"x"),
+            ("dir.txt", EntryKind::File, b"t"),
+            ("dir0", EntryKind::File, b"0"),
+        ];
+        plant_conflicted(&mut repo, beside, &[("dir", versions(Some(folder)))]);
         write(root, "dir/a.txt", b"a");
         write(root, "dir/sub/b.txt", b"b");
+        for (p, _, b) in beside {
+            write(root, p, b);
+        }
         let s = status_of(&repo);
         assert_eq!(rows(&s), [("dir", Standing::Yours)]);
         assert!(s.changes.is_empty(), "{:?}", s.changes);
         write(root, "dir/sub/b.txt", b"b, changed");
         write(root, "dir/new.txt", b"new");
+        // What is beside the place, before and after it by path, is still listed.
+        for (p, _, _) in beside {
+            write(root, p, b"changed");
+        }
         let s = status_of(&repo);
         assert_eq!(rows(&s), [("dir", Standing::ChangedInPlace)]);
-        assert!(s.changes.is_empty(), "{:?}", s.changes);
+        assert_eq!(changed(&s), ["dir-2/x", "dir.txt", "dir0"]);
+    }
+
+    #[test]
+    fn a_record_naming_another_kind_is_damage_at_its_place() {
+        // Standing as a folder, it names a file's content.
+        let (dir, mut repo) = project();
+        keep(&mut repo, &[b"picture", b"base", b"theirs"]);
+        let wrong = Term {
+            kind: EntryKind::Folder,
+            id: file_of(b"picture").id,
+            size: 0,
+        };
+        let record = versions(Some(wrong));
+        let id = record.id();
+        plant_conflicted(&mut repo, &[], &[("art/hero", record)]);
+        write(dir.path(), "art/hero/x.png", b"x");
+        let e = status(&repo, false, None).unwrap_err();
+        let want = format!(
+            "The conflict at art/hero can't be read (record {}): object ",
+            id.short_hex()
+        );
+        assert!(e.to_string().starts_with(&want), "{e}");
+        assert_eq!(
+            e.hint_when_reading().as_deref(),
+            Some("Nothing was changed. Ask for help before trying to repair it.")
+        );
     }
 
     #[test]

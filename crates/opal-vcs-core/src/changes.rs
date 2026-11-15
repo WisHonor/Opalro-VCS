@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use similar::algorithms::{Capture, Replace, myers};
 use similar::{DiffOp, DiffTag, group_diff_ops};
 
-use crate::conflict::stands_as;
+use crate::conflict::{self, stands_as};
 use crate::diff::{ChangeKind, change_at, for_each_change, for_each_change_between};
 use crate::history::tip_of;
 use crate::id::Id;
@@ -235,10 +235,10 @@ pub fn unsaved_changes<E: From<SaveError> + From<StoreError>>(
         Difference::File(c) => emit(PathChange::from(c)),
         Difference::Conflict {
             path,
+            id,
             record,
             now: here,
-            ..
-        } => {
+        } => (|| {
             // Against what it stands as: a folder file by file, as one save against another.
             let name = path.rsplit_once('/').map_or(path, |(_, name)| name);
             let was = stands_as(record).map(|t| Entry {
@@ -265,7 +265,12 @@ pub fn unsaved_changes<E: From<SaveError> + From<StoreError>>(
                 c.path = format!("{path}/{}", c.path);
                 emit(c)
             })
-        }
+        })()
+        // What the record names that can't be read is damage at its place.
+        .map_err(|stopped| match stopped {
+            Stopped::Reading(e) => Stopped::Reading(conflict::at_place(path, &id, e)),
+            each => each,
+        }),
     });
     // A spelling of `.opalro` met reading is in the save the project is on, as for `status`.
     walked.map_err(|stopped| match stopped {
@@ -711,6 +716,66 @@ mod tests {
         })
         .unwrap();
         assert_eq!(paths, ["plain.txt"]);
+    }
+
+    #[test]
+    fn a_folder_at_a_conflicts_place_is_listed_once() {
+        use crate::conflict::tests::{file_of, plant_conflicted};
+        use crate::status::tests::{keep, project, versions, write};
+        let (dir, mut repo) = project();
+        keep(&mut repo, &[b"mine\n", b"base", b"theirs"]);
+        // One standing as a file, one standing as nothing: a folder made at each.
+        let conflicts = [
+            ("gone.txt", versions(None)),
+            ("notes.txt", versions(Some(file_of(b"mine\n")))),
+        ];
+        plant_conflicted(&mut repo, &[], &conflicts);
+        write(dir.path(), "gone.txt/b.txt", b"b\n");
+        write(dir.path(), "notes.txt/a.txt", b"a\n");
+        let mut seen = Vec::new();
+        unsaved_changes::<SaveError>(&repo, None, None, &mut |path, c, _| {
+            seen.push((path.to_owned(), c.change, c.in_conflict));
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(
+            seen,
+            [
+                ("gone.txt/b.txt".to_owned(), ChangeKind::Added, true),
+                ("notes.txt".to_owned(), ChangeKind::Removed, true),
+                ("notes.txt/a.txt".to_owned(), ChangeKind::Added, true),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_version_naming_another_kind_is_damage_at_its_place() {
+        use crate::conflict::Term;
+        use crate::conflict::tests::{file_of, plant_conflicted};
+        use crate::status::tests::{keep, project, versions, write};
+        let (dir, mut repo) = project();
+        let held =
+            crate::test_support::plant_save(&mut repo, &[("dir/a.txt", EntryKind::File, b"a\n")]);
+        keep(&mut repo, &[b"base", b"theirs"]);
+        // Standing as a file, it names a folder's listing.
+        let wrong = Term {
+            kind: EntryKind::File,
+            id: held.get("dir").unwrap().id,
+            size: 3,
+        };
+        let record = versions(Some(wrong));
+        let id = record.id();
+        plant_conflicted(&mut repo, &[], &[("notes.txt", record)]);
+        write(dir.path(), "notes.txt", b"new\n");
+        let e = unsaved_changes::<SaveError>(&repo, None, None, &mut |_, _, _| Ok(()))
+            .unwrap_err()
+            .to_string();
+        let want = format!(
+            "The conflict at notes.txt can't be read (record {}): ",
+            id.short_hex()
+        );
+        assert!(e.starts_with(&want), "{e}");
+        assert_ne!(file_of(b"new\n").id, held.get("dir").unwrap().id);
     }
 
     #[test]

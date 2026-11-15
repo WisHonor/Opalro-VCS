@@ -859,7 +859,15 @@ impl WalkState {
         let at = above.as_ref().and_then(|l| l.get(name));
         let conflict = at.is_some_and(|e| e.kind == EntryKind::Conflict);
         let saved = match at.and_then(|e| as_it_stands(e, &self.records)) {
-            Some(e) if e.kind == EntryKind::Folder => Some((e.id, base.listing(e.id)?)),
+            Some(e) if e.kind == EntryKind::Folder => {
+                // What a record names is the record's: it is damage at its place.
+                let record = at.filter(|_| conflict).map(|c| c.id);
+                let read = base.listing(e.id).map_err(|err| match record {
+                    Some(r) => conflict::at_place(rel, &r, err),
+                    None => err,
+                });
+                Some((e.id, read?))
+            }
             _ => None,
         };
         let listing = match saved {

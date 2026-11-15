@@ -5,7 +5,9 @@ use std::io;
 use crate::encoding::{DecodeError, Reader, Writer};
 use crate::id::{Flavor, Id, hash_record};
 use crate::listing::EntryKind;
-use crate::store::StoreError;
+use crate::repo::RepoError;
+use crate::snapshot::SaveError;
+use crate::store::{StoreError, is_damage};
 use crate::text::escape;
 
 pub(crate) mod markers;
@@ -181,20 +183,37 @@ pub(crate) fn seen(
 }
 
 /// `e`, met reading the record `id` of the conflict `at` (`at <path>`, or its name in a folder
-/// listing), as the damage it is.
+/// listing), or reading a version it names, as the damage it is. What isn't damage, such as an
+/// I/O error, stays itself.
 pub(crate) fn unreadable(at: &str, id: &Id, e: StoreError) -> StoreError {
+    let unread = |e: &dyn std::fmt::Display| {
+        format!(
+            "The conflict {at} can't be read (record {}): {}.",
+            id.short_hex(),
+            escape(&e.to_string(), false)
+        )
+    };
     StoreError::DamagedConflict(match e {
         StoreError::RecordTooLarge { .. } => format!(
             "The conflict {at} names a record over 16 KiB, which Opalro never writes, so this \
              project may be damaged."
         ),
         StoreError::DamagedConflict(said) => said,
-        e => format!(
-            "The conflict {at} can't be read (record {}): {}.",
-            id.short_hex(),
-            escape(&e.to_string(), false)
-        ),
+        e @ (StoreError::Missing(_) | StoreError::WrongKind { .. } | StoreError::Decode(_)) => {
+            unread(&e)
+        }
+        StoreError::Pack(p) if is_damage(&p) => unread(&p),
+        e => return e,
     })
+}
+
+/// `e`, met at the conflict at `path` (record `id`) reading a version it names, as `unreadable`
+/// tells it.
+pub(crate) fn at_place(path: &str, id: &Id, e: SaveError) -> SaveError {
+    match e {
+        SaveError::Repo(RepoError::Store(e)) => unreadable(&at_path(path), id, e).into(),
+        e => e,
+    }
 }
 
 /// A conflict met inside a folder another conflict stands as, `place` naming it.
@@ -517,6 +536,22 @@ pub(crate) mod tests {
             said,
             "The conflict at art/\\x1b.png names a record over 16 KiB, which Opalro never writes, \
              so this project may be damaged."
+        );
+    }
+
+    #[test]
+    fn only_damage_is_damage_at_a_conflicts_place() {
+        let id = Id([3; 32]);
+        let at = at_path("a.png");
+        let io = StoreError::Pack(crate::pack::PackError::Io(io::Error::other("busy")));
+        assert!(matches!(unreadable(&at, &id, io), StoreError::Pack(_)));
+        let missing = unreadable(&at, &id, StoreError::Missing(Id([4; 32])));
+        let StoreError::DamagedConflict(said) = missing else {
+            panic!("not damage");
+        };
+        assert!(
+            said.starts_with("The conflict at a.png can't be read (record 030303030303): "),
+            "{said}"
         );
     }
 

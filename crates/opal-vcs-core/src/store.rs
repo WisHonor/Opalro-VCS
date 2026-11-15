@@ -20,9 +20,6 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
-/// Why a copy of a conflict record its index says is too large is bad.
-const OVER_RECORD_LIMIT: &str = "a conflict record over the 16384 bytes one may take";
-
 /// Packs kept open between lookups, the last ones used: with the folders a walk holds, few enough
 /// for any system's limit on open files.
 const MAX_OPEN: usize = 16;
@@ -837,7 +834,8 @@ impl Store {
     }
 
     /// The conflict record `id`, checked against its fingerprint and decoded; a copy whose index
-    /// says it is over `MAX_RECORD_BYTES` is refused before it is unpacked, and remembered as bad.
+    /// says it is over `MAX_RECORD_BYTES` is refused before it is unpacked. Such a copy says
+    /// nothing of the rest of its pack, so the pack isn't marked: it is refused by its size again.
     pub fn conflict(&self, id: &Id) -> Result<conflict::Record, StoreError> {
         #[cfg(test)]
         counted::conflict();
@@ -847,22 +845,15 @@ impl Store {
         let bytes = self
             .first_good(id, ObjectKind::Conflict, false, |pack, entry| {
                 if entry.uncompressed_size > conflict::MAX_RECORD_BYTES {
-                    return Err(PackError::Corrupt {
-                        path: pack.path().to_owned(),
-                        reason: OVER_RECORD_LIMIT.to_owned(),
-                    });
+                    return Err(PackError::TooLarge);
                 }
                 pack.read_record(entry)
             })
             .map_err(|e| match e {
-                StoreError::Pack(PackError::Corrupt { reason, .. })
-                    if reason == OVER_RECORD_LIMIT =>
-                {
-                    StoreError::RecordTooLarge {
-                        id: *id,
-                        limit: conflict::MAX_RECORD_BYTES,
-                    }
-                }
+                StoreError::Pack(PackError::TooLarge) => StoreError::RecordTooLarge {
+                    id: *id,
+                    limit: conflict::MAX_RECORD_BYTES,
+                },
                 e => e,
             })?;
         Ok(conflict::Record::decode(&bytes)?)
@@ -3160,16 +3151,15 @@ mod tests {
         );
         assert!(refused.to_string().contains(&id.to_hex()), "{refused}");
         assert_eq!(counted::unpacked(), unpacked);
-        // The copy is bad from now on, and the pack's warning says why.
-        assert!(store.conflict(&id).is_err());
+        // Read again, it is refused the same way, still unpacked never; its pack isn't suspect.
+        let again = store.conflict(&id).unwrap_err();
+        assert!(
+            matches!(again, StoreError::RecordTooLarge { id: named, .. } if named == id),
+            "{again:?}"
+        );
         assert_eq!(counted::unpacked(), unpacked);
-        let said: Vec<String> = store
-            .damaged_packs()
-            .iter()
-            .map(ToString::to_string)
-            .collect();
-        assert!(said.iter().any(|s| s.contains("16384")), "{said:?}");
-        // One within the limit is unpacked and read.
+        assert!(store.damaged_packs().is_empty());
+        // One within the limit, in the same pack, is unpacked and read.
         store.conflict(&fits).unwrap();
         assert_eq!(counted::unpacked(), unpacked + 1);
     }
