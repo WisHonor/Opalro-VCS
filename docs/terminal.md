@@ -138,6 +138,7 @@ Every stop is an `error:` whose `hint:` names the flag.
 - `opalro help` and `opalro --help` end with exit code 0. `opalro` alone prints the same screen, also on stdout, and ends with 2, as before milestone 6: a command line with no command is one Opalro couldn't use.
 - `opalro help <command>` and `opalro <command> --help` print the same page: `opalro <command>: ` and the command's one-line description, then `Examples` (each a command line, then what it does, the lines padded to the longest), `Usage`, `Forms` (when the command has forms, as `opalro line new` is one of `opalro line`'s), `Arguments` (when the command takes any) and `Options`, each a title on a line of its own, its lines under it flush left, one line each. A command with forms lists them under `Forms`, each with its usage naming its own options (`opalro line delete [--yes] <NAME>`), then its one-line description, padded as the examples are; each of a form's own options is explained on a line under it, indented. `Options` holds only what the command itself takes. The usage, the forms, the arguments and the options are read from the command line's own definitions, so only options the command or form really takes are listed. Every example is a command line Opalro takes.
 - Git's words appear nowhere in help. A command line Opalro can't use (an unknown command or option) gets the command-line reader's own message on stderr and exit code 2, as before.
+- **Git's words for a combine** (the guide's §9 has every word). `merge` runs `combine`, and its one-time hint is `in Opalro, merge is combine: opalro combine <line>`, then `A combine keeps conflicts and still ends with 0;` and `opalro combine --only-if-clean <line> stops instead.` on lines of their own. Explained on stderr, each with exit code 2 and nothing changed: `merge --abort` as `` `opalro undo` takes back the last combine, conflicts and all. ``; `merge --continue` as `` `opalro combine` is done as soon as it runs. `` then `` `opalro resolve` records the conflicts you fixed. ``; `checkout --ours` and `restore --ours` (the option anywhere after the word) as `` `opalro resolve <file> --keep mine` takes your version of a file in conflict. ``; `checkout --theirs` and `restore --theirs` as `` `opalro resolve <file> --keep theirs` takes the other line's version `` then `of a file in conflict.`; `mergetool` as `Opalro starts no other program: fix the file in your editor,`, `or copy a version out to look at with`, `` `opalro resolve <file> --copy theirs --to <somewhere>`. ``; and `add` gains a last line, `` After a combine, `opalro resolve <file>` records a file you fixed. `` `<file>` and `<somewhere>` are written as they are, never filled with what was typed.
 - Help is plain text on stdout, with section titles in bold on a terminal, and nothing else styled. It is never wrapped or cut: it reads the same at any width and in a pipe.
 
 ## 12. Each command
@@ -311,6 +312,7 @@ While it works, a terminal's stderr shows the turning mark `Saving` (§8).
 
 - **A file's header:** the kind, the path, `+N -M` (lines added and removed) for a text file, then what it holds in brackets, as in `opalro status`: `modified  Assets/Player.cs  +2 -1  (6 B → 7 B)`. A file shown without lines says why after it (`(binary: no lines shown)`, `(over 64 MiB: no lines shown)`, `(over 1,000,000 lines: no lines shown)`), and a line-ending-only change says so (`(only line endings changed: LF to CRLF)`).
 - **A file in conflict** (at a place in conflict, or below one standing as a folder) is compared with what the conflict stands as, and its header comes after the line `In conflict: <path> (compared with what your folder held for it after the last save)`, the path blue. `--save` shows no such line.
+- **With `--save`, a place whose conflict the save made, changed or fixed** has the kind `in conflict`, `still in conflict` or `conflict fixed`, as in `opalro show`, and its header is the kind and the path alone: no lines are compared for it, nothing is read for it, and no hunks follow. In a project whose `.opalro/format` doesn't list `conflicts`, these kinds never appear.
 - **Hunks** are standard: `@@ -a,b +c,d @@`, three lines of context, `(CRLF)` after a line of a pair that differs only in its ending.
 - **Between files:** on a terminal the dim `─` rule, one column short of the width and at most 100 long; without a terminal an empty line, as no line of a file can be one and a rule of `-` could pass for a removed line.
 - **Colour:** the kind as in `opalro status`, the path blue, `+N` and `+` lines green, `-M` and `-` lines red, `@@` lines cyan, the bracket dim. Context lines have none.
@@ -357,7 +359,20 @@ then, on a terminal, `Next: see its lines with: opalro changes --save <id>` when
 - **An ID inside a hint's command** is always one the command takes from where the project is, worked out by asking the resolver: the save's short change ID when the save is on the line the project is on, otherwise the first 12 hex digits of its fingerprint when those reach it. When neither reaches it, `show` leaves its `Next:` line out, and `unshelf`'s hint says instead that `opalro goto can't reach the save it was made on`, and that `opalro undo --list` shows the steps that can bring it back.
 - **The message** after its first line is indented 8, so no line of it can pass for a change row, which is indented 4; its blank lines stay blank.
 - **The changes** are rows as in `opalro status`, after `N files changed:`; `No files changed.` when there are none. The columns are measured by the walk that checks the save before anything is printed; a path cut on a terminal leaves its column as wide as the terminal lets it be.
-- **Colour:** IDs magenta and bold, the line and tag names blue, the fingerprints blue, the rows as in `opalro status`, the times in brackets dim.
+- **Conflicts** ([decision 179](decisions/179-every-command-and-a-conflict.md)), in a project that keeps them: a place whose entry is a conflict in the save and wasn't in its first parent is `in conflict`; one that is a conflict on both sides, with another record, `still in conflict`; one that was a conflict and isn't any more (a file, a folder, or nothing) `conflict fixed`. Such a row holds nothing after its path. After the rows, an empty line, then for each count that isn't 0, in this order: `3 places became conflicts in this save.` (`1 place became a conflict in this save.`), `2 places stayed in conflict, with another version.` (`1 place stayed …`), `2 conflicts were fixed in this save.` (`1 conflict was fixed …`). The counts come from the same walk as the rows; no record is read. A save with none of them prints nothing more, and in a project whose `.opalro/format` doesn't list `conflicts` a conflict's entry shows as in v0.1 (`added`, `kind changed`…, its kind `conflict`).
+
+```text
+3 files changed:
+
+    still in conflict  a.txt
+    conflict fixed     d.txt
+    still in conflict  pic.png
+
+2 places stayed in conflict, with another version.
+1 conflict was fixed in this save.
+```
+
+- **Colour:** IDs magenta and bold, the line and tag names blue, the fingerprints blue, the rows as in `opalro status` (`in conflict` and `still in conflict` yellow, `conflict fixed` green), the times in brackets dim.
 
 ### `opalro goto`
 

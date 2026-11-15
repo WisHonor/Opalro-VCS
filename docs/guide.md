@@ -1366,22 +1366,28 @@ hint: in Opalro, commit is save; it takes new files too: opalro save "message"
 | `git fsck` | `opalro verify` | runs |
 | `git gc` | `opalro tidy` | runs |
 | `git restore` | `opalro discard <paths>` | explained, never run |
-| `git add` | nothing: `opalro save` takes every change | explained |
+| `git add` | nothing: `opalro save` takes every change; after a combine, `opalro resolve <file>` records a file you fixed | explained |
 | `git rm`, `git mv` | delete or move the file itself | explained |
 | `git reset` | `opalro undo`, `opalro discard` or `opalro goto <save>` | explained |
 | `git branch <name>`; `git checkout -b`, `git switch -c` with a starting point | `opalro goto <save>`, then `opalro line new <name>` | explained |
 | `git revert` | `opalro reverse`, in v0.3; until then `opalro undo` | explained |
-| `git merge <target>` | `opalro combine <target>` | runs; `merge --abort`, `--no-ff`, `--squash` and more than one line are explained, and other options refused |
+| `git merge <target>` | `opalro combine <target>` | runs; `merge --no-ff`, `--squash` and more than one line are explained, and other options refused |
+| `git merge --abort` | `opalro undo`, which takes back the last combine, conflicts and all | explained |
+| `git merge --continue` | nothing to continue: `opalro resolve` records the conflicts you fixed | explained |
+| `git checkout --ours <file>`, `git restore --ours <file>` | `opalro resolve <file> --keep mine` | explained |
+| `git checkout --theirs <file>`, `git restore --theirs <file>` | `opalro resolve <file> --keep theirs` | explained |
+| `git mergetool` | your own editor; `opalro resolve <file> --copy theirs --to <somewhere>` copies a version out to look at | explained |
 | `git blame` | not yet; until then `opalro history` | explained |
 | `git rebase`, `cherry-pick` | not yet: moving saves between lines comes after v0.2; until then `opalro save --amend` or `opalro undo` | explained |
 | `git clone`, `fetch`, `pull`, `push`, `remote` | coming in v0.3 | explained |
 | `git clean` | none: Opalro never deletes files it doesn't keep | explained |
 
-"Runs" means `opalro commit -m "message"` really saves. "Explained" means Opalro prints two or three lines saying what to type instead, does nothing else, and ends with exit code 2 (a number every command hands back when it ends, which scripts read: 0 means it worked; see [Scripts](#12-scripts)). For example, `opalro add` prints:
+"Runs" means `opalro commit -m "message"` really saves. "Explained" means Opalro prints one to three lines saying what to type instead, does nothing else, and ends with exit code 2 (a number every command hands back when it ends, which scripts read: 0 means it worked; see [Scripts](#12-scripts)). For example, `opalro add` prints:
 
 ```text
 Opalro has no staging step: `opalro save` saves every change, new files too.
 To save only some files, name them: `opalro save "message" <paths>`
+After a combine, `opalro resolve <file>` records a file you fixed.
 ```
 
 A Git word runs only in the forms that mean in Opalro what they mean in Git; any other form is explained, rather than run as something you didn't mean. So `commit` runs only with `-m` or `--message`, or with options alone (`opalro commit --amend`); `opalro commit "message"` without `-m`, or a path without a message, is explained. `stash` runs only as `stash`, `stash push`, `stash pop`, `stash pop <number>` and `stash list`; `stash apply` and the rest are explained. `checkout -b <name>` and `switch -c <name>` run only with the name alone; with a starting point they are explained, as is `branch <name>`, which in Git makes the branch and stays where you are, while `opalro line new` moves onto the new line.
@@ -1397,6 +1403,7 @@ A Git word runs only in the forms that mean in Opalro what they mean in Git; any
   ```
 - **`restore` is explained, never run.** The command is `opalro discard`, and it removes new files too, which Git's `restore` never does. It keeps a safety copy first, and `opalro undo` brings everything back. Because it reaches further than Git's word, Opalro runs it only by its own name.
 - **Undo covers everything,** including goto, discard and shelf, with one `opalro undo`.
+- **`opalro merge` ends with 0 even when it keeps conflicts,** as `opalro combine` does: the combined save is made, and you fix the conflicts when you choose. A script that runs `git merge x && build` would go on to build; give it `opalro combine --only-if-clean x`, which stops (exit code 1) instead of keeping a conflict. The first `opalro merge` says so in its hint.
 
 ## 10. Looking after a project
 

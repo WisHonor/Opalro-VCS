@@ -209,7 +209,7 @@ Saving gives one of two documents, told apart by `result`.
 
 | Field | Type | Meaning |
 |---|---|---|
-| `content` | string | `"text"`; `"binary"`, when either side has a zero byte in its first 8,000 bytes; `"too_big"`, when either side is over 64 MiB, which isn't read; or `"too_many_lines"`, when either side has more than 1,000,000 lines ([decision 064](decisions/064-changes-line-limit.md)). Only `"text"` has hunks. A project link or a conflict counts as empty text. |
+| `content` | string | `"text"`; `"binary"`, when either side has a zero byte in its first 8,000 bytes; `"too_big"`, when either side is over 64 MiB, which isn't read; or `"too_many_lines"`, when either side has more than 1,000,000 lines ([decision 064](decisions/064-changes-line-limit.md)). Only `"text"` has hunks. A project link or a conflict counts as empty text, and a change that is `"in_conflict"`, `"still_in_conflict"` or `"conflict_fixed"` is `"text"` with no hunks: no lines are compared for it. |
 | `hunks` | list of hunk | The changed lines with 3 lines of context around them, as in a unified diff. `[]` unless `content` is `"text"`. |
 | `timed_out` | boolean | The diff took more than 2 seconds, so Opalro stopped it: the hunks are right, but in bigger pieces than they could be. A `diff_timed_out` warning says so too. |
 | `only_line_endings` | boolean | Every line the hunks remove or add is one of a pair that differs only in its line ending (see `eol_only` below): CRLF into LF, LF into CRLF, or some of each. |
@@ -605,6 +605,7 @@ A step that stops it fails it with exit code 1, and its document is the error do
 | `save` | save | The save shown. |
 | `tags` | list of string | The names of the tags at the save shown, in order, as they are; empty when it has none. |
 | `changes` | list of change | What the save changed compared with its first parent (with all of its files for a save that has none), in the order of the paths. |
+| `conflicts_made`, `conflicts_changed`, `conflicts_fixed` | number | How many of `changes` are `"in_conflict"`, `"still_in_conflict"` and `"conflict_fixed"`. `0` in a project whose `.opalro/format` doesn't list `conflicts`. |
 | `warnings` | list | See §4. |
 
 **A change:**
@@ -612,7 +613,7 @@ A step that stops it fails it with exit code 1, and its document is the error do
 | Field | Type | Meaning |
 |---|---|---|
 | `path` | string | The path from the project folder, with `/` between names. |
-| `change` | string | `"added"`, `"removed"`, `"modified"`, or `"kind_changed"`: the same path became another kind of file, such as a file that became a link. |
+| `change` | string | `"added"`, `"removed"`, `"modified"`, or `"kind_changed"`: the same path became another kind of file, such as a file that became a link. Between two saves (`show`, `changes --save`) in a project that keeps conflicts, also `"in_conflict"` (the entry is a conflict and wasn't before), `"still_in_conflict"` (a conflict on both sides, with another record) or `"conflict_fixed"` (it was a conflict and isn't any more); no lines are compared for these. |
 | `kind` | string | `"file"`, `"executable"`, `"symlink"`, `"project_link"` or `"conflict"`: the kind after the change, or before it for a removed file. |
 | `old_size`, `new_size` | number or `null` | Size in bytes before and after. **`null` means the path wasn't there on that side:** `old_size` for an added file, `new_size` for a removed one. A project link or a conflict has size `0`. |
 

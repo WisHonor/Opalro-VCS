@@ -67,6 +67,9 @@ pub fn change_json(c: &FileChange) -> Value {
             ChangeKind::Removed => "removed",
             ChangeKind::Modified => "modified",
             ChangeKind::KindChanged => "kind_changed",
+            ChangeKind::InConflict => "in_conflict",
+            ChangeKind::StillInConflict => "still_in_conflict",
+            ChangeKind::ConflictFixed => "conflict_fixed",
         },
         // Named here, not by `as_str`, which gives people `project-link`: JSON values use underscores.
         "kind": match c.kind {
@@ -525,6 +528,9 @@ impl Row {
                 let held = format!("{old} {arrow} {}", c.kind.as_str());
                 ("kind changed", Role::Changed, held)
             }
+            ChangeKind::InConflict => ("in conflict", Role::Changed, String::new()),
+            ChangeKind::StillInConflict => ("still in conflict", Role::Changed, String::new()),
+            ChangeKind::ConflictFixed => ("conflict fixed", Role::Added, String::new()),
         };
         Row {
             word,
@@ -571,7 +577,7 @@ impl Columns {
         let room = self.room(s);
         let path = s.fit_path(&row.path, room);
         let pad = |text: &str, width: usize| " ".repeat(width.saturating_sub(style::columns(text)));
-        format!(
+        let line = format!(
             "    {}{}  {}{}  {}{}",
             s.paint(row.role, row.word),
             pad(row.word, self.word),
@@ -579,7 +585,9 @@ impl Columns {
             pad(&path, self.path.min(room)),
             pad(&row.held, self.held),
             row.held
-        )
+        );
+        // A row that holds nothing ends at its path.
+        line.trim_end().to_owned()
     }
 }
 
@@ -688,6 +696,10 @@ pub fn write_lines(out: &mut dyn Write, c: &FileChange, lines: &Lines) -> io::Re
         screen.paint(row.role, row.word),
         screen.paint(Role::Path, &row.path)
     );
+    // No lines are compared for a conflict's place between two saves.
+    if c.change.is_conflict() {
+        return writeln!(out, "{header}");
+    }
     if let Lines::Hunks { hunks, .. } = lines {
         let count = |tag: Tag| -> usize {
             hunks

@@ -1061,3 +1061,203 @@ fn a_new_name_clashing_with_a_conflict_kept_with_nothing_there_stops_the_save() 
     );
     assert_eq!(env.state().1, before);
 }
+
+// What a save did to its conflicts: `show` and `changes --save`. Made by combining.
+
+const PIC_START: &[u8] = b"\x89PNG\r\n\x1a\n\0start";
+const PIC_SIDE: &[u8] = b"\x89PNG\r\n\x1a\n\0side";
+const PIC_MAIN: &[u8] = b"\x89PNG\r\n\x1a\n\0main";
+
+/// A project whose `main` holds three saves after its start: `made`, a combine that put `a.txt`,
+/// `d.txt` and `pic.png` in conflict; `kept`, a save of `a.txt` changed with its markers left,
+/// the picture changed in place and `d.txt` fixed; and `fixed`, a `resolve` keeping your picture.
+/// Their fingerprints, in that order.
+fn made_kept_fixed() -> (Env, [String; 3]) {
+    let env = started();
+    let (a, d) = ("1\n2\n3\n", "x\ny\nz\n");
+    env.overwrite("a.txt", a);
+    env.overwrite("d.txt", d);
+    put(&env, "pic.png", PIC_START);
+    run(&env, &["save", "Start"], 0);
+    run(&env, &["line", "new", "side"], 0);
+    env.overwrite("a.txt", &a.replace('2', "side"));
+    env.overwrite("d.txt", &d.replace('y', "side"));
+    put(&env, "pic.png", PIC_SIDE);
+    run(&env, &["save", "On side"], 0);
+    run(&env, &["goto", "main"], 0);
+    env.overwrite("a.txt", &a.replace('2', "main"));
+    env.overwrite("d.txt", &d.replace('y', "main"));
+    put(&env, "pic.png", PIC_MAIN);
+    run(&env, &["save", "On main"], 0);
+    run(&env, &["combine", "side"], 0);
+    let made = support::main_tip(&env).to_hex();
+    let marked = std::fs::read_to_string(env.root().join("a.txt")).unwrap();
+    assert!(marked.contains("<<<<<<<"), "{marked}");
+    env.overwrite("a.txt", &format!("0\n{marked}"));
+    env.overwrite("d.txt", "x\nboth\nz\n");
+    put(&env, "pic.png", b"painted over");
+    run(&env, &["save", "Half way"], 0);
+    let kept = support::main_tip(&env).to_hex();
+    run(&env, &["resolve", "pic.png", "--keep", "mine"], 0);
+    let fixed = support::main_tip(&env).to_hex();
+    (env, [made, kept, fixed])
+}
+
+#[test]
+fn show_counts_the_places_a_save_made_kept_and_fixed() {
+    let (env, [made, kept, fixed]) = made_kept_fixed();
+    let (shown, _) = run(&env, &["show", &made], 0);
+    assert!(
+        shown.ends_with(
+            "\n3 files changed:\n\n    in conflict  a.txt\n    in conflict  d.txt\n    in \
+             conflict  pic.png\n\n3 places became conflicts in this save.\n"
+        ),
+        "{shown}"
+    );
+    let (shown, _) = run(&env, &["show", &kept], 0);
+    assert!(
+        shown.ends_with(
+            "\n3 files changed:\n\n    still in conflict  a.txt\n    conflict fixed     d.txt\n    \
+             still in conflict  pic.png\n\n2 places stayed in conflict, with another version.\n1 \
+             conflict was fixed in this save.\n"
+        ),
+        "{shown}"
+    );
+    let (shown, _) = run(&env, &["show", &fixed], 0);
+    assert!(
+        shown.ends_with(
+            "\n1 file changed:\n\n    conflict fixed  pic.png\n\n1 conflict was fixed in this \
+             save.\n"
+        ),
+        "{shown}"
+    );
+    // A save that touched no conflict says nothing of them.
+    env.overwrite("d.txt", "x\nagain\nz\n");
+    run(&env, &["save", "Plain"], 0);
+    let (shown, _) = run(&env, &["show"], 0);
+    assert!(
+        shown.ends_with("\n1 file changed:\n\n    modified  d.txt  9 B -> 10 B\n"),
+        "{shown}"
+    );
+}
+
+#[test]
+fn show_and_changes_save_name_a_conflict_made_still_there_and_fixed() {
+    let (env, [made, kept, fixed]) = made_kept_fixed();
+    for (save, rows) in [
+        (
+            &made,
+            &[
+                "in conflict  a.txt",
+                "in conflict  d.txt",
+                "in conflict  pic.png",
+            ][..],
+        ),
+        (
+            &kept,
+            &[
+                "still in conflict  a.txt",
+                "conflict fixed  d.txt",
+                "still in conflict  pic.png",
+            ],
+        ),
+        (&fixed, &["conflict fixed  pic.png"]),
+    ] {
+        let (shown, _) = run(&env, &["changes", "--save", save], 0);
+        let headers: Vec<&str> = shown.lines().filter(|l| !l.is_empty()).collect();
+        // No lines are compared for them: each is its header alone.
+        assert_eq!(headers, rows, "{shown}");
+        let doc = json(&env, &["changes", "--save", save]);
+        for c in doc["changes"].as_array().unwrap() {
+            assert_eq!(c["content"], "text", "{doc}");
+            assert_eq!(c["hunks"], serde_json::json!([]), "{doc}");
+            assert_eq!(c["in_conflict"], false, "{doc}");
+        }
+    }
+}
+
+#[test]
+fn history_is_unchanged_by_conflicts() {
+    let (env, [made, ..]) = made_kept_fixed();
+    let (shown, _) = run(&env, &["history"], 0);
+    let row = shown
+        .lines()
+        .find(|l| l.contains("Combine side into main"))
+        .unwrap();
+    assert!(!row.contains("conflict"), "{row}");
+    assert!(row.contains(" [combined "), "{row}");
+    let doc = json(&env, &["history"]);
+    let saves = doc["saves"].as_array().unwrap();
+    let keys = |s: &Value| s.as_object().unwrap().keys().cloned().collect::<Vec<_>>();
+    let combined = saves.iter().find(|s| s["id"] == made.as_str()).unwrap();
+    for save in saves {
+        assert_eq!(keys(save), keys(combined), "{doc}");
+    }
+}
+
+#[test]
+fn show_json_counts_them() {
+    let (env, [made, kept, fixed]) = made_kept_fixed();
+    for (save, counts, changes) in [
+        (
+            &made,
+            [3, 0, 0],
+            &["in_conflict", "in_conflict", "in_conflict"][..],
+        ),
+        (
+            &kept,
+            [0, 2, 1],
+            &["still_in_conflict", "conflict_fixed", "still_in_conflict"],
+        ),
+        (&fixed, [0, 0, 1], &["conflict_fixed"]),
+    ] {
+        let doc = json(&env, &["show", save]);
+        let got =
+            ["conflicts_made", "conflicts_changed", "conflicts_fixed"].map(|k| doc[k].clone());
+        assert_eq!(got, counts.map(Value::from), "{doc}");
+        let kinds: Vec<&str> = doc["changes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["change"].as_str().unwrap())
+            .collect();
+        assert_eq!(kinds, changes, "{doc}");
+    }
+    let doc = json(&env, &["show", &made]);
+    assert_eq!(doc["changes"][0]["kind"], "conflict", "{doc}");
+}
+
+#[test]
+fn without_the_feature_show_names_a_planted_conflict_as_v01_does() {
+    let env = started();
+    plant(&env, &[], &[("yours.png", versions(Some(term(PICTURE))))]);
+    support::without_conflicts_feature(env.root());
+    let (shown, _) = run(&env, &["show"], 0);
+    let row = shown.lines().find(|l| l.contains("yours.png")).unwrap();
+    assert_eq!(
+        row.split_whitespace().collect::<Vec<_>>(),
+        ["added", "yours.png", "0", "B"],
+        "{shown}"
+    );
+    assert!(!shown.contains("conflict"), "{shown}");
+    let doc = json(&env, &["show"]);
+    let change = doc["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["path"] == "yours.png")
+        .unwrap();
+    assert_eq!(change["change"], "added", "{doc}");
+    assert_eq!(change["kind"], "conflict", "{doc}");
+    for k in ["conflicts_made", "conflicts_changed", "conflicts_fixed"] {
+        assert_eq!(doc[k], 0, "{doc}");
+    }
+    let doc = json(&env, &["changes", "--save", "main"]);
+    let change = doc["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["path"] == "yours.png")
+        .unwrap();
+    assert_eq!(change["change"], "added", "{doc}");
+}

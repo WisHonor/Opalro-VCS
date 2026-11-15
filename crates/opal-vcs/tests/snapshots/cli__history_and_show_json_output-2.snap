@@ -12,6 +12,9 @@ expression: show
       "path": "b.txt"
     }
   ],
+  "conflicts_changed": 0,
+  "conflicts_fixed": 0,
+  "conflicts_made": 0,
   "opalro_json": 1,
   "save": {
     "author": {

@@ -26,14 +26,14 @@ use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use git_words::Typed;
-use opal_core::changes::{Lines, save_changes, unsaved_changes};
+use opal_core::changes::{Lines, for_each_save_change, save_changes, unsaved_changes};
 use opal_core::combine::{self, CombineError, Combined, Named};
 use opal_core::config::{
     ConfigError, Identity, git_excludes_file, git_import_settings, ignored_identity_note,
     ignored_project_identity, load_identity, now_person, undo_window_days,
 };
 use opal_core::diary::{Action, DiaryEntry, Position, is_plain};
-use opal_core::diff::{count_changes, for_each_change};
+use opal_core::diff::{ChangeKind, count_changes};
 use opal_core::fsio::fault_point;
 use opal_core::history::{
     LineIds, ResolveError, current_save, for_each_from, for_each_on_line, id_for_command, resolve,
@@ -1733,8 +1733,19 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
     // printed, so a save that can't be listed prints only the error. It also sets the table's
     // columns. The changes are then printed as the walk finds them, and none is kept.
     let (mut count, mut columns) = (0_usize, output::Columns::default());
-    for_each_change(store, old_root, save.root, |c| {
+    // The places it made, kept with another version, and fixed.
+    let mut conflicts = [0_u64; 3];
+    for_each_save_change(repo, old_root, save.root, |c| {
         count += 1;
+        let at = match c.change {
+            ChangeKind::InConflict => Some(0),
+            ChangeKind::StillInConflict => Some(1),
+            ChangeKind::ConflictFixed => Some(2),
+            _ => None,
+        };
+        if let Some(n) = at.and_then(|at| conflicts.get_mut(at)) {
+            *n += 1;
+        }
         if !json {
             columns.fit(&output::Row::of(&c));
         }
@@ -1749,7 +1760,7 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
                 &mut out,
                 "{\"changes\":[",
                 |each| {
-                    for_each_change(store, old_root, save.root, |c| {
+                    for_each_save_change(repo, old_root, save.root, |c| {
                         each(&output::change_json(&c))
                     })
                 },
@@ -1761,6 +1772,9 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
                     warnings.extend(store.warnings());
                     (
                         json!({
+                            "conflicts_changed": conflicts[1],
+                            "conflicts_fixed": conflicts[2],
+                            "conflicts_made": conflicts[0],
                             "opalro_json": OPALRO_JSON,
                             "save": output::save_json(&id, &save, &short),
                             "tags": tags,
@@ -1782,10 +1796,11 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
         };
         show_output::write_head(&mut out, &head, count, now_ms())?;
         let s = style::out();
-        for_each_change(store, old_root, save.root, |c| {
+        for_each_save_change(repo, old_root, save.root, |c| {
             writeln!(out, "{}", columns.line(s, &output::Row::of(&c)))?;
             Ok::<(), Failure>(())
         })?;
+        show_output::write_conflicts(&mut out, conflicts)?;
         warnings.extend(store.warnings());
         Ok(warnings)
     })();

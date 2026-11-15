@@ -15,6 +15,24 @@ pub enum ChangeKind {
     Modified,
     /// Same path, different kind of file (say, a file became executable or a symlink).
     KindChanged,
+    /// Between two saves of a project that keeps conflicts: the place became a conflict.
+    InConflict,
+    /// A conflict on both sides, with another record.
+    StillInConflict,
+    /// It was a conflict and isn't any more.
+    ConflictFixed,
+}
+
+impl ChangeKind {
+    /// One of the kinds a conflict's place gets between two saves, for which no lines are
+    /// compared.
+    #[must_use]
+    pub fn is_conflict(self) -> bool {
+        matches!(
+            self,
+            ChangeKind::InConflict | ChangeKind::StillInConflict | ChangeKind::ConflictFixed
+        )
+    }
 }
 
 /// A file that differs between two saves. The path is borrowed from the walk's own buffer and is

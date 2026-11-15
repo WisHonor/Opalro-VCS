@@ -107,3 +107,39 @@ pub fn write_head(out: &mut dyn Write, head: &Head, count: usize, now: i64) -> i
         writeln!(out, "\n{} changed:\n", output::files(count))
     }
 }
+
+/// Writes, under the changes, how many places the save put in conflict, kept in conflict with
+/// another version, and fixed: each count only when it isn't 0, and nothing when all are.
+pub fn write_conflicts(out: &mut dyn Write, [made, changed, fixed]: [u64; 3]) -> io::Result<()> {
+    let lines = [
+        (
+            made,
+            "place became a conflict",
+            "places became conflicts",
+            " in this save",
+        ),
+        (
+            changed,
+            "place stayed",
+            "places stayed",
+            " in conflict, with another version",
+        ),
+        (
+            fixed,
+            "conflict was fixed",
+            "conflicts were fixed",
+            " in this save",
+        ),
+    ];
+    let mut first = true;
+    for (n, one, many, rest) in lines {
+        if n == 0 {
+            continue;
+        }
+        if std::mem::take(&mut first) {
+            writeln!(out)?;
+        }
+        writeln!(out, "{}{rest}.", output::counted(n, one, many))?;
+    }
+    Ok(())
+}

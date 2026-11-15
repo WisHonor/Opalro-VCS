@@ -9,7 +9,7 @@ use similar::algorithms::{Capture, Replace, myers};
 use similar::{DiffOp, DiffTag, group_diff_ops};
 
 use crate::conflict::{self, stands_as};
-use crate::diff::{ChangeKind, change_at, for_each_change, for_each_change_between};
+use crate::diff::{ChangeKind, FileChange, change_at, for_each_change, for_each_change_between};
 use crate::history::tip_of;
 use crate::id::Id;
 use crate::listing::{Entry, EntryKind};
@@ -313,14 +313,47 @@ pub fn save_changes<E: From<SaveError> + From<StoreError>>(
         None => None,
     };
     let scope = scope(repo, paths)?;
-    for_each_change(store, old_root, save.root, |c| {
+    for_each_save_change(repo, old_root, save.root, |c| {
         if !scope.as_ref().is_none_or(|s| s.holds(c.path)) {
             return Ok(());
         }
         let c = PathChange::from(c);
+        if c.change.is_conflict() {
+            let none = Lines::Hunks {
+                hunks: Vec::new(),
+                timed_out: false,
+            };
+            return each(&c.path, &c, none);
+        }
         let old = stored(store, c.old_kind, c.old_id, c.old_size)?;
         let new = stored(store, Some(c.kind), c.new_id, c.new_size)?;
         each(&c.path, &c, lines(&old, &new))
+    })
+}
+
+/// [`for_each_change`] between two saves, as `show` and `changes --save` tell it: in a project
+/// that keeps conflicts, a place that became one, stayed one with another record, or stopped
+/// being one has a kind of its own. Old and new entries are enough to tell; no record is read.
+pub fn for_each_save_change<E: From<StoreError>>(
+    repo: &Repository,
+    old_root: Option<Id>,
+    new_root: Id,
+    mut each: impl FnMut(FileChange<'_>) -> Result<(), E>,
+) -> Result<(), E> {
+    let keeps = repo.keeps_conflicts();
+    for_each_change(repo.store(), old_root, new_root, |mut c| {
+        if keeps {
+            let held = |k: Option<EntryKind>| k == Some(EntryKind::Conflict);
+            // `kind` is the new side's when there is one.
+            let new = c.new_id.map(|_| c.kind);
+            c.change = match (held(c.old_kind), held(new)) {
+                (false, true) => ChangeKind::InConflict,
+                (true, true) => ChangeKind::StillInConflict,
+                (true, false) => ChangeKind::ConflictFixed,
+                (false, false) => c.change,
+            };
+        }
+        each(c)
     })
 }
 
