@@ -57,3 +57,10 @@ The same hole is there in small: when Opalro can use the file but not one part o
 - A person who breaks the rules file on one line learns it from the combine that brings it in, not from the scene that broke later.
 - Once conflicts are kept (milestone 9), such a file is still a reason to stop and fix `opalro.toml`, not a conflict to keep.
 - The proof test (`crates/opal-vcs/tests/redteam20.rs`) runs on every push once the fix is in.
+
+## Correction (2026-11-14, before the fix was built)
+
+Two points of the decision above, made exact while its fix was being specified:
+
+- **The warning is about the file a combine leaves in the folder,** not the one it started with. A combine that goes through reads `opalro.toml` once more afterwards and gives the rules' warning if it couldn't be read whole. One that started with such a file and left a good one gives none, and a combine that is refused gives none either: its rows and its hint say why.
+- **"Can't be read whole" is said only of a file that would otherwise have been merged.** A file that clashes for a reason of its own (it isn't text, it is too big, its lines overlap) keeps that reason.
