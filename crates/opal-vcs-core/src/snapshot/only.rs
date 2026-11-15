@@ -209,7 +209,7 @@ fn stood_as_folder(
         Slot::Occupied(r) => r.into_mut(),
         Slot::Vacant(v) => v.insert(
             store
-                .conflict(&e.id)
+                .met_conflict(&e.id)
                 .map_err(|err| conflict::unreadable(&conflict::at_path(path), &e.id, err))?,
         ),
     };

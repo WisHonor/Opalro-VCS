@@ -52,7 +52,7 @@ pub struct Plan {
     pub carried: usize,
     /// What reading the folder found wrong.
     pub warnings: Vec<Warning>,
-    /// Whether a folder of `to` read for the switch held a conflict written as a file or link.
+    /// Whether a folder of `to` read for the switch held a conflict, whatever it stands as.
     pub holds_conflicts: bool,
 }
 
@@ -333,7 +333,7 @@ fn planned(
     plan.collisions.sort_unstable();
     plan.collisions.dedup();
     plan.not_written = refused.into_iter().collect();
-    plan.holds_conflicts = there.stood_in();
+    plan.holds_conflicts = there.met_conflict();
     Ok(plan)
 }
 

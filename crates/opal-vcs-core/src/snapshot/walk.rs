@@ -929,7 +929,7 @@ impl WalkState {
             if e.kind == EntryKind::Conflict && !self.records.contains_key(&e.id) {
                 let at = conflict::at_path(&path_in(rel, &e.name));
                 let record = store
-                    .conflict(&e.id)
+                    .met_conflict(&e.id)
                     .map_err(|err| conflict::unreadable(&at, &e.id, err))?;
                 self.records.insert(e.id, record);
             }
@@ -2215,7 +2215,7 @@ fn rebuild_gone(
                 let path = path_below(top, &open, &name, &e.name);
                 let record = match search.records.entry(e.id) {
                     Slot::Occupied(r) => r.into_mut(),
-                    Slot::Vacant(v) => v.insert(base.store.conflict(&e.id).map_err(|err| {
+                    Slot::Vacant(v) => v.insert(base.store.met_conflict(&e.id).map_err(|err| {
                         conflict::unreadable(&conflict::at_path(&path), &e.id, err)
                     })?),
                 };

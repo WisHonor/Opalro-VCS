@@ -77,8 +77,15 @@ fn refused(case: &Case, place: &str, planning: bool) -> String {
     let said = doc["error"]["message"].as_str().unwrap().to_owned();
     assert!(said.contains(place), "{doc}");
     let after = project_entries(&case.env);
+    let journal = case.root().join(".opalro/state/journal");
     if planning {
         assert_eq!(after, before);
+        assert!(!journal.exists());
+    } else {
+        // Stopped while writing: the journal stays, and the hint gives the way out.
+        assert!(journal.exists());
+        let hint = doc["error"]["hint"].as_str().unwrap();
+        assert!(hint.contains("delete .opalro/state/journal"), "{hint}");
     }
     assert!(!after.contains_key("art/c"), "{after:?}");
     case.assert_nothing_escaped();
@@ -163,7 +170,7 @@ fn a_folder_term_within_limits_is_written_as_any_folder() {
     });
     let (code, doc, said) = case.run_json(&["goto", "main"]);
     assert_eq!(code, Some(0), "{doc}{said}");
-    assert_eq!(doc["holds_conflicts"], false, "{doc}");
+    assert_eq!(doc["holds_conflicts"], true, "{doc}");
     let entries = project_entries(&case.env);
     assert_eq!(
         entries.get("art/c/x.txt"),

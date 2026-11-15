@@ -205,6 +205,8 @@ pub struct Store {
     path: PathBuf,
     packs: Mutex<Packs>,
     checked: Mutex<Checked>,
+    /// The conflict records a command has read where it met them, so each is read once.
+    met: Arc<Mutex<HashMap<Id, conflict::Record>>>,
     /// The smallest file stored in chunks, as the project's rules say.
     chunk_from: AtomicU64,
     #[cfg(test)]
@@ -410,6 +412,7 @@ impl Store {
             path: packs_dir.to_owned(),
             packs: Mutex::default(),
             checked: Mutex::default(),
+            met: Arc::default(),
             chunk_from: AtomicU64::new(CHUNK_FROM),
             #[cfg(test)]
             saves_read: std::sync::atomic::AtomicUsize::new(0),
@@ -859,6 +862,23 @@ impl Store {
         Ok(conflict::Record::decode(&bytes)?)
     }
 
+    /// [`Store::conflict`], remembered: a command that meets a record where its entry is met
+    /// reads it once, whichever of its steps meets it. A record is its ID's for good, so what is
+    /// remembered never goes stale; one that couldn't be read is read again.
+    pub(crate) fn met_conflict(&self, id: &Id) -> Result<conflict::Record, StoreError> {
+        let held = self.met_records().get(id).cloned();
+        if let Some(record) = held {
+            return Ok(record);
+        }
+        let record = self.conflict(id)?;
+        self.met_records().insert(*id, record.clone());
+        Ok(record)
+    }
+
+    fn met_records(&self) -> MutexGuard<'_, HashMap<Id, conflict::Record>> {
+        self.met.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// `listing`, given what a second handle read of `id`: the same read through the same steps,
     /// so this store notes what `listing` would. It is spared only the lookup in the pack asked
     /// first when that is the pack `peeked` came from, and the read of `peeked`'s own copy.
@@ -921,6 +941,7 @@ impl Store {
             path: self.path.clone(),
             packs: Mutex::new(packs),
             checked: Mutex::default(),
+            met: Arc::clone(&self.met),
             chunk_from: AtomicU64::new(self.chunk_from.load(Ordering::Relaxed)),
             #[cfg(test)]
             saves_read: std::sync::atomic::AtomicUsize::new(0),

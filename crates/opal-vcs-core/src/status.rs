@@ -166,7 +166,7 @@ fn record_at<'r>(
             let at = conflict::at_path(path);
             v.insert(
                 store
-                    .conflict(id)
+                    .met_conflict(id)
                     .map_err(|e| conflict::unreadable(&at, id, e))?,
             )
         }

@@ -1959,3 +1959,89 @@ fn a_link_term_leading_out_is_written_as_a_placeholder() {
     assert!(done.holds_conflicts);
     assert_eq!(fs::read(dir.path().join("c")).unwrap(), b"../outside");
 }
+
+/// A project at its first save with `main` at a save holding `dir/x.txt`, the links `dir/l0` to
+/// `dir/l{links}` to it, and a conflict at `dir/c` standing as your version. The project
+/// reopened, the first save and the conflicted one.
+fn links_beside_a_conflict(links: usize) -> (tempfile::TempDir, Repository, Id, Id) {
+    let (dir, mut repo) = project();
+    let first = current_save(&repo).unwrap();
+    plant_save(
+        &mut repo,
+        &[
+            ("mine", EntryKind::File, b"mine"),
+            ("t", EntryKind::File, b"theirs"),
+        ],
+    );
+    let names: Vec<String> = (0..links).map(|n| format!("dir/l{n}")).collect();
+    let mut files: Vec<(&str, EntryKind, &[u8])> = names
+        .iter()
+        .map(|n| (n.as_str(), EntryKind::Symlink, &b"x.txt"[..]))
+        .collect();
+    files.push(("dir/x.txt", EntryKind::File, b"x"));
+    let conflict = [("dir/c", record(Some(file_of(b"mine"))))];
+    crate::test_support::plant_with(&mut repo, &files, &conflict);
+    let conflicted = current_save(&repo).unwrap();
+    go(&mut repo, first);
+    let repo = Repository::open(dir.path()).unwrap();
+    (dir, repo, first, conflicted)
+}
+
+/// How many records `step` reads, on every thread, in a project opened afresh for it.
+fn records_read(dir: &Path, step: impl FnOnce(&mut Repository)) -> usize {
+    let mut repo = Repository::open(dir).unwrap();
+    let before = repo.store().conflicts_read();
+    step(&mut repo);
+    repo.store().conflicts_read() - before
+}
+
+#[test]
+fn a_whole_goto_reads_each_record_once() {
+    let (dir, _repo, _, conflicted) = links_beside_a_conflict(20);
+    // Onto a line: the plan, the safety copies, the kept saves, the position and every link
+    // written all meet the conflict's folder.
+    let read = records_read(dir.path(), |repo| {
+        let line = Target::Line("main".into());
+        let done = crate::switch::goto(repo, &line, &who(), "goto", None, &mut |_| {}).unwrap();
+        assert!(done.holds_conflicts);
+        assert_eq!(done.applied.written, 22);
+    });
+    assert_eq!(read, 1);
+    assert_eq!(
+        current_save(&Repository::open(dir.path()).unwrap()).unwrap(),
+        conflicted
+    );
+}
+
+#[test]
+fn throwing_away_many_unsaved_links_beside_a_conflict_reads_its_record_once() {
+    let (dir, mut repo, _, conflicted) = links_beside_a_conflict(0);
+    go(&mut repo, conflicted);
+    drop(repo);
+    for n in 0..30 {
+        let link = dir.path().join(format!("dir/new{n}"));
+        if !crate::test_support::symlink(Path::new("x.txt"), &link) {
+            return; // this account can't make links: CI runs it
+        }
+    }
+    let read = records_read(dir.path(), |repo| {
+        let done = crate::switch::discard(repo, None, &who(), "discard", None, &mut |_| {});
+        assert_eq!(done.unwrap().removed.len(), 30);
+    });
+    assert_eq!(read, 1);
+    // Undone, every link is written back, and the record is still read once.
+    let read = records_read(dir.path(), |repo| {
+        let req = crate::undo::StepRequest {
+            n: 1,
+            shelve: false,
+            who: &who(),
+            git_excludes: None,
+        };
+        crate::undo::undo(repo, &req, &mut |_| {}).unwrap();
+    });
+    assert_eq!(read, 1);
+    assert_eq!(
+        fs::read_link(dir.path().join("dir/new7")).unwrap(),
+        Path::new("x.txt")
+    );
+}

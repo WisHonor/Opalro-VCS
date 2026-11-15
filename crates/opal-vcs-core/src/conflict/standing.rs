@@ -33,24 +33,24 @@ pub(crate) fn as_it_stands<'e>(
     })
 }
 
-/// What a reader as it stands has read: the records, by ID; and the folder listings a conflict
-/// stands as, and those below them, where a conflict is nesting.
+/// What a reader as it stands has noted: the folder listings a conflict stands as, and those
+/// below them, where a conflict is nesting.
 #[derive(Default)]
 struct Stood {
-    records: HashMap<Id, Record>,
     below: HashSet<Id>,
 }
 
 /// How a walk reads a listing: as stored (one save against another), or as it stands in the
-/// folder. Records are read only for kind-6 entries of listings read, each once per command.
+/// folder. Records are read only for kind-6 entries of listings read, each once per command:
+/// the store remembers them for every reader.
 pub(crate) struct Listings<'a> {
     store: &'a Store,
     unstored: &'a HashMap<Id, Listing>,
-    /// `None`: as stored. Else the records read so far, and the folders a conflict stands as
-    /// (and those below them), where a kind-6 entry is refused as nesting; shared by its sides.
+    /// `None`: as stored. Else the folders a conflict stands as (and those below them), where a
+    /// kind-6 entry is refused as nesting; shared by its sides.
     standing: Option<Rc<RefCell<Stood>>>,
-    /// Whether this side replaced an entry with a file or link.
-    stood_in: Cell<bool>,
+    /// Whether this side met a conflict's entry, whatever it stands as.
+    met: Cell<bool>,
 }
 
 impl<'a> Listings<'a> {
@@ -59,7 +59,7 @@ impl<'a> Listings<'a> {
             store,
             unstored,
             standing: None,
-            stood_in: Cell::new(false),
+            met: Cell::new(false),
         }
     }
 
@@ -72,7 +72,7 @@ impl<'a> Listings<'a> {
             store: repo.store(),
             unstored,
             standing: repo.keeps_conflicts().then(Rc::default),
-            stood_in: Cell::new(false),
+            met: Cell::new(false),
         }
     }
 
@@ -83,7 +83,7 @@ impl<'a> Listings<'a> {
             store: self.store,
             unstored: self.unstored,
             standing: self.standing.clone(),
-            stood_in: Cell::new(false),
+            met: Cell::new(false),
         }
     }
 
@@ -124,20 +124,15 @@ impl<'a> Listings<'a> {
                 return Err(nested(&place()));
             }
             let record = self
-                .record(&e.id)
+                .store
+                .met_conflict(&e.id)
                 .map_err(|err| unreadable(&place(), &e.id, err))?;
-            let mut stood = standing.borrow_mut();
+            self.met.set(true);
             let Some(t) = stands_as(&record) else {
                 continue;
             };
-            match t.kind {
-                EntryKind::Folder => {
-                    stood.below.insert(t.id);
-                }
-                EntryKind::File | EntryKind::Executable | EntryKind::Symlink => {
-                    self.stood_in.set(true);
-                }
-                _ => {}
+            if t.kind == EntryKind::Folder {
+                standing.borrow_mut().below.insert(t.id);
             }
             entries.push(Entry {
                 name: e.name.clone(),
@@ -149,25 +144,10 @@ impl<'a> Listings<'a> {
         Ok(Listing::new(entries)?)
     }
 
-    /// The record `id`, read once per command.
-    pub(crate) fn record(&self, id: &Id) -> Result<Record, StoreError> {
-        if let Some(r) = self
-            .standing
-            .as_ref()
-            .and_then(|s| s.borrow().records.get(id).cloned())
-        {
-            return Ok(r);
-        }
-        let record = self.store.conflict(id)?;
-        if let Some(s) = &self.standing {
-            s.borrow_mut().records.insert(*id, record.clone());
-        }
-        Ok(record)
-    }
-
-    /// Whether any entry this side replaced was written as a file or link: for `goto`'s words.
-    pub(crate) fn stood_in(&self) -> bool {
-        self.stood_in.get()
+    /// Whether this side met a conflict's entry in a listing it read, whatever the conflict
+    /// stands as (nothing included): for `goto`'s words.
+    pub(crate) fn met_conflict(&self) -> bool {
+        self.met.get()
     }
 }
 
@@ -230,7 +210,7 @@ mod tests {
         let theirs = file_of(b"theirs");
         assert_eq!(entry_of(&stood, "d"), Some((EntryKind::File, theirs.id, 6)));
         assert_eq!(entry_of(&stood, "x").unwrap().0, EntryKind::File);
-        assert!(reader.stood_in());
+        assert!(reader.met_conflict());
         // Its stored ID is where it came from: the stored listing is unchanged.
         assert_eq!(
             repo.store().listing(&root).unwrap().get("c").unwrap().kind,
@@ -245,7 +225,7 @@ mod tests {
         let unstored = HashMap::new();
         let reader = Listings::standing(&repo, &unstored);
         assert!(reader.read(&root).unwrap().entries().is_empty());
-        assert!(!reader.stood_in());
+        assert!(reader.met_conflict());
     }
 
     #[test]
@@ -264,7 +244,7 @@ mod tests {
         let stood = reader.read(&root).unwrap();
         assert_eq!(entry_of(&stood, "c"), Some((EntryKind::Folder, folder, 0)));
         assert!(reader.read(&folder).unwrap().get("inner").is_some());
-        assert!(!reader.stood_in());
+        assert!(reader.met_conflict());
     }
 
     #[test]
@@ -303,6 +283,14 @@ mod tests {
         let top = reader.read(&root).unwrap();
         reader.read(&top.get("d").unwrap().id).unwrap();
         reader.read(&root).unwrap();
+        assert_eq!(repo.store().conflicts_read(), asked + 1);
+        // Another reader of the same command, and a side of it, read it no more.
+        let other = Listings::standing(&repo, &unstored);
+        other.read(&root).unwrap();
+        assert!(other.met_conflict());
+        let side = other.side();
+        side.read(&root).unwrap();
+        assert!(side.met_conflict());
         assert_eq!(repo.store().conflicts_read(), asked + 1);
     }
 

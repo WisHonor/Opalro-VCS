@@ -35,8 +35,9 @@ pub struct GotoOutcome {
     pub carried: usize,
     /// Whether this goto recorded a step of its own; not when the project already was there.
     pub recorded: bool,
-    /// Whether the save gone to holds a place in conflict that this goto met. It may not say so
-    /// when the folder already held that conflict.
+    /// Whether a folder of the save gone to that this goto read holds a place in conflict,
+    /// whatever it stands as (nothing included). It may not say so when the folder already held
+    /// that conflict, since the switch then needn't read that folder.
     pub holds_conflicts: bool,
 }
 

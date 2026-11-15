@@ -778,6 +778,102 @@ fn goto_says_when_the_save_gone_to_holds_a_conflict() {
 }
 
 #[test]
+fn goto_tells_of_a_conflict_standing_as_nothing_or_as_a_folder() {
+    let said = "The save you went to holds places in conflict: opalro status lists them.";
+    // You deleted it, they changed it: nothing is written, and the person is told all the same.
+    let (env, _, _) = away_from(&[("gone.png", versions(None))]);
+    let (shown, _) = run(&env, &["goto", "main"], 0);
+    assert!(shown.contains(said), "{shown}");
+    assert!(!env.root().join("gone.png").exists());
+    let (env, _, _) = away_from(&[("gone.png", versions(None))]);
+    assert_eq!(json(&env, &["goto", "main"])["holds_conflicts"], true);
+    let (env, _) = folder_conflict();
+    let (shown, _) = run(&env, &["goto", "main"], 0);
+    assert!(shown.contains(said), "{shown}");
+    let (env, _) = folder_conflict();
+    assert_eq!(json(&env, &["goto", "main"])["holds_conflicts"], true);
+}
+
+#[test]
+fn discard_removes_a_file_put_where_a_conflict_stands_as_nothing() {
+    let (env, _, conflicted) = three_kinds();
+    run(&env, &["goto", "main"], 0);
+    put(&env, "gone.png", b"new");
+    let doc = json(&env, &["discard", "gone.png"]);
+    assert_eq!(
+        doc["removed_paths"],
+        serde_json::json!(["gone.png"]),
+        "{doc}"
+    );
+    assert_eq!(doc["safety_copies"], 1, "{doc}");
+    assert!(!env.root().join("gone.png").exists());
+    support::assert_folder_is_goto_of(&env, conflicted);
+    // The safety copy is the step's "from" save.
+    let change = support::head(&env).1.folder_change.unwrap();
+    assert_eq!(support::saved_files(&env, change.from)["gone.png"], b"new");
+}
+
+/// The folder as written for the conflicted save, with `marked.txt` and `plain.txt` as given.
+fn folder_with(marked: &[u8], plain: &[u8]) -> support::Files {
+    let mut files = written_conflicts();
+    files.insert("marked.txt".into(), marked.to_vec());
+    files.insert("plain.txt".into(), plain.to_vec());
+    files
+}
+
+#[test]
+fn undo_and_redo_over_a_discard_and_a_shelf_at_a_conflicts_place() {
+    let (env, _, conflicted) = three_kinds();
+    run(&env, &["goto", "main"], 0);
+    for command in ["discard", "shelf"] {
+        put(&env, "marked.txt", HALF);
+        if command == "discard" {
+            run(&env, &["discard", "marked.txt"], 0);
+        } else {
+            run(&env, &["shelf"], 0);
+        }
+        assert_eq!(support::files(env.root()), written_conflicts(), "{command}");
+        support::assert_folder_is_goto_of(&env, conflicted);
+        // Edited in between, elsewhere: it comes along through the undo and the redo.
+        put(&env, "plain.txt", b"edited\n");
+        run(&env, &["undo"], 0);
+        assert_eq!(
+            support::files(env.root()),
+            folder_with(HALF, b"edited\n"),
+            "{command}"
+        );
+        run(&env, &["redo"], 0);
+        assert_eq!(
+            support::files(env.root()),
+            folder_with(MARKED, b"edited\n"),
+            "{command}"
+        );
+        run(&env, &["discard", "plain.txt"], 0);
+        support::assert_folder_is_goto_of(&env, conflicted);
+        assert_eq!(on_save(&env), conflicted);
+    }
+}
+
+#[test]
+fn tidy_keeps_what_kept_saves_picturing_a_conflict_name() {
+    let (env, first, conflicted) = three_kinds();
+    run(&env, &["goto", "main"], 0);
+    put(&env, "marked.txt", HALF);
+    run(&env, &["shelf"], 0);
+    run(&env, &["goto", &first.to_hex()], 0);
+    run(&env, &["tidy"], 0);
+    assert_eq!(json(&env, &["verify"])["problems_total"], 0);
+    run(&env, &["undo"], 0);
+    assert_eq!(on_save(&env), conflicted);
+    support::assert_folder_is_goto_of(&env, conflicted);
+    run(&env, &["unshelf"], 0);
+    assert_eq!(std::fs::read(env.root().join("marked.txt")).unwrap(), HALF);
+    run(&env, &["tidy"], 0);
+    let doc = json(&env, &["verify"]);
+    assert_eq!(doc["problems_total"], 0, "{doc}");
+}
+
+#[test]
 fn without_the_feature_write_out_leaves_a_conflicts_place_alone() {
     let (env, _, _) = three_kinds();
     support::without_conflicts_feature(env.root());
@@ -812,7 +908,19 @@ fn a_goto_to_a_conflicted_save_stopped_at_every_step_is_finished_or_never_happen
             break;
         }
         stopped += 1;
-        run(&env, &["discard"], 0);
+        // The discard finishes the switch first; recovery alone must leave nothing to discard.
+        let doc = json(&env, &["discard"]);
+        assert_eq!(
+            doc["restored_paths"],
+            serde_json::json!([]),
+            "fault {n}: {doc}"
+        );
+        assert_eq!(
+            doc["removed_paths"],
+            serde_json::json!([]),
+            "fault {n}: {doc}"
+        );
+        assert_eq!(doc["safety_copies"], 0, "fault {n}: {doc}");
         let journal = env.root().join(".opalro/state/journal");
         assert!(!journal.exists(), "fault {n}");
         let on = on_save(&env);
