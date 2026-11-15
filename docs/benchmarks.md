@@ -1074,7 +1074,7 @@ The proof test asserts no time (a debug build still takes 13 seconds, almost all
 
 ## 14. v0.2, milestone 9: what keeping conflicts costs `status` and `goto`
 
-**In plain words.** From milestone 9 every new project can keep conflicts ([decision 178](decisions/178-the-conflicts-feature.md)), and almost none holds one at any given moment, so the ability must cost nothing until it is used ([decision 179](decisions/179-every-command-and-a-conflict.md)). On a project of 100,003 files it costs nothing that can be measured: `status` with the feature and no conflict is within 7 ms of `status` without it, where single runs of either spread over 150 to 250 ms, and `goto` within 6 ms either way. Three conflicts seven folders deep cost nothing that can be measured either.
+**In plain words.** From milestone 9 every new project can keep conflicts ([decision 178](decisions/178-the-conflicts-feature.md)), and almost none holds one at any given moment, so the ability must cost nothing until it is used ([decision 179](decisions/179-every-command-and-a-conflict.md)). On a project of 100,003 files it costs nothing that can be measured: `status` with the feature and no conflict is within 7 ms of `status` without it (medians of 36 runs each), where single runs spread over 155.8 ms with the feature and 253.4 ms without, and `goto`'s medians are 6.1 ms apart going back and 1.9 ms going forward. Three conflicts seven folders deep cost nothing that can be measured either.
 
 Measured on 2026-11-15 on the Windows laptop of §1 (AMD Ryzen 7 7730U, 8 cores (16 threads), 16 GB of RAM, a 1 TB NVMe SSD (WD PC SN560); Windows 11 Home 10.0.26200), with a release build of `milestone-9` at `2b639a4` (`cargo build --release -p opal-vcs`), by `bench/conflicts.py`. Everything here was measured; nothing is estimated.
 
@@ -1103,7 +1103,7 @@ Without the feature and with it took turns (5 rounds of 2 runs each). The projec
 | With the feature, 3 conflicts seven folders deep | 971.1 (945.2 to 981.6) | 1,053.3 (1,017.4 to 1,069.7) | 1,055.9 (1,040.5 to 1,883.4) |
 | The plain project again, afterwards | 984.2 (974.9 to 988.7) | 1,066.8 (1,032.9 to 1,078.0) | 1,083.0 (1,036.6 to 1,142.7) |
 
-`status` with the feature and no conflict had the higher median in this run (1,038.8 against 967.1) with the same least time (952.4 against 957.6), and the project with conflicts, measured right after with the feature on, was back at 971.1. A reviewer was reading files on the same machine during this run. So `status` was measured again, alone, on a quiet machine.
+`status` with the feature and no conflict had the higher median in this run (1,038.8 against 967.1) with the same least time (952.4 against 957.6), and the project with conflicts, measured right after with the feature on, was back at 971.1. Another program was reading files on the same machine during this run. So `status` was measured again, alone, on a quiet machine.
 
 ### Second run: `status` alone, 36 runs of each
 
@@ -1116,7 +1116,7 @@ At the second save (no conflict), 12 rounds of 3 runs each, the order of the two
 
 ### What the numbers say
 
-- **A project that keeps conflicts and has none pays nothing that can be measured:** 7 ms between the medians of `status` (0.7 %), where single runs of either spread over 150 to 250 ms; `goto` within 6 ms either way.
+- **A project that keeps conflicts and has none pays nothing that can be measured:** 7 ms between the medians of `status` in the second run (0.7 %), where single runs spread over 155.8 ms with the feature and 253.4 ms without; `goto`'s medians in the first run are 6.1 ms apart going back and 1.9 ms apart going forward.
 - **Three conflicts deep in the tree cost nothing that can be measured either:** `status` 971.1 against 984.2 for the plain project measured right after; `goto` 1,053.3 and 1,055.9 against 1,066.8 and 1,083.0.
 - These are a laptop's times, not a gate's. What does not depend on a clock is in the engine's tests, which count what is read: `a_project_without_conflicts_reads_nothing_more` (in `crates/opal-vcs-core/src/status.rs`) and `save_in_a_project_without_conflicts_reads_nothing_more` (in `crates/opal-vcs-core/src/snapshot.rs`) ([testing.md](testing.md) §3).
 - The Nightly workflow's speed gates (Opalro against Git on the code set) passed on `6392c1b`, after the tasks that changed what `status` and `save` read ([run 43694818719](https://github.com/WisHonor/Opalro-VCS/actions/runs/43694818719)): Linux `status` at 1.887 times Git against a limit of 2.
