@@ -446,6 +446,11 @@ impl SaveError {
             SaveError::NotAFolder { path, .. } => {
                 format!("Name {} itself to save it as it is.", escape(path, false))
             }
+            SaveError::KeptWhole { .. } if resolving => {
+                "This computer can't hold it, so pick a side instead: opalro resolve <path> \
+                 --keep mine (or theirs)."
+                    .into()
+            }
             SaveError::KeptWhole { .. } => {
                 "Leave it out of what you name: it stays as the last save has it.".into()
             }
@@ -3729,6 +3734,16 @@ mod tests {
         assert_eq!(
             in_the_way,
             "Nothing was recorded. Rename or move a.txt, then run opalro resolve again."
+        );
+        // Under resolve the way on is to pick a side.
+        assert_eq!(
+            errors[7].hint_when_resolving().unwrap(),
+            "Nothing was recorded. This computer can't hold it, so pick a side instead: opalro \
+             resolve <path> --keep mine (or theirs)."
+        );
+        assert_eq!(
+            errors[7].hint().unwrap(),
+            "Nothing was saved. Leave it out of what you name: it stays as the last save has it."
         );
         // Save's own words don't change.
         assert_eq!(

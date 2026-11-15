@@ -447,17 +447,24 @@ fn choose<'c>(
                 .map(|c| fold_path(&c.path, drive))
                 .collect();
             let mut named = BTreeSet::new();
+            let at_or_below = |path: &str| -> Vec<usize> {
+                let top = fold_path(path, drive);
+                (0..conflicts.len())
+                    .filter(|&i| within(&folded[i], &top))
+                    .collect()
+            };
             for given in paths {
                 let below: Vec<usize> = match given {
                     Given::Path(path) => {
-                        let top = fold_path(path, drive);
-                        let below: Vec<usize> = (0..conflicts.len())
-                            .filter(|&i| within(&folded[i], &top))
-                            .collect();
+                        let below = at_or_below(path);
                         if below.is_empty() {
                             return Err(ResolveError::NotInConflict { path: path.clone() });
                         }
                         below
+                    }
+                    // A name that is a place, read letter for letter, is that place, `[` and all.
+                    Given::Pattern { .. } if !at_or_below(&given.shown()).is_empty() => {
+                        at_or_below(&given.shown())
                     }
                     Given::Pattern { .. } => {
                         let scope = Scope::new(std::slice::from_ref(given), drive);

@@ -1036,13 +1036,13 @@ fn ask_line_name(working: &progress::Working) -> Result<Option<String>, Failure>
     Ok(Some(answer.to_owned()))
 }
 
-/// Asks in the terminal whether to make a save that adds this much; `None` if there is no
-/// terminal to ask in. An answer that can't be read is a no.
-fn ask_large(large: &LargeSave) -> Option<bool> {
+/// Asks in the terminal whether to `go` on ("Save", "Record") with what adds this much; `None` if
+/// there is no terminal to ask in. An answer that can't be read is a no.
+fn ask_large(large: &LargeSave, go: &str) -> Option<bool> {
     if !style::may_ask() {
         return None;
     }
-    let _ = write!(std::io::stderr(), "{large} Save them? [y/N] ");
+    let _ = write!(std::io::stderr(), "{large} {go} them? [y/N] ");
     let mut answer = String::new();
     if std::io::stdin().lock().read_line(&mut answer).is_err() {
         return Some(false);
@@ -1102,7 +1102,7 @@ fn save(json: bool, args: SaveArgs, opened: &mut Option<Repository>) -> Result<(
             return yes;
         }
         working.pause();
-        let answer = ask_large(large);
+        let answer = ask_large(large, "Save");
         working.resume();
         said_no = answer == Some(false);
         answer.unwrap_or(false)
@@ -2513,6 +2513,7 @@ fn resolve_command(
         git_excludes: git_excludes.as_deref(),
     };
     let working = progress::Working::start("Recording");
+    let mut said_no_to_large = false;
     // With --json, or without a terminal, nothing is asked: it stops unless --yes said yes.
     let mut ask = |question: &resolving::Ask| {
         if yes || json || !style::may_ask() {
@@ -2521,14 +2522,27 @@ fn resolve_command(
         working.pause();
         let answer = match question {
             resolving::Ask::MarkersLeft { path, left } => ask_markers_left(path, *left),
-            resolving::Ask::Large(large) => ask_large(large).unwrap_or(false),
+            resolving::Ask::Large(large) => {
+                let answer = ask_large(large, "Record").unwrap_or(false);
+                said_no_to_large = !answer;
+                answer
+            }
         };
         working.resume();
         answer
     };
     let done = resolving::resolve(repo, &req, &mut waiting, &mut ask);
     drop(working);
-    let done = done?;
+    let done = match done {
+        Err(resolving::ResolveError::Save(SaveError::LargeSave(_))) if said_no_to_large => {
+            return Err(Failure {
+                message: "Nothing was recorded: you answered no.".into(),
+                hint: None,
+                printed: false,
+            });
+        }
+        done => done?,
+    };
     let mut warnings = Vec::new();
     if let ResolveOutcome::Recorded {
         applied,

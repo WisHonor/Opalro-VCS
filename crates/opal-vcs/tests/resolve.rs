@@ -417,10 +417,10 @@ fn a_large_fix_asks_on_a_terminal() {
     let before = env.standing();
     let (code, _, said) = asked(&env, &["resolve", "gone.txt"], "n\n");
     assert_eq!(code, Some(1), "{said}");
-    assert!(said.contains(" Save them? [y/N] "), "{said}");
-    // Wrapped at the terminal's 80 columns.
+    assert!(said.contains(" Record them? [y/N] "), "{said}");
+    assert!(!said.contains("Save them?"), "{said}");
     assert!(
-        said.contains("hint: Nothing was recorded. To record them, run opalro resolve again"),
+        said.contains("error: Nothing was recorded: you answered no.\n"),
         "{said}"
     );
     assert_eq!(env.standing(), before);
@@ -431,21 +431,130 @@ fn a_large_fix_asks_on_a_terminal() {
 
 /// `main` and `side` changed `art/b.png` and `art/c.png` apart, combined: both stand as yours.
 fn pictures_in_art(env: &Env) {
-    for name in ["art/b.png", "art/c.png"] {
-        support::write(env, name, PIC_START);
+    pictures(env, &["art/b.png", "art/c.png"]);
+}
+
+/// `main` and `side` changed each of `names` apart, combined: each stands as yours.
+fn pictures(env: &Env, names: &[&str]) {
+    for bytes in [PIC_START, PIC_SIDE, PIC_MAIN] {
+        for name in names {
+            support::write(env, name, bytes);
+        }
+        if bytes == PIC_START {
+            run(env, &["save", "Pictures"], 0);
+            run(env, &["line", "new", "side"], 0);
+        } else if bytes == PIC_SIDE {
+            run(env, &["save", "On side"], 0);
+            run(env, &["goto", "main"], 0);
+        } else {
+            run(env, &["save", "On main"], 0);
+        }
     }
-    run(env, &["save", "Art"], 0);
-    run(env, &["line", "new", "side"], 0);
-    for name in ["art/b.png", "art/c.png"] {
-        support::write(env, name, PIC_SIDE);
-    }
-    run(env, &["save", "On side"], 0);
-    run(env, &["goto", "main"], 0);
-    for name in ["art/b.png", "art/c.png"] {
-        support::write(env, name, PIC_MAIN);
-    }
-    run(env, &["save", "On main"], 0);
     run(env, &["combine", "side"], 0);
+}
+
+/// What `opalro status --json` holds in conflict.
+fn in_conflict(env: &Env) -> Vec<String> {
+    let doc = json(env, &["status"], 0);
+    let places = doc["conflicts"].as_array().unwrap();
+    places
+        .iter()
+        .map(|c| c["path"].as_str().unwrap().to_owned())
+        .collect()
+}
+
+#[test]
+fn a_name_that_is_a_place_is_that_place_before_it_is_a_pattern() {
+    // Both in conflict: the name means the file of that name.
+    let env = project();
+    pictures(&env, &["a[1].png", "a1.png"]);
+    let doc = json(&env, &["resolve", "a[1].png", "--keep", "theirs"], 0);
+    assert_eq!(doc["recorded"], serde_json::json!(["a[1].png"]), "{doc}");
+    assert_eq!(
+        std::fs::read(env.root().join("a[1].png")).unwrap(),
+        PIC_SIDE
+    );
+    assert_eq!(std::fs::read(env.root().join("a1.png")).unwrap(), PIC_MAIN);
+    assert_eq!(in_conflict(&env), ["a1.png"]);
+
+    // Only `a1.png` in conflict: the same words are a pattern, and match it.
+    let env = project();
+    pictures(&env, &["a1.png"]);
+    let doc = json(&env, &["resolve", "a[1].png", "--keep", "theirs"], 0);
+    assert_eq!(doc["recorded"], serde_json::json!(["a1.png"]), "{doc}");
+
+    // A folder named with a bracket.
+    let env = project();
+    pictures(&env, &["f[1]/b.png", "f1/b.png"]);
+    let doc = json(&env, &["resolve", "f[1]", "--keep", "theirs"], 0);
+    assert_eq!(doc["recorded"], serde_json::json!(["f[1]/b.png"]), "{doc}");
+    assert_eq!(in_conflict(&env), ["f1/b.png"]);
+}
+
+#[test]
+fn a_name_that_is_a_place_is_that_place_without_keep_too() {
+    // Both in conflict and changed by hand: only the file of that name is recorded.
+    let env = project();
+    pictures(&env, &["a[1].png", "a1.png"]);
+    support::write(&env, "a[1].png", b"painted over");
+    support::write(&env, "a1.png", b"painted over");
+    let doc = json(&env, &["resolve", "a[1].png"], 0);
+    assert_eq!(doc["recorded"], serde_json::json!(["a[1].png"]), "{doc}");
+    assert_eq!(in_conflict(&env), ["a1.png"]);
+
+    // Only `a1.png` in conflict: a pattern, which records only what is fixed, and nothing is.
+    let env = project();
+    pictures(&env, &["a1.png"]);
+    let rows: String = status_rows(&env).concat();
+    let (shown, _) = run(&env, &["resolve", "a[1].png"], 0);
+    assert_eq!(
+        shown,
+        format!("Nothing to record: no place in conflict is fixed in your folder.\n\n{rows}")
+    );
+
+    // A folder named with a bracket.
+    let env = project();
+    pictures(&env, &["f[1]/b.png", "f1/b.png"]);
+    support::write(&env, "f[1]/b.png", b"painted over");
+    support::write(&env, "f1/b.png", b"painted over");
+    let doc = json(&env, &["resolve", "f[1]"], 0);
+    assert_eq!(doc["recorded"], serde_json::json!(["f[1]/b.png"]), "{doc}");
+    assert_eq!(in_conflict(&env), ["f1/b.png"]);
+}
+
+#[test]
+fn several_fixes_that_cant_go_into_the_combined_save_say_them() {
+    let env = project();
+    three_conflicts(&env);
+    run(&env, &["tag", "v1.0"], 0);
+    let (shown, _) = run(
+        &env,
+        &["resolve", "pic.png", "gone.txt", "--keep", "theirs"],
+        0,
+    );
+    assert!(
+        shown.contains(
+            "\n\n    The combined save couldn't take them: tag v1.0 shows it too.\n    Took theirs \
+             for 2 places.\n"
+        ),
+        "{shown}"
+    );
+    let env = project();
+    three_conflicts(&env);
+    env.overwrite("b.txt", "b\n");
+    run(&env, &["save", "B"], 0);
+    let (shown, _) = run(
+        &env,
+        &["resolve", "pic.png", "gone.txt", "--keep", "theirs"],
+        0,
+    );
+    assert!(
+        shown.contains(
+            "\n\n    Your newest save isn't a combined save, so the fixes are a save of their \
+             own.\n"
+        ),
+        "{shown}"
+    );
 }
 
 #[test]
