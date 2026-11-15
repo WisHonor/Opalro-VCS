@@ -559,7 +559,7 @@ Planned on 2026-11-14 after decisions [174](decisions/174-the-conflict-record.md
 **10. The model test and the comparison with `git merge`** ✅ (2026-11-15; Task 16)
 - The model of the whole command line keeps and fixes conflicts by its own rules; the comparison with `git merge` holds that where Git reports a conflict Opalro keeps one at the same places, and, where a case is set aside because Git followed a move, that nothing either line added was lost ([testing.md](testing.md) §3; [decision 181](decisions/181-what-building-milestone-9-refined.md) names the two faults it found).
 
-**11. Docs, red team, review and merge** (Tasks 17 to 19)
+**11. Docs, red team, review and merge** ✅ (2026-11-15; Tasks 17 to 19)
 - **Docs** ✅ (2026-11-15): the design, the guide, [security.md](security.md), [testing.md](testing.md) and [benchmarks.md](benchmarks.md) §14 say what is built; [terminal.md](terminal.md), [json.md](json.md) and [storage-format.md](storage-format.md) were written with the code; what building refined is [decision 181](decisions/181-what-building-milestone-9-refined.md), and the calls made on the way are in [the rulings](plans/2026-11-14-milestone-9-rulings.md).
-- **Red team, review and merge:** not done yet. The branch waits for its red-team session and its whole-branch review before it is merged into `v0.2`.
+- **Red team, review and merge** ✅ (2026-11-15): two red-team sessions (RT21: 2 Medium and 2 Low; RT22, on the fixes: 1 Low; all fixed, [decisions 182](decisions/182-red-team-m9-rulings.md) and [183](decisions/183-red-team-m9-session-2-rulings.md)), a whole-branch review by four readers, one round of fixes checked item by item, and the merge into `v0.2`.
 - *Done when:* every proven finding is fixed or ruled on, every document matches the code, and the branch is merged into `v0.2`.

@@ -57,4 +57,4 @@ The second red-team session on milestone 9 (RT22, [report](../redteam/2026-11-15
 
 - `resolve --keep` on a folder changes exactly the places it was asked to.
 - Two red-team sessions on conflicts found five things, none High: a promise with an exception, memory without a bound, a folder's path that decided too much, a sentence that was wrong in one case, and this. Each is fixed.
-- The planted project that stopped `status` at 3 GB now takes 196 MB, where the same save of 250,000 plain files takes 86 MB (the first session's table). The difference is bounded by the store's budget for whole records.
+- The planted project that stopped `status` at 3 GB now takes 196 MB, where the same save of 250,000 plain files takes 86 MB (the first session's table). The difference is a small, fixed amount for each record, which grows with their number, plus at most what the store's budget for whole records holds.

@@ -350,6 +350,9 @@ What keeping conflicts left: the "Deferred" list of [the milestone's rulings](20
 | Should do | Four tests in `ancestry.rs` need both orders of a tie among 16 random histories whose saves' IDs differ on every run, and together fail by chance about once in 10,000 runs. One such test, `a_start_under_another_dated_alike_is_dropped`, failed once on CI and was fixed; the same loop would close the other four. |
 | Should do | The model of the command line (`crates/opal-vcs/tests/model.rs`) takes the 8 letters of a marker's labels from the change IDs the engine stored for its saves, so a fault in which save's letters a label takes would be shared by the model. |
 | Should do | The comparison with `git merge` (`crates/opal-vcs/tests/merge_vs_git.rs`) tells which moves Git followed by asking Git's rename detection through `git diff -M` between where the branches parted and each tip, not from the merge itself; a case is set aside only where that finds a move, and then with its check that nothing either line added was lost. |
+| Should do | The doc comment on `Summary` in `crates/opal-vcs-core/src/conflict.rs` still says a project of conflicts costs a command about what a project of files does. What is true: a summary is of one size however many versions the record names ([decision 182](../decisions/182-red-team-m9-rulings.md), its corrections). |
+| Should do | The command-line test of `combine --only-if-clean` stopping with nothing to combine checks the `--json` document's message and hint, not the whole document. |
+| Should do | `a_file_moved_where_the_other_line_put_a_folder_at_its_old_place` checks the folder version the conflict keeps by its kind only, not that it is the other line's own folder (compare the version's ID with that line's entry). |
 
 ## For the owner to decide
 
