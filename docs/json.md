@@ -181,7 +181,17 @@ Saving gives one of two documents, told apart by `result`.
 | `changes` | list of change | Each file that differs from that save, as in `show` (a change, below), in the order of the paths. `[]` when nothing changed. |
 | `not_written` | list of string | The paths of the save's entries this computer can't hold as they are (project links, names this system can't create, names that are one file on this drive, links Git wrote as files holding their targets). Saves keep them as they were, so they are never changes. A kept folder is named once, not each entry in it. `[]` if none. |
 | `unfinished_switch` | boolean | `true` when a switch between saves (`goto`, `discard`) was stopped before it was done, or just after it was done with its journal, `.opalro/state/journal`, left behind, or its journal can't be used; the `switch_unfinished` warning (§4) in `warnings` then says which. `false` otherwise. The folder is compared with the save the project is on: the one it was on before the switch, unless the switch was done. |
+| `conflicts` | list of place | Each place in conflict in that save, with how it stands in the folder, in the order of the paths: every one, as `changes` lists every change ([decision 179](decisions/179-every-command-and-a-conflict.md)). A place in conflict is never in `changes` too. `[]` when there is none, and always in a project whose `.opalro/format` doesn't list `conflicts`, where a conflict's entry is compared as any other. |
 | `warnings` | list | See §4. |
+
+**A place** in `conflicts`:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `path` | string | The place's path. |
+| `standing` | string | How it stands in the folder: `"markers"`, shown with conflict markers and some are left; `"fixed"`, shown with markers and none are left, not yet recorded; `"yours"`, your line's version, as the combine left it; `"changed"`, standing as a version and changed in the folder, or holding a version of the person's own; `"nothing"`, neither your line nor the folder has anything there; `"not_here"`, in a part of the save this computer can't hold, kept as it is. |
+| `places_left` | number or `null` | For `"markers"`, how many marked places are left (`0` when only closing marker lines are). `null` for every other `standing`. |
+| `terms` | number | How many versions the conflict names: `3` (yours, where the lines parted, theirs) for every conflict Opalro 0.2 makes. |
 
 ### `opalro changes --json`
 
@@ -202,6 +212,7 @@ Saving gives one of two documents, told apart by `result`.
 | `hunks` | list of hunk | The changed lines with 3 lines of context around them, as in a unified diff. `[]` unless `content` is `"text"`. |
 | `timed_out` | boolean | The diff took more than 2 seconds, so Opalro stopped it: the hunks are right, but in bigger pieces than they could be. A `diff_timed_out` warning says so too. |
 | `only_line_endings` | boolean | Every line the hunks remove or add is one of a pair that differs only in its line ending (see `eol_only` below): CRLF into LF, LF into CRLF, or some of each. |
+| `in_conflict` | boolean | `true` for a file at a place in conflict, or below one standing as a folder: it is compared with what the conflict stands as, what the folder held for it after the last save. Always `false` with `--save`, and in a project whose `.opalro/format` doesn't list `conflicts`. |
 
 **A hunk:** `old_start`, `old_lines`, `new_start`, `new_lines` (numbers: the first line's number on each side, from 1, or the line before it for a side with no lines, and how many lines of that side the hunk covers), and `lines`, a list of `{"tag": …, "text": …}`: `tag` is `"same"`, `"removed"` or `"added"`, and `text` is the line with its ending (`"\n"`, `"\r\n"`, or none for a last line without one). Bytes that aren't UTF-8 show as U+FFFD. A removed line and an added line that differ only in their ending, `"\r\n"` for `"\n"` or the other way round, both have `"eol_only": true`; the pairs are the diff's own, the first of a run of removed lines with the first of the added lines right after it, the second with the second, and so on. Other lines leave `eol_only` out. For people, the line of such a pair that ends in CRLF is shown with `(CRLF)` after it.
 

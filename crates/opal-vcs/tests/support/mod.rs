@@ -517,14 +517,31 @@ pub fn add_listing(pack: &mut PackSet, names: &[String], kind: EntryKind, id: Id
 /// Stores the folder listings that hold `entries` (a path, a kind, and a file's bytes or a link's
 /// target, each stored as `add_file` stores it) and returns the top one's ID.
 pub fn listings(pack: &mut PackSet, entries: &[(&str, EntryKind, &[u8])]) -> Id {
-    let mut folders: BTreeMap<String, Vec<Entry>> = BTreeMap::from([(String::new(), vec![])]);
+    listings_with_conflicts(pack, entries, &[])
+}
+
+/// As [`listings`], with a conflict at each path of `conflicts`, its record stored as
+/// [`add_conflict`] stores it.
+pub fn listings_with_conflicts(
+    pack: &mut PackSet,
+    entries: &[(&str, EntryKind, &[u8])],
+    conflicts: &[(&str, &Record)],
+) -> Id {
+    let mut placed: Vec<(&str, EntryKind, Id, u64)> = Vec::new();
     for &(path, kind, bytes) in entries {
+        placed.push((path, kind, add_file(pack, bytes), bytes.len() as u64));
+    }
+    for &(path, record) in conflicts {
+        placed.push((path, EntryKind::Conflict, add_conflict(pack, record), 0));
+    }
+    let mut folders: BTreeMap<String, Vec<Entry>> = BTreeMap::from([(String::new(), vec![])]);
+    for (path, kind, id, size) in placed {
         let (up, name) = path.rsplit_once('/').unwrap_or(("", path));
         folders.entry(up.to_owned()).or_default().push(Entry {
             name: name.to_owned(),
             kind,
-            id: add_file(pack, bytes),
-            size: bytes.len() as u64,
+            id,
+            size,
         });
         // Every folder above, even one that holds only folders.
         let mut at = up;

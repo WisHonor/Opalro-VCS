@@ -26,6 +26,7 @@ expression: doc
       "path": "c.txt"
     }
   ],
+  "conflicts": [],
   "not_written": [],
   "opalro_json": 1,
   "position": {

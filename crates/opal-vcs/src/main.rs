@@ -1261,6 +1261,7 @@ fn status_command(json: bool, full: bool, opened: &mut Option<Repository>) -> Re
                     "changes": changes,
                     "not_written": found.not_written_here,
                     "unfinished_switch": found.unfinished_switch.is_some(),
+                    "conflicts": found.conflicts.iter().map(output::conflict_json).collect::<Vec<_>>(),
                     "warnings": output::warnings_json(&warnings),
                 })
             );
@@ -1282,7 +1283,16 @@ fn status_command(json: bool, full: bool, opened: &mut Option<Repository>) -> Re
         }
         if found.changes.is_empty() {
             writeln!(out, "Nothing changed since then.")?;
-        } else {
+        }
+        if !found.conflicts.is_empty() {
+            let count = output::counted(found.conflicts.len() as u64, "place", "places");
+            let count = s.paint(style::Role::Dim, &format!("({count})"));
+            writeln!(out, "\nIn conflict {count}:\n")?;
+            for row in output::conflict_rows(s, &found.conflicts) {
+                writeln!(out, "{row}")?;
+            }
+        }
+        if !found.changes.is_empty() {
             let count = output::files(found.changes.len());
             let count = s.paint(style::Role::Dim, &format!("({count})"));
             writeln!(out, "\nChanged since then {count}:\n")?;
@@ -1313,7 +1323,10 @@ fn status_command(json: bool, full: bool, opened: &mut Option<Repository>) -> Re
         Ok(())
     })();
     output::ended(None, String::new, &warnings, None)?;
-    if !json && !found.changes.is_empty() {
+    let next = output::conflicts_next(&found.conflicts);
+    if !json && !next.is_empty() {
+        style::next(&next);
+    } else if !json && !found.changes.is_empty() {
         style::next(&format!(
             "save them with: {}",
             style::err().command("opalro save \"describe your change\"")
@@ -1429,6 +1442,7 @@ fn changes_command(
                     let file = output::LinesJson {
                         change: &file_change(c),
                         lines: &lines,
+                        in_conflict: c.in_conflict,
                     };
                     item(&file).map_err(Stop::Write)
                 })
@@ -1446,6 +1460,15 @@ fn changes_command(
             note(path, &lines);
             if shown.get() > 1 {
                 wrote(writeln!(out, "{}", output::between_files()))?;
+            }
+            if c.in_conflict {
+                let s = style::out();
+                let path = s.paint(style::Role::Path, &escape(path, false));
+                wrote(writeln!(
+                    out,
+                    "In conflict: {path} (compared with what your folder held for it after the \
+                     last save)"
+                ))?;
             }
             wrote(output::write_lines(&mut out, &file_change(c), &lines))
         })

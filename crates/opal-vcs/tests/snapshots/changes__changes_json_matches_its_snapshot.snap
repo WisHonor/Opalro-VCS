@@ -33,6 +33,7 @@ expression: doc
           "old_start": 1
         }
       ],
+      "in_conflict": false,
       "kind": "file",
       "new_size": 12,
       "old_size": 14,
@@ -44,6 +45,7 @@ expression: doc
       "change": "modified",
       "content": "binary",
       "hunks": [],
+      "in_conflict": false,
       "kind": "file",
       "new_size": 2,
       "old_size": 1,
@@ -68,6 +70,7 @@ expression: doc
           "old_start": 0
         }
       ],
+      "in_conflict": false,
       "kind": "file",
       "new_size": 3,
       "old_size": null,

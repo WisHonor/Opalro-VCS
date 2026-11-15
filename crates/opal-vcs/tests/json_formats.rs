@@ -7,6 +7,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+use opal_core::conflict::{Record, Term};
+use opal_core::id::hash_content;
+use opal_core::listing::EntryKind;
 use serde_json::Value;
 
 mod support;
@@ -189,6 +192,33 @@ fn every_document() -> Vec<(&'static str, usize, Value)> {
     std::fs::remove_file(root.join(".opalro/state/head")).unwrap();
     let lost = run(&["undo", "--list"], 0);
     docs.push(("`opalro undo --list --json`", 2, lost));
+
+    // A place in conflict, planted, standing in the folder as changed.
+    let conflicted = Env::empty();
+    let root = conflicted.root().to_owned();
+    document(&conflicted, &root, start, 0);
+    let mine = b"mine\n";
+    let term = |bytes: &[u8]| Term {
+        kind: EntryKind::File,
+        id: hash_content(bytes),
+        size: bytes.len() as u64,
+    };
+    let record = Record {
+        terms: vec![Some(term(mine)), None, Some(term(b"theirs\n"))],
+        own: None,
+    };
+    support::plant_save(&root, |pack| {
+        pack.add_content(b"theirs\n").unwrap();
+        pack.add_content(mine).unwrap();
+        support::listings_with_conflicts(pack, &[], &[("c.txt", &record)])
+    });
+    std::fs::write(root.join("c.txt"), "mine, changed\n").unwrap();
+    let status = document(&conflicted, &root, &["status"], 0);
+    assert_eq!(status["conflicts"][0]["standing"], "changed", "{status}");
+    docs.push(("`opalro status --json`", 0, status));
+    let changes = document(&conflicted, &root, &["changes"], 0);
+    assert_eq!(changes["changes"][0]["in_conflict"], true, "{changes}");
+    docs.push(("`opalro changes --json`", 0, changes));
     docs
 }
 

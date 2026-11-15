@@ -429,6 +429,25 @@ Next: save them with: opalro save "describe your change"
 
 Each row is the kind of change (`added`, `removed`, `modified`, or `kind changed` when a file became a folder or the other way round), the path, and the size: before and after for a modified file. If you are at an older save rather than on a line, the first line says `At save <id> "<message>", not on a line` instead.
 
+When a combine left places in conflict, `status` lists them first, each with what it still needs, and every one of them, however many:
+
+```text
+On line main at save kxqm "Combined side"  (just now)
+
+In conflict (3 places):
+
+    art/hero.png  your version, still to decide
+    notes.txt       2 marked places left to fix
+    todo.txt            fixed, not yet recorded
+
+Next: record what you fixed with: opalro resolve
+      Fix the marked places in your editor, then run opalro resolve.
+      To pick a version: opalro resolve <path> --keep mine (or theirs); to look at theirs first:
+      opalro resolve <path> --copy theirs --to <file>
+```
+
+A place stays in this list, and out of the list of changes, until `opalro resolve` records how you settled it. `opalro changes` shows what you changed in such a file since the combine, under a line saying it is in conflict.
+
 To be fast, `status` re-reads only files whose size or time changed. `--full` reads every file, to be sure:
 
 ```sh

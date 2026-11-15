@@ -1884,6 +1884,22 @@ fn project_text_is_escaped_with_colour_on() {
         support::without_opals_codes(&said).contains(&format!("needs it at {shown_name}.")),
         "{said}"
     );
+
+    // A place in conflict, which no folder holds.
+    let record = opal_core::conflict::Record {
+        terms: vec![None, None, None],
+        own: None,
+    };
+    let place = format!("evil{CLEAR}\u{202e}.png");
+    support::plant_save(env.root(), |pack| {
+        support::listings_with_conflicts(pack, &[], &[(place.as_str(), &record)])
+    });
+    let said = same_with_colour_on(&env, &["status"], 0);
+    assert!(
+        support::without_opals_codes(&said).contains("In conflict (1 place):"),
+        "{said}"
+    );
+    assert!(said.contains("evil\\x1b[2J\\u{202e}.png"), "{said}");
 }
 
 /// A name holding an escape character can only be made where the system allows it, and only as a
