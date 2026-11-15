@@ -1,0 +1,188 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+mod support;
+use support::{Env, text};
+
+fn run(env: &Env, args: &[&str]) -> (i32, String) {
+    let out = env.opalro().args(args).output().unwrap();
+    let said = format!("{}{}", text(&out.stdout), text(&out.stderr));
+    (out.status.code().unwrap_or(-1), said)
+}
+
+fn ok(env: &Env, args: &[&str]) -> String {
+    let (code, said) = run(env, args);
+    assert_eq!(code, 0, "{args:?}: {said}");
+    said
+}
+
+fn project() -> Env {
+    let env = Env::empty();
+    ok(&env, &["start", "--preset", "custom"]);
+    env.overwrite("a.txt", "1\n2\n3\n4\n5\n6\n7\n8\n");
+    ok(&env, &["save", "A"]);
+    env
+}
+
+fn one_conflict(env: &Env) {
+    ok(env, &["line", "new", "side"]);
+    env.overwrite("a.txt", "1\nside\n3\n4\n5\n6\n7\n8\n");
+    ok(env, &["save", "On side"]);
+    ok(env, &["goto", "main"]);
+    env.overwrite("a.txt", "1\nmain\n3\n4\n5\n6\n7\n8\n");
+    ok(env, &["save", "On main"]);
+    ok(env, &["combine", "side"]);
+}
+
+#[test]
+fn rt21_nothing_only_if_clean() {
+    let env = project();
+    one_conflict(&env);
+    let (code, said) = run(&env, &["combine", "side", "--only-if-clean"]);
+    println!("NOTHING: exit {code}\n{said}");
+    let (code, said) = run(&env, &["combine", "side", "--only-if-clean", "--json"]);
+    println!("NOTHING json: exit {code}\n{said}");
+    println!("STATUS: {}", run(&env, &["status"]).1);
+}
+
+#[test]
+fn rt21_base_conflict_both_fix_differently() {
+    let env = project();
+    one_conflict(&env);
+    // Two lines from the conflicted save, each fixing it its own way.
+    ok(&env, &["line", "new", "x"]);
+    env.overwrite("a.txt", "1\nX\n3\n4\n5\n6\n7\n8\n");
+    println!("{}", ok(&env, &["resolve"]));
+    ok(&env, &["goto", "main"]);
+    ok(&env, &["line", "new", "y"]);
+    env.overwrite("a.txt", "1\nY\n3\n4\n5\n6\n7\n8\n");
+    println!("{}", ok(&env, &["resolve"]));
+    let (code, said) = run(&env, &["combine", "x"]);
+    println!("COMBINE x into y: exit {code}\n{said}");
+    println!("STATUS: {}", run(&env, &["status", "--json"]).1);
+    println!(
+        "FILE: {}",
+        std::fs::read_to_string(env.root().join("a.txt")).unwrap()
+    );
+}
+
+#[test]
+fn rt21_ignore_rule_over_a_marked_file() {
+    let env = project();
+    env.overwrite("plain.txt", "plain\n");
+    ok(&env, &["save", "Plain"]);
+    one_conflict(&env);
+    env.overwrite(".opalroignore", "a.txt\nplain.txt\n");
+    println!("STATUS: {}", run(&env, &["status"]).1);
+    println!("SAVE: {}", run(&env, &["save", "Ignore"]).1);
+    println!("STATUS after: {}", run(&env, &["status"]).1);
+    println!("SHOW: {}", run(&env, &["show"]).1);
+    println!("RESOLVE: {:?}", run(&env, &["resolve"]));
+}
+
+#[test]
+fn rt21_keep_theirs_over_a_folder_with_unsaved_work() {
+    let env = project();
+    ok(&env, &["line", "new", "side"]);
+    env.overwrite("d", "a file on side\n");
+    ok(&env, &["save", "File d"]);
+    ok(&env, &["goto", "main"]);
+    support::write(&env, "d/x.txt", "x\n");
+    ok(&env, &["save", "Folder d"]);
+    println!("COMBINE: {:?}", run(&env, &["combine", "side"]));
+    println!("STATUS: {}", run(&env, &["status"]).1);
+    support::write(&env, "d/x.txt", "x edited, unsaved\n");
+    support::write(&env, "d/new.txt", "new, unsaved\n");
+    println!("STATUS2: {}", run(&env, &["status"]).1);
+    println!("KEEP: {:?}", run(&env, &["resolve", "d", "--keep", "theirs"]));
+    println!(
+        "d now: {:?}",
+        std::fs::read_to_string(env.root().join("d")).ok()
+    );
+    println!("UNDO: {:?}", run(&env, &["undo"]));
+    println!(
+        "after undo x={:?} new={:?}",
+        std::fs::read_to_string(env.root().join("d/x.txt")).ok(),
+        std::fs::read_to_string(env.root().join("d/new.txt")).ok()
+    );
+    println!("STATUS3: {}", run(&env, &["status"]).1);
+}
+
+#[test]
+fn rt21_x_fixed_y_untouched() {
+    let env = project();
+    one_conflict(&env);
+    ok(&env, &["line", "new", "x"]);
+    env.overwrite("a.txt", "1\nX\n3\n4\n5\n6\n7\n8\n");
+    ok(&env, &["resolve"]);
+    ok(&env, &["goto", "main"]);
+    ok(&env, &["line", "new", "y"]);
+    env.overwrite("b.txt", "b\n");
+    ok(&env, &["save", "B"]);
+    let (code, said) = run(&env, &["combine", "x"]);
+    println!("COMBINE x into y: exit {code}\n{said}");
+    println!("STATUS: {}", run(&env, &["status"]).1);
+}
+
+#[test]
+fn rt21_copy_before_where_unknown() {
+    let env = project();
+    one_conflict(&env);
+    ok(&env, &["line", "new", "x"]);
+    env.overwrite("a.txt", "1\nX\n3\n4\n5\n6\n7\n8\n");
+    ok(&env, &["resolve"]);
+    ok(&env, &["goto", "main"]);
+    ok(&env, &["line", "new", "y"]);
+    env.overwrite("a.txt", "1\nY\n3\n4\n5\n6\n7\n8\n");
+    ok(&env, &["resolve"]);
+    ok(&env, &["combine", "x"]);
+    println!(
+        "COPY BEFORE: {:?}",
+        run(&env, &["resolve", "a.txt", "--copy", "before", "--to", "../b4"])
+    );
+    println!("SHOW: {}", run(&env, &["show"]).1);
+}
+
+#[test]
+fn rt21_only_if_clean_carries_mine() {
+    let env = project();
+    one_conflict(&env);
+    ok(&env, &["line", "new", "other"]);
+    env.overwrite("b.txt", "b\n");
+    ok(&env, &["save", "B"]);
+    ok(&env, &["goto", "main"]);
+    env.overwrite("c.txt", "c\n");
+    ok(&env, &["save", "C"]);
+    let (code, said) = run(&env, &["combine", "other", "--only-if-clean"]);
+    println!("CARRY: exit {code}\n{said}");
+    // And on the other side: `other` combines main (which holds the conflict) in.
+    ok(&env, &["goto", "other"]);
+    let (code, said) = run(&env, &["combine", "main", "--only-if-clean"]);
+    println!("CARRY theirs: exit {code}\n{said}");
+}
+
+#[test]
+fn rt21_conflict_in_folder_moved_on_other_line() {
+    let env = Env::empty();
+    ok(&env, &["start", "--preset", "custom"]);
+    support::write(&env, "d/a.txt", "1\n2\n3\n4\n5\n6\n7\n8\n");
+    support::write(&env, "d/b.txt", "b\n");
+    ok(&env, &["save", "A"]);
+    ok(&env, &["line", "new", "mover"]);
+    std::fs::rename(env.root().join("d"), env.root().join("e")).unwrap();
+    ok(&env, &["save", "Moved d to e"]);
+    ok(&env, &["goto", "main"]);
+    ok(&env, &["line", "new", "side"]);
+    support::write(&env, "d/a.txt", "1\nside\n3\n4\n5\n6\n7\n8\n");
+    ok(&env, &["save", "On side"]);
+    ok(&env, &["goto", "main"]);
+    support::write(&env, "d/a.txt", "1\nmain\n3\n4\n5\n6\n7\n8\n");
+    ok(&env, &["save", "On main"]);
+    ok(&env, &["combine", "side"]);
+    let (code, said) = run(&env, &["combine", "mover"]);
+    println!("COMBINE mover: exit {code}\n{said}");
+    println!("STATUS: {}", run(&env, &["status"]).1);
+    ok(&env, &["goto", "mover"]);
+    let (code, said) = run(&env, &["combine", "main"]);
+    println!("COMBINE main into mover: exit {code}\n{said}");
+    println!("STATUS: {}", run(&env, &["status"]).1);
+}

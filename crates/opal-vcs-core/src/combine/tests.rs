@@ -4244,7 +4244,7 @@ fn many_conflicts_are_counted_after_the_first_100() {
         rules_not_whole: None,
         why: NotKept::OnlyIfClean,
         held: 0,
-        forward: false,
+        by: HeldBy::Lines,
     };
     assert_eq!(
         err.to_string(),
@@ -4260,14 +4260,14 @@ fn only_if_clean_counts_the_places_the_lines_hold_already() {
         line: "main".into(),
         target: "side".into(),
     };
-    let err = |conflicts: Vec<Conflict>, held, forward| CombineError::Conflicts {
+    let err = |conflicts: Vec<Conflict>, held, by| CombineError::Conflicts {
         names: names.clone(),
         conflicts,
         more: 0,
         rules_not_whole: None,
         why: NotKept::OnlyIfClean,
         held,
-        forward,
+        by,
     };
     let made = Conflict {
         path: "b.txt".into(),
@@ -4275,24 +4275,24 @@ fn only_if_clean_counts_the_places_the_lines_hold_already() {
         stands: None,
     };
     assert_eq!(
-        err(vec![made], 1_000, false).to_string(),
+        err(vec![made], 1_000, HeldBy::Lines).to_string(),
         "Combining side into main would leave 1,001 places in conflict, so nothing was changed \
          (--only-if-clean):\n  b.txt: added on both lines, differently\nThe two lines hold \
          1,000 more in conflict already."
     );
     assert_eq!(
-        err(vec![], 1, false).to_string(),
+        err(vec![], 1, HeldBy::Lines).to_string(),
         "Combining side into main would leave 1 place in conflict, so nothing was changed \
          (--only-if-clean).\nThe two lines hold it in conflict already."
     );
     assert_eq!(
-        err(vec![], 2, true).to_string(),
+        err(vec![], 2, HeldBy::Target).to_string(),
         "Combining side into main would leave 2 places in conflict, so nothing was changed \
          (--only-if-clean).\nside holds them in conflict already."
     );
     let hint = "Run it again without --only-if-clean to keep the conflicts and fix them one at a \
                 time.";
-    assert_eq!(err(vec![], 2, true).hint().unwrap(), hint);
+    assert_eq!(err(vec![], 2, HeldBy::Target).hint().unwrap(), hint);
 }
 
 /// `main` at a save, `side` one save ahead holding a planted conflict at `x.txt`; the project
@@ -4322,7 +4322,7 @@ fn only_if_clean_stops_a_forward_onto_a_save_that_holds_a_conflict() {
             err,
             CombineError::Conflicts {
                 held: 1,
-                forward: true,
+                by: HeldBy::Target,
                 why: NotKept::OnlyIfClean,
                 ..
             }
@@ -4404,6 +4404,122 @@ fn a_forward_without_the_flag_reads_nothing_more() {
     assert!(reads[2].0 > reads[1].0, "{reads:?}");
 }
 
+/// `side` at a save, `main` one save ahead of it holding a planted conflict at `x.txt`; the
+/// project is on `main`, which has everything `side` has.
+fn behind_a_line_in_conflict(h: &mut Hist) {
+    let c = plant_record(h, [b"mine\n", b"was\n", b"theirs\n"]);
+    let first = h.first;
+    let base = tree(&[("a.txt", f("a\n"))]);
+    let b = h.plant(&[first], &base, Some(&[]));
+    let t = h.plant(&[b], &with(&base, &[("x.txt", V::Conflict(c))]), Some(&[]));
+    h.set(|s| {
+        s.lines.insert("side".into(), b);
+        s.lines.insert("main".into(), t);
+    });
+    h.on("main", &base);
+}
+
+#[test]
+fn only_if_clean_with_nothing_to_combine_stops_on_a_line_that_holds_a_conflict() {
+    let mut h = Hist::new();
+    h.keep = Keep::OnlyIfClean;
+    behind_a_line_in_conflict(&mut h);
+    let before = h.untouched();
+    let err = combine_in(&mut h, "side").unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            CombineError::Conflicts {
+                conflicts,
+                held: 1,
+                by: HeldBy::Line,
+                why: NotKept::OnlyIfClean,
+                ..
+            } if conflicts.is_empty()
+        ),
+        "{err:?}"
+    );
+    assert_eq!(
+        err.to_string(),
+        "Combining side into main would leave 1 place in conflict, so nothing was changed \
+         (--only-if-clean).\nmain holds it in conflict already."
+    );
+    assert_untouched(&h, &before);
+    // Without the flag there is nothing to combine, as before.
+    h.keep = Keep::Conflicts;
+    let done = combine_in(&mut h, "side").unwrap();
+    assert_eq!(done.result, Combined::Nothing);
+}
+
+#[test]
+fn only_if_clean_with_nothing_to_combine_stops_on_a_line_past_the_limits() {
+    let mut h = Hist::new();
+    h.keep = Keep::OnlyIfClean;
+    behind_a_line_in_conflict(&mut h);
+    let before = h.untouched();
+    let tight = Bounds {
+        limits: SaveLimits::new(crate::listing::MAX_SAVE_DEPTH, 1),
+        ..bounds()
+    };
+    let err = combine_by(&mut h, "side", None, tight).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            CombineError::Past {
+                which: Which::Ours,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert!(
+        err.to_string()
+            .starts_with("Line main's newest save is past Opalro's limits"),
+        "{err}"
+    );
+    assert_untouched(&h, &before);
+}
+
+#[test]
+fn nothing_to_combine_reads_nothing_more_unless_asked_for_a_clean_line() {
+    let mut reads = vec![];
+    for (feature, keep) in [
+        (false, Keep::Conflicts),
+        (true, Keep::Conflicts),
+        (false, Keep::OnlyIfClean),
+        (true, Keep::OnlyIfClean),
+    ] {
+        let mut h = Hist::new();
+        if !feature {
+            h.repo = crate::test_support::without_conflicts_feature(h.dir.path());
+        }
+        h.keep = keep;
+        let first = h.first;
+        let base = tree(&[("a.txt", f("a\n"))]);
+        let b = h.plant(&[first], &base, Some(&[]));
+        let t = h.plant(&[b], &with(&base, &[("d/x.txt", f("x\n"))]), Some(&[]));
+        h.set(|s| {
+            s.lines.insert("side".into(), b);
+            s.lines.insert("main".into(), t);
+        });
+        h.on("main", &base);
+        let store = h.repo.store();
+        let before = (store.listings_read(), store.conflicts_read());
+        let done = combine_in(&mut h, "side").unwrap();
+        assert_eq!(done.result, Combined::Nothing);
+        let store = h.repo.store();
+        reads.push((
+            store.listings_read() - before.0,
+            store.conflicts_read() - before.1,
+        ));
+    }
+    // Without the flag, or where conflicts aren't kept, as before: nothing more.
+    assert_eq!(reads[0], reads[1]);
+    assert_eq!(reads[0], reads[2]);
+    // Asked for a clean line, the line's own save is looked through.
+    assert!(reads[3].0 > reads[1].0, "{reads:?}");
+}
+
 #[test]
 fn only_if_clean_stops_for_a_conflict_inside_a_folder_one_line_changed() {
     let mut h = Hist::new();
@@ -4421,7 +4537,7 @@ fn only_if_clean_stops_for_a_conflict_inside_a_folder_one_line_changed() {
             CombineError::Conflicts {
                 conflicts,
                 held: 1,
-                forward: false,
+                by: HeldBy::Lines,
                 why: NotKept::OnlyIfClean,
                 ..
             } if conflicts.is_empty()

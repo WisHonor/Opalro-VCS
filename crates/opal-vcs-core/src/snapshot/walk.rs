@@ -16,7 +16,7 @@ use opal_platform::dir::{Dir, DirEntry, EntryMeta, EntryType, is_link_refusal};
 
 use super::{Child, Folders, Kind, NAMED, SaveError, listed};
 use crate::conflict::standing::as_it_stands;
-use crate::conflict::{self, Record, Recording, Settled};
+use crate::conflict::{self, Own, Recording, Settled, Summary};
 use crate::drive::Drive;
 use crate::id::Id;
 use crate::ignore::{Decision, InForce, Matcher, Rules};
@@ -785,7 +785,7 @@ struct WalkState {
     /// Whether the project keeps conflicts: then the record of each conflict in a listing noted
     /// is read, once.
     keeps_conflicts: bool,
-    records: HashMap<Id, Record>,
+    records: HashMap<Id, Summary>,
     /// The folders a conflict stands as, and those below them, where a conflict is damage.
     in_conflict: HashSet<String>,
     /// The base save's conflicts kept as they were, by path, and the kept folders holding one.
@@ -1442,7 +1442,7 @@ pub(super) struct Scan {
     /// The new listings of the folders gone from disk that come back, still to be stored.
     pub(super) rebuilt: Vec<Listing>,
     /// The new conflict records those listings name, still to be stored.
-    pub(super) rebuilt_records: Vec<Record>,
+    pub(super) rebuilt_records: Vec<Again>,
     /// The paths of the entries kept as they were in those folders.
     pub(super) gone_kept: Vec<String>,
     /// What the walk noted for the warnings about files the ignore rules match.
@@ -1450,8 +1450,9 @@ pub(super) struct Scan {
     /// One for each `.gitignore` skipped, and one for the names Git treats as `.git` or Opalro as
     /// `.opalro` left out.
     pub(super) warnings: Vec<Warning>,
-    /// The records of the conflicts in the base save's listings the walk read, by ID.
-    pub(super) records: HashMap<Id, Record>,
+    /// What is kept of the records of the conflicts in the base save's listings the walk read,
+    /// by ID.
+    pub(super) records: HashMap<Id, Summary>,
     /// The base save's conflicts kept as they were (kind 6), and the folders kept as they were
     /// that hold one somewhere (a folder), by path.
     pub(super) kept_conflicts: Vec<(String, EntryKind, Id)>,
@@ -2111,6 +2112,15 @@ fn nested_projects_left_out(named: &Named) -> Warning {
     Warning::new(warning::NESTED_PROJECTS_LEFT_OUT, message)
 }
 
+/// A conflict record a save writes again, held without its versions: the record `from` of the
+/// conflict at `path`, with `own` as its own version, which is the record `id`.
+pub(super) struct Again {
+    pub(super) id: Id,
+    pub(super) path: String,
+    pub(super) from: Id,
+    pub(super) own: Own,
+}
+
 /// A folder gone from disk, back with only what is kept as it was below it.
 struct Gone {
     /// Its new listing's ID.
@@ -2122,7 +2132,7 @@ struct Gone {
     /// The conflicts kept as they were below it, and the kept folders holding one, by path.
     conflicts: Vec<(String, EntryKind, Id)>,
     /// The new records of the conflicts a save keeps below it, still to be stored.
-    records: Vec<Record>,
+    records: Vec<Again>,
     /// How many conflicts a save keeps below it, settled as the folder shows them.
     met: u64,
 }
@@ -2132,7 +2142,7 @@ struct Gone {
 /// stands as, where a conflict is damage.
 struct Search<'r> {
     git_names: &'r mut Named,
-    records: &'r mut HashMap<Id, Record>,
+    records: &'r mut HashMap<Id, Summary>,
     in_conflict: bool,
 }
 
@@ -2217,15 +2227,22 @@ fn rebuild_gone(
                 let path = path_below(top, &open, &name, &e.name);
                 let record = conflict::record_at(base.store, search.records, &path, &e.id)?;
                 let settled = match base.recording {
-                    Some(recording) => recording.settled_gone(&path, record),
-                    None => Recording::default().settled_gone(&path, record),
+                    Some(recording) => recording.settled_gone(&path, &record),
+                    None => Recording::default().settled_gone(&path, &record),
                 };
                 let id = match settled {
                     Settled::Fixed => continue,
                     Settled::Kept => e.id,
-                    Settled::Again(again) => {
-                        let id = again.id();
-                        records.push(again);
+                    Settled::Again(own) => {
+                        // Read whole to know the new record's ID, and again when it is stored.
+                        let id = conflict::again_at(base.store, &path, &e.id, own)?.id();
+                        let (path, from) = (path.clone(), e.id);
+                        records.push(Again {
+                            id,
+                            path,
+                            from,
+                            own,
+                        });
                         id
                     }
                 };

@@ -512,12 +512,15 @@ fn a_name_that_is_a_place_is_that_place_without_keep_too() {
         format!("Nothing to record: no place in conflict is fixed in your folder.\n\n{rows}")
     );
 
-    // A folder named with a bracket.
+    // A folder named with a bracket: as a folder's path, it takes no picture changed in place
+    // below it; named by its own path, the picture in it is that place.
     let env = project();
     pictures(&env, &["f[1]/b.png", "f1/b.png"]);
     support::write(&env, "f[1]/b.png", b"painted over");
     support::write(&env, "f1/b.png", b"painted over");
     let doc = json(&env, &["resolve", "f[1]"], 0);
+    assert_eq!(doc["result"], "nothing", "{doc}");
+    let doc = json(&env, &["resolve", "f[1]/b.png"], 0);
     assert_eq!(doc["recorded"], serde_json::json!(["f[1]/b.png"]), "{doc}");
     assert_eq!(in_conflict(&env), ["f1/b.png"]);
 }

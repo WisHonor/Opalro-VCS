@@ -1,6 +1,5 @@
 //! Conflict records: every version a place in conflict holds (docs/storage-format.md section 8).
 
-use std::collections::hash_map::Entry as Slot;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io;
 use std::sync::{Mutex, PoisonError};
@@ -148,6 +147,35 @@ pub fn stands_as(r: &Record) -> Option<Term> {
     }
 }
 
+/// What a command keeps of a record it read, of one size however many versions the record
+/// names: a project of conflicts then costs a command about what a project of files does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Summary {
+    pub stands_as: Option<Term>,
+    /// 0 unless its own version was written with markers.
+    pub marker: u8,
+    /// How many versions it names.
+    pub terms: usize,
+    pub has_own: bool,
+}
+
+impl Summary {
+    pub(crate) fn of(r: &Record) -> Summary {
+        Summary {
+            stands_as: stands_as(r),
+            marker: r.marker(),
+            terms: r.terms.len(),
+            has_own: r.own.is_some(),
+        }
+    }
+
+    /// How many versions it holds: never more than one.
+    #[cfg(test)]
+    fn versions(&self) -> usize {
+        usize::from(self.stands_as.is_some())
+    }
+}
+
 /// What the folder shows at a place in conflict, against what the conflict stands as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Seen {
@@ -161,14 +189,14 @@ pub(crate) enum Seen {
 /// it; `markers` scans the file there for marker lines of the length it is given, when asked.
 /// Markers gone, or the file gone, is fixed; a version that changed is only changed.
 pub(crate) fn seen(
-    c: &Record,
+    c: &Summary,
     now: Option<(EntryKind, Id)>,
     markers: impl FnOnce(u8) -> io::Result<Left>,
 ) -> io::Result<Seen> {
-    if now == stands_as(c).map(|t| (t.kind, t.id)) {
+    if now == c.stands_as.map(|t| (t.kind, t.id)) {
         return Ok(Seen::Untouched);
     }
-    let marker = c.marker();
+    let marker = c.marker;
     if marker < MIN_MARKER {
         return Ok(Seen::ChangedInPlace);
     }
@@ -202,8 +230,8 @@ pub(crate) struct Recording {
 pub(crate) enum Settled {
     /// The conflict as it is: its kind-6 entry, the same record.
     Kept,
-    /// The conflict with a new record: the same terms, its own version what the folder holds.
-    Again(Record),
+    /// The conflict with a new record: the same terms, and this its own version.
+    Again(Own),
     /// What the folder holds: an ordinary entry, or nothing.
     Fixed,
 }
@@ -213,23 +241,20 @@ pub(crate) enum Settled {
 /// `built` as its own version, with `c`'s marker length while markers are left. `fixed` records
 /// the place as the folder holds it, whatever it shows.
 pub(crate) fn settled(
-    c: &Record,
+    c: &Summary,
     seen: Seen,
     built: Option<(EntryKind, Id, u64)>,
     fixed: bool,
 ) -> Settled {
     let again = |marker| {
         let version = built.map(|(kind, id, size)| Term { kind, id, size });
-        Settled::Again(Record {
-            terms: c.terms.clone(),
-            own: Some(Own { version, marker }),
-        })
+        Settled::Again(Own { version, marker })
     };
     match seen {
         _ if fixed => Settled::Fixed,
         Seen::Untouched => Settled::Kept,
         Seen::Fixed => Settled::Fixed,
-        Seen::MarkersLeft(_) => again(c.marker()),
+        Seen::MarkersLeft(_) => again(c.marker),
         Seen::ChangedInPlace => again(0),
     }
 }
@@ -268,7 +293,7 @@ impl Recording {
     }
 
     /// What a save puts at `path`, the place of `c`, with nothing in the folder there.
-    pub(crate) fn settled_gone(&self, path: &str, c: &Record) -> Settled {
+    pub(crate) fn settled_gone(&self, path: &str, c: &Summary) -> Settled {
         // With nothing there no file is scanned, so the scan is never asked for.
         match seen(c, None, |_| Ok(Left::default())) {
             Ok(seen) => settled(c, seen, None, self.fixes(path)),
@@ -302,21 +327,39 @@ pub(crate) fn unreadable(at: &str, id: &Id, e: StoreError) -> StoreError {
     })
 }
 
-/// The record `id` of the conflict at the project path `path`, from `records`, or else met in the
-/// store and kept in `records`: what can't be read is damage at that place.
-pub(crate) fn record_at<'r>(
+/// What the command keeps of the record `id` of the conflict at the project path `path`: from
+/// `records`, or else met in the store and kept in `records`, summed up. What can't be read is
+/// damage at that place.
+pub(crate) fn record_at(
     store: &Store,
-    records: &'r mut HashMap<Id, Record>,
+    records: &mut HashMap<Id, Summary>,
     path: &str,
     id: &Id,
-) -> Result<&'r Record, StoreError> {
-    Ok(match records.entry(*id) {
-        Slot::Occupied(r) => r.into_mut(),
-        Slot::Vacant(v) => v.insert(
-            store
-                .met_conflict(id)
-                .map_err(|e| unreadable(&at_path(path), id, e))?,
-        ),
+) -> Result<Summary, StoreError> {
+    if let Some(kept) = records.get(id) {
+        return Ok(*kept);
+    }
+    let kept = Summary::of(&whole_at(store, path, id)?);
+    #[cfg(test)]
+    store.note_kept(kept.versions());
+    records.insert(*id, kept);
+    Ok(kept)
+}
+
+/// The record `id` of the conflict at `path`, whole, where all of it is needed: met in the store
+/// each time, whose own memory of records has a budget, and never kept by the command.
+pub(crate) fn whole_at(store: &Store, path: &str, id: &Id) -> Result<Record, StoreError> {
+    store
+        .met_conflict(id)
+        .map_err(|e| unreadable(&at_path(path), id, e))
+}
+
+/// The record `id` of the conflict at `path` written again: its terms, and `own` its own version.
+pub(crate) fn again_at(store: &Store, path: &str, id: &Id, own: Own) -> Result<Record, StoreError> {
+    let terms = whole_at(store, path, id)?.terms;
+    Ok(Record {
+        terms,
+        own: Some(own),
     })
 }
 
@@ -677,8 +720,9 @@ pub(crate) mod tests {
         let at = |t: Term| Some((t.kind, t.id));
         let left = |opening, closing| move |_| Ok(Left { opening, closing });
         let never = |_| -> io::Result<Left> { panic!("scanned") };
-        let seen_with =
-            |r: &Record, now, scan: &dyn Fn(u8) -> io::Result<Left>| seen(r, now, scan).unwrap();
+        let seen_with = |r: &Record, now, scan: &dyn Fn(u8) -> io::Result<Left>| {
+            seen(&Summary::of(r), now, scan).unwrap()
+        };
         // Untouched: the marked text as written, never scanned.
         assert_eq!(seen_with(&marked, at(file(4)), &never), Seen::Untouched);
         // Markers left, and none left.

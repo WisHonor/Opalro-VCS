@@ -265,7 +265,10 @@ fn status_says_what_to_do_next_for_what_is_left() {
     assert_eq!(only(marked(), Some(HALF)), markers);
     assert_eq!(only(marked(), Some(CLOSING)), markers);
     assert_eq!(only(versions(Some(term(MINE))), Some(MINE)), pick);
-    assert_eq!(only(versions(Some(term(MINE))), Some(b"edited\n")), pick);
+    let changed = format!(
+        "keep what your folder holds with: opalro resolve <path> (each by its own path), or {pick}"
+    );
+    assert_eq!(only(versions(Some(term(MINE))), Some(b"edited\n")), changed);
     assert_eq!(only(versions(None), None), pick);
 
     // No place in conflict: the save step, as before.

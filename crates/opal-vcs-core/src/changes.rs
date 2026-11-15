@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use similar::algorithms::{Capture, Replace, myers};
 use similar::{DiffOp, DiffTag, group_diff_ops};
 
-use crate::conflict::{self, stands_as};
+use crate::conflict;
 use crate::diff::{ChangeKind, FileChange, change_at, for_each_change, for_each_change_between};
 use crate::history::tip_of;
 use crate::id::Id;
@@ -241,7 +241,7 @@ pub fn unsaved_changes<E: From<SaveError> + From<StoreError>>(
         } => (|| {
             // Against what it stands as: a folder file by file, as one save against another.
             let name = path.rsplit_once('/').map_or(path, |(_, name)| name);
-            let was = stands_as(record).map(|t| Entry {
+            let was = record.stands_as.map(|t| Entry {
                 name: name.to_owned(),
                 kind: t.kind,
                 id: t.id,

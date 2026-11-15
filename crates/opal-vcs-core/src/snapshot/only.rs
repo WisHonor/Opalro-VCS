@@ -8,7 +8,7 @@ use std::iter;
 
 use super::walk::{Handles, holds_own_repository, kept_as_they_were, path_in, without_git_names};
 use super::{Child, Folders, Kind, SaveError};
-use crate::conflict::{self, Record, Recording, stands_as};
+use crate::conflict::{self, Recording, Summary};
 use crate::id::Id;
 use crate::listing::{Entry, EntryKind, Listing, SaveLimits};
 use crate::names::{Given, is_git_alias, is_opal_alias};
@@ -33,7 +33,7 @@ struct Blocked {
 /// What `narrow` follows of conflicts, in a project that keeps them: the records read once, the
 /// folders on disk a conflict stands as and those below them, and the places recorded as fixed.
 pub(super) struct Conflicts<'r> {
-    pub(super) records: &'r mut HashMap<Id, Record>,
+    pub(super) records: &'r mut HashMap<Id, Summary>,
     pub(super) in_conflict: HashSet<String>,
     pub(super) recording: &'r Recording,
 }
@@ -160,7 +160,7 @@ pub(super) fn narrow(
                         let folder = stood_as_folder(store, c.records, &path, e)?;
                         let record = conflict::record_at(store, c.records, &path, &e.id)?;
                         if folder.is_some()
-                            && c.recording.settled_gone(&path, record) != conflict::Settled::Fixed
+                            && c.recording.settled_gone(&path, &record) != conflict::Settled::Fixed
                         {
                             places.insert(path.clone());
                         }
@@ -209,7 +209,7 @@ pub(super) fn narrow(
                     // A named place that stays a conflict keeps the gone folder it is in, where
                     // the build meets it as it meets any place with nothing in the folder.
                     let record = conflict::record_at(store, c.records, &path, &e.id)?;
-                    if c.recording.settled_gone(&path, record) != conflict::Settled::Fixed {
+                    if c.recording.settled_gone(&path, &record) != conflict::Settled::Fixed {
                         stays.insert(rel.clone());
                     }
                 }
@@ -233,12 +233,13 @@ pub(super) fn narrow(
 /// read once into `records`.
 fn stood_as_folder(
     store: &Store,
-    records: &mut HashMap<Id, Record>,
+    records: &mut HashMap<Id, Summary>,
     path: &str,
     e: &Entry,
 ) -> Result<Option<Id>, SaveError> {
     let record = conflict::record_at(store, records, path, &e.id)?;
-    Ok(stands_as(record)
+    Ok(record
+        .stands_as
         .filter(|t| t.kind == EntryKind::Folder)
         .map(|t| t.id))
 }

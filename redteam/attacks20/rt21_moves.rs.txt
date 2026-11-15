@@ -1,0 +1,178 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+mod support;
+use opal_core::id::Id;
+use opal_core::listing::EntryKind;
+use opal_core::store::Store;
+use support::{Env, text};
+
+fn run(env: &Env, args: &[&str]) -> (i32, String) {
+    let out = env.opalro().args(args).output().unwrap();
+    let said = format!("{}{}", text(&out.stdout), text(&out.stderr));
+    (out.status.code().unwrap_or(-1), said)
+}
+
+fn ok(env: &Env, args: &[&str]) -> String {
+    let (code, said) = run(env, args);
+    assert_eq!(code, 0, "{args:?}: {said}");
+    said
+}
+
+/// Every file in the listing `id` and in every version of every conflict, as (where, contents).
+fn dump(store: &Store, id: Id, at: &str, out: &mut Vec<(String, String)>) {
+    for e in store.listing(&id).unwrap().entries() {
+        let path = format!("{at}{}", e.name);
+        match e.kind {
+            EntryKind::Folder => dump(store, e.id, &format!("{path}/"), out),
+            EntryKind::Conflict => {
+                let r = store.conflict(&e.id).unwrap();
+                for (i, t) in r.terms.iter().enumerate() {
+                    if let Some(t) = t {
+                        version(store, t.kind, t.id, &format!("{path}{{{i}}}"), out);
+                    }
+                }
+                if let Some(own) = r.own.and_then(|o| o.version) {
+                    version(store, own.kind, own.id, &format!("{path}{{own}}"), out);
+                }
+            }
+            kind => version(store, kind, e.id, &path, out),
+        }
+    }
+}
+
+fn version(store: &Store, kind: EntryKind, id: Id, at: &str, out: &mut Vec<(String, String)>) {
+    if kind == EntryKind::Folder {
+        dump(store, id, &format!("{at}/"), out);
+    } else {
+        let mut bytes = Vec::new();
+        store.copy_content(&id, &mut bytes).unwrap();
+        out.push((at.to_owned(), String::from_utf8_lossy(&bytes).into_owned()));
+    }
+}
+
+fn result(env: &Env) -> Vec<(String, String)> {
+    let (repo, state) = env.state();
+    let tip = state.lines["main"];
+    let root = repo.store().save(&tip, false).unwrap().root;
+    let mut out = Vec::new();
+    dump(repo.store(), root, "", &mut out);
+    out
+}
+
+fn holds(env: &Env, contents: &[&str]) {
+    let r = result(env);
+    for c in contents {
+        assert!(
+            r.iter().any(|(_, have)| have == c),
+            "{c:?} is in no entry and no conflict of the result: {r:#?}"
+        );
+    }
+}
+
+const A: &str = "1\n2\n3\n4\n5\n6\n7\n8\n";
+const A_SIDE: &str = "1\n2\n3\n4\n5\n6\n7\nside\n";
+
+fn start() -> Env {
+    let env = Env::empty();
+    ok(&env, &["start", "--preset", "custom"]);
+    support::write(&env, "a.txt", A);
+    ok(&env, &["save", "A"]);
+    env
+}
+
+fn mv(env: &Env, from: &str, to: &str) {
+    let to = env.root().join(to);
+    std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+    std::fs::rename(env.root().join(from), to).unwrap();
+}
+
+#[test]
+fn rt21_moved_into_a_folder_the_other_line_made_a_file() {
+    let env = start();
+    ok(&env, &["line", "new", "side"]);
+    support::write(&env, "a.txt", A_SIDE);
+    support::write(&env, "f", "a file f\n");
+    ok(&env, &["save", "side"]);
+    ok(&env, &["goto", "main"]);
+    mv(&env, "a.txt", "f/a.txt");
+    ok(&env, &["save", "move"]);
+    println!("{:?}", run(&env, &["combine", "side"]));
+    println!("{:#?}", result(&env));
+    holds(&env, &[A_SIDE, "a file f\n"]);
+}
+
+#[test]
+fn rt21_moved_into_a_folder_the_other_line_made_a_file_reversed() {
+    let env = start();
+    ok(&env, &["line", "new", "side"]);
+    mv(&env, "a.txt", "f/a.txt");
+    ok(&env, &["save", "move"]);
+    ok(&env, &["goto", "main"]);
+    support::write(&env, "a.txt", A_SIDE);
+    support::write(&env, "f", "a file f\n");
+    ok(&env, &["save", "main"]);
+    println!("{:?}", run(&env, &["combine", "side"]));
+    println!("{:#?}", result(&env));
+    holds(&env, &[A_SIDE, "a file f\n"]);
+}
+
+#[test]
+fn rt21_moved_out_of_a_folder_that_became_a_file() {
+    let env = Env::empty();
+    ok(&env, &["start", "--preset", "custom"]);
+    support::write(&env, "f/a.txt", A);
+    support::write(&env, "f/b.txt", "b\n");
+    ok(&env, &["save", "A"]);
+    ok(&env, &["line", "new", "side"]);
+    // side: changes f/a.txt and f/b.txt
+    support::write(&env, "f/a.txt", A_SIDE);
+    support::write(&env, "f/b.txt", "b side\n");
+    ok(&env, &["save", "side"]);
+    ok(&env, &["goto", "main"]);
+    // main: moves f/a.txt out, removes f, makes a file f
+    mv(&env, "f/a.txt", "top.txt");
+    std::fs::remove_dir_all(env.root().join("f")).unwrap();
+    support::write(&env, "f", "a file f\n");
+    ok(&env, &["save", "main"]);
+    println!("{:?}", run(&env, &["combine", "side"]));
+    println!("{:#?}", result(&env));
+    holds(&env, &[A_SIDE, "b side\n", "a file f\n"]);
+}
+
+#[test]
+fn rt21_moved_out_of_a_folder_that_became_a_file_reversed() {
+    let env = Env::empty();
+    ok(&env, &["start", "--preset", "custom"]);
+    support::write(&env, "f/a.txt", A);
+    support::write(&env, "f/b.txt", "b\n");
+    ok(&env, &["save", "A"]);
+    ok(&env, &["line", "new", "side"]);
+    mv(&env, "f/a.txt", "top.txt");
+    std::fs::remove_dir_all(env.root().join("f")).unwrap();
+    support::write(&env, "f", "a file f\n");
+    ok(&env, &["save", "side"]);
+    ok(&env, &["goto", "main"]);
+    support::write(&env, "f/a.txt", A_SIDE);
+    support::write(&env, "f/b.txt", "b side\n");
+    ok(&env, &["save", "main"]);
+    println!("{:?}", run(&env, &["combine", "side"]));
+    println!("{:#?}", result(&env));
+    holds(&env, &[A_SIDE, "b side\n", "a file f\n"]);
+}
+
+#[test]
+fn rt21_moved_to_two_places_one_inside_a_clash() {
+    let env = start();
+    ok(&env, &["line", "new", "side"]);
+    mv(&env, "a.txt", "g/a.txt");
+    support::write(&env, "g/side.txt", "side new\n");
+    ok(&env, &["save", "side"]);
+    ok(&env, &["goto", "main"]);
+    support::write(&env, "a.txt", A_SIDE);
+    mv(&env, "a.txt", "h.txt");
+    support::write(&env, "g", "main file g\n");
+    ok(&env, &["save", "main"]);
+    println!("{:?}", run(&env, &["combine", "side"]));
+    println!("{:#?}", result(&env));
+    holds(&env, &[A_SIDE, "side new\n", "main file g\n"]);
+}

@@ -5,7 +5,7 @@ use std::ffi::OsStr;
 use std::io;
 use std::path::Path;
 
-use crate::conflict::{self, Left, MIN_MARKER, Record, Seen, stands_as};
+use crate::conflict::{self, Left, MIN_MARKER, Seen, Summary};
 use crate::diary::Position;
 use crate::diff::{ChangeKind, FileChange, change_at, for_each_entry_change_in};
 use crate::history::tip_of;
@@ -108,11 +108,11 @@ impl From<FileChange<'_>> for PathChange {
 /// What differs between a save and the folder at one path.
 pub(crate) enum Difference<'a> {
     File(FileChange<'a>),
-    /// A place in conflict: its record's ID and record, and the folder's entry there.
+    /// A place in conflict: its record's ID and what is kept of it, and the folder's entry there.
     Conflict {
         path: &'a str,
         id: Id,
-        record: &'a Record,
+        record: Summary,
         now: Option<&'a Entry>,
     },
 }
@@ -120,11 +120,11 @@ pub(crate) enum Difference<'a> {
 /// Hands `each` every file that differs between the save whose top listing is `root` and the
 /// folder as `now` read it, and every place in conflict met on the way, in path order. What is
 /// below a place standing as a folder is that place's, so it comes with it and not on its own.
-/// A record is read once, into `records`.
+/// A record is read once, and what is used of it kept in `records`.
 pub(crate) fn each_difference<E: From<StoreError>>(
     repo: &Repository,
     now: &FolderNow,
-    records: &mut HashMap<Id, Record>,
+    records: &mut HashMap<Id, Summary>,
     root: Id,
     mut each: impl FnMut(Difference<'_>) -> Result<(), E>,
 ) -> Result<(), E> {
@@ -142,7 +142,7 @@ pub(crate) fn each_difference<E: From<StoreError>>(
         };
         let record = conflict::record_at(store, records, path, &o.id)?;
         let folder = |kind: Option<EntryKind>| kind == Some(EntryKind::Folder);
-        if folder(stands_as(record).map(|t| t.kind)) || folder(n.map(|e| e.kind)) {
+        if folder(record.stands_as.map(|t| t.kind)) || folder(n.map(|e| e.kind)) {
             folders.push(format!("{path}/"));
         }
         each(Difference::Conflict {
@@ -178,7 +178,7 @@ fn markers_at(
 fn conflict_at(
     disk: &mut Option<Folders>,
     root: &Path,
-    (path, id, record): (&str, Id, &Record),
+    (path, id, record): (&str, Id, &Summary),
     now: Option<&Entry>,
 ) -> Result<ConflictAt, SaveError> {
     let unreadable = |source| SaveError::Unreadable {
@@ -186,7 +186,7 @@ fn conflict_at(
         source,
     };
     let mut now = now.map(|e| (e.kind, e.id));
-    let marker = record.marker();
+    let marker = record.marker;
     let mut scanned = None;
     let mut seen = conflict::seen(record, now, |len| {
         let (left, id) = markers_at(disk, root, path, len)?;
@@ -208,10 +208,10 @@ fn conflict_at(
         Seen::Untouched if marker >= MIN_MARKER => Standing::Marked {
             left: scanned.map_or(0, |(left, _)| left.opening),
         },
-        Seen::Untouched => match (record.own, stands_as(record)) {
-            (Some(_), _) => Standing::ChangedInPlace,
-            (None, Some(_)) => Standing::Yours,
-            (None, None) => Standing::NotInFolder,
+        Seen::Untouched => match (record.has_own, record.stands_as) {
+            (true, _) => Standing::ChangedInPlace,
+            (false, Some(_)) => Standing::Yours,
+            (false, None) => Standing::NotInFolder,
         },
         Seen::MarkersLeft(left) => Standing::Marked { left: left.opening },
         Seen::Fixed => Standing::Fixed,
@@ -221,9 +221,9 @@ fn conflict_at(
         path: path.to_owned(),
         record: id,
         standing,
-        terms: record.terms.len(),
+        terms: record.terms,
         seen: Some(seen),
-        has_own: record.own.is_some(),
+        has_own: record.has_own,
         now,
     })
 }
@@ -275,7 +275,7 @@ pub fn status(
             } => conflicts.push(conflict_at(
                 &mut disk,
                 repo.root(),
-                (path, id, record),
+                (path, id, &record),
                 now,
             )?),
         }
@@ -288,9 +288,9 @@ pub fn status(
             path: path.clone(),
             record: *id,
             standing: Standing::NotHere,
-            terms: record.terms.len(),
+            terms: record.terms,
             seen: None,
-            has_own: record.own.is_some(),
+            has_own: record.has_own,
             now: None,
         });
     }

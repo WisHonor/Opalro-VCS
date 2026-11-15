@@ -63,8 +63,8 @@ impl From<Side> for Pick {
 }
 
 pub struct ResolveRequest<'a> {
-    /// Places named, a folder standing for every place below it, and patterns, each standing for
-    /// every place it matches; `None` records every fixed one.
+    /// Places named, a folder standing for the places below it and a pattern for those it
+    /// matches, of which only the fixed ones without `keep`; `None` records every fixed one.
     pub paths: Option<&'a [Given]>,
     /// The side kept whole at each place named; refused without paths.
     pub keep: Option<Side>,
@@ -254,7 +254,11 @@ fn no_file(path: &str, pick: Pick) -> String {
     match pick {
         Pick::Mine => format!("Your line holds no file at {path}, {rest}."),
         Pick::Theirs => format!("The other line holds no file at {path}, {rest}."),
-        Pick::Before => format!("There was no file at {path} where the lines parted, {rest}."),
+        // An absent middle may be nothing there or one Opalro couldn't tell: the record can't say.
+        Pick::Before => format!(
+            "Opalro has no version of {path} from where the lines parted (nothing was there, or \
+             Opalro can't tell what was), {rest}."
+        ),
     }
 }
 
@@ -425,11 +429,12 @@ fn resolve_locked(
     })
 }
 
-/// The places to record, as stored, in path order. With paths, every place at or below each,
-/// matched as the drive matches names, and every place a pattern matches (only those the folder
-/// shows fixed, without `keep`); without, every place the folder shows fixed. Without
-/// `keep`, a place is recorded only where the folder shows a decision: a version still standing
-/// as yours, as the combine left it, is refused, and markers left are asked about.
+/// The places to record, as stored, in path order. With paths, each place named by its own path,
+/// matched as the drive matches names, and every place below a folder's path or matched by a
+/// pattern (only those the folder shows fixed, without `keep`); without, every place the folder
+/// shows fixed. Without `keep`, a place named is recorded only where the folder shows a decision:
+/// a version still standing as yours, as the combine left it, is refused, and markers left are
+/// asked about.
 fn choose<'c>(
     conflicts: &'c [ConflictAt],
     req: &ResolveRequest,
@@ -453,6 +458,19 @@ fn choose<'c>(
                     .filter(|&i| within(&folded[i], &top))
                     .collect()
             };
+            // A place named by its own path is taken as it stands; below a folder's path, as
+            // for a pattern, only what is fixed, unless a side is named.
+            let own_or_fixed = |below: Vec<usize>, path: &str| -> Vec<usize> {
+                let top = fold_path(path, drive);
+                below
+                    .into_iter()
+                    .filter(|&i| {
+                        req.keep.is_some()
+                            || folded[i] == top
+                            || conflicts[i].seen == Some(Seen::Fixed)
+                    })
+                    .collect()
+            };
             for given in paths {
                 let below: Vec<usize> = match given {
                     Given::Path(path) => {
@@ -460,11 +478,11 @@ fn choose<'c>(
                         if below.is_empty() {
                             return Err(ResolveError::NotInConflict { path: path.clone() });
                         }
-                        below
+                        own_or_fixed(below, path)
                     }
                     // A name that is a place, read letter for letter, is that place, `[` and all.
                     Given::Pattern { .. } if !at_or_below(&given.shown()).is_empty() => {
-                        at_or_below(&given.shown())
+                        own_or_fixed(at_or_below(&given.shown()), &given.shown())
                     }
                     Given::Pattern { .. } => {
                         let scope = Scope::new(std::slice::from_ref(given), drive);
@@ -652,14 +670,14 @@ impl Built<'_> {
         cache: &mut ChangeIds,
     ) -> Result<(Id, Save, String, Vec<Warning>, PackSet), ResolveError> {
         let store = repo.store();
-        let mut read = HashMap::new();
         let mut changes = BTreeMap::new();
         // The overlay builds a folder it is given from the changes below it; a folder term goes
         // in whole, so it is put as a leaf and made a folder again as its listing is stored.
         let mut whole = HashSet::new();
         for (path, id) in places.iter().zip(records) {
-            let record = conflict::record_at(store, &mut read, path, id)?;
-            let Some(term) = picked(record, pick) else {
+            // Read whole to take a side, one at a time, and not kept.
+            let record = conflict::whole_at(store, path, id)?;
+            let Some(term) = picked(&record, pick) else {
                 return Err(ResolveError::CantPickSide {
                     path: path.clone(),
                     copying: false,
@@ -750,7 +768,7 @@ pub fn copy_version(
         .root;
     let drive = repo.drive()?;
     let (place, id) = conflict_on(repo.store(), root, path, drive)?.ok_or_else(not_in_conflict)?;
-    let record = conflict::record_at(repo.store(), &mut HashMap::new(), &place, &id)?.clone();
+    let record = conflict::whole_at(repo.store(), &place, &id)?;
     if record.terms.len() > 3 {
         return Err(ResolveError::CantPickSide {
             path: place,

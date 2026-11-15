@@ -178,13 +178,19 @@ pub fn conflicts_next(conflicts: &[ConflictAt]) -> Option<String> {
             Standing::Yours | Standing::ChangedInPlace | Standing::NotInFolder
         )
     };
-    any(version).then(|| {
-        format!(
-            "pick a version with: {} (or theirs); to look at theirs first: {}",
-            e.command("opalro resolve <path> --keep mine"),
-            e.command("opalro resolve <path> --copy theirs --to <file>")
-        )
-    })
+    let pick = format!(
+        "pick a version with: {} (or theirs); to look at theirs first: {}",
+        e.command("opalro resolve <path> --keep mine"),
+        e.command("opalro resolve <path> --copy theirs --to <file>")
+    );
+    // A folder's path or a pattern never records a place changed in place: only its own path.
+    if any(|s| s == Standing::ChangedInPlace) {
+        return Some(format!(
+            "keep what your folder holds with: {} (each by its own path), or {pick}",
+            e.command("opalro resolve <path>")
+        ));
+    }
+    any(version).then_some(pick)
 }
 
 /// A step undone or redone as JSON (docs/json.md, `opalro undo --json`).

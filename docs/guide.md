@@ -444,7 +444,7 @@ In conflict (3 places):
 Next: record what you fixed with: opalro resolve
 ```
 
-The next step is the first that applies: record what you fixed; else fix the marked places in your editor; else pick a version with `opalro resolve <path> --keep mine` (or `theirs`).
+The next step is the first that applies: record what you fixed; else fix the marked places in your editor; else, when a place is changed in place, keep what your folder holds with `opalro resolve <path>`, each by its own path, or pick a version; else pick a version with `opalro resolve <path> --keep mine` (or `theirs`).
 
 A place stays in this list, and out of the list of changes, until `opalro resolve` records how you settled it. `opalro changes` shows what you changed in such a file since the combine, under a line saying it is in conflict.
 
@@ -830,7 +830,7 @@ opalro resolve art/hero.png --keep theirs
 opalro resolve art/hero.png --copy theirs --to hero-theirs.png
 ```
 
-`--copy before` writes the version where the two lines parted. Paths and patterns are read as `opalro save` reads them: `opalro resolve "*.png" --keep theirs` takes the other line's version of every picture in conflict in the folder you are in. `opalro undo` takes a resolve back, as any step; a fix you made by hand stays in your folder.
+`--copy before` writes the version where the two lines parted. Paths and patterns are read as `opalro save` reads them: `opalro resolve "*.png" --keep theirs` takes the other line's version of every picture in conflict in the folder you are in. To keep a picture you put in the folder yourself, name it by its own path (`opalro resolve art/hero.png`): a folder's path, like a pattern, records only what the folder shows fixed below it, so `opalro resolve art` or `opalro resolve .` does what `opalro resolve` does and never records a picture a program rewrote by itself, such as a game engine opening the project. `opalro undo` takes a resolve back, as any step; a fix you made by hand stays in your folder.
 
 ### `opalro shelf` and `opalro unshelf`
 

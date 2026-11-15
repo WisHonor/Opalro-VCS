@@ -14,7 +14,7 @@ use opal_platform::dir::{Dir, EntryMeta, EntryType};
 
 use crate::changeids::ChangeIds;
 use crate::conflict::standing::as_it_stands;
-use crate::conflict::{self, Record, Recording, Settled, markers};
+use crate::conflict::{self, Record, Recording, Settled, Summary, markers};
 use crate::diary::{Action, DiaryEntry, Position, State};
 use crate::diff::count_changes;
 use crate::drive::{self, Drive};
@@ -905,7 +905,7 @@ pub(crate) fn read_and_build(
             .filter(|e| e.kind == EntryKind::Conflict)
             .map(|e| e.id)
             .collect();
-        rebuilt_records.retain(|r| named.contains(&r.id()));
+        rebuilt_records.retain(|r| named.contains(&r.id));
     }
     check_names(
         &folders,
@@ -947,8 +947,9 @@ pub(crate) fn read_and_build(
         keeps_conflicts,
         disk: writeout::Folders::from_top(handles.top()),
     };
-    for record in &rebuilt_records {
-        store_record(storing.store, storing.packs, record)?;
+    for again in &rebuilt_records {
+        let record = conflict::again_at(storing.store, &again.path, &again.from, again.own)?;
+        store_record(storing.store, storing.packs, &record)?;
     }
     for listing in rebuilt {
         storing.listing(listing)?;
@@ -1199,7 +1200,7 @@ fn lines_reaching<'s>(
 }
 
 /// The base save's entry `e` as the folder holds it, if that is a file.
-fn saved_file<'l>(e: &'l Entry, records: &HashMap<Id, Record>) -> Option<Cow<'l, Entry>> {
+fn saved_file<'l>(e: &'l Entry, records: &HashMap<Id, Summary>) -> Option<Cow<'l, Entry>> {
     as_it_stands(e, records).filter(|e| matches!(e.kind, EntryKind::File | EntryKind::Executable))
 }
 
@@ -1467,7 +1468,7 @@ type Folders = BTreeMap<String, Vec<Child>>;
 fn check_names(
     folders: &Folders,
     old: &HashMap<String, Option<Listing>>,
-    mut conflicts: Option<(&Store, &mut HashMap<Id, Record>, &Recording)>,
+    mut conflicts: Option<(&Store, &mut HashMap<Id, Summary>, &Recording)>,
 ) -> Result<(), SaveError> {
     let mut problems = Vec::new();
     for (rel, children) in folders {
@@ -1489,7 +1490,7 @@ fn check_names(
                 }
                 let path = walk::path_in(rel, &e.name);
                 let record = conflict::record_at(store, records, &path, &e.id)?;
-                if recording.settled_gone(&path, record) != Settled::Fixed {
+                if recording.settled_gone(&path, &record) != Settled::Fixed {
                     names.push(&e.name);
                     kept.push(&e.name);
                 }
@@ -1529,13 +1530,13 @@ trait Contents {
         read: &mut dyn Iterator<Item = Done>,
         c: &Child,
     ) -> Result<(Id, u64), SaveError>;
-    /// What goes into the listing at `path`, the place of the conflict `stored` (its record
-    /// `conflict`), where the folder holds `built`, or nothing.
+    /// What goes into the listing at `path`, the place of the conflict `stored` (what is kept of
+    /// its record, `conflict`), where the folder holds `built`, or nothing.
     fn conflict(
         &mut self,
         path: &str,
         stored: &Entry,
-        conflict: &Record,
+        conflict: &Summary,
         built: Option<(EntryKind, Id, u64)>,
     ) -> Result<Option<(EntryKind, Id, u64)>, SaveError>;
     fn listing(&mut self, listing: Listing) -> Result<Id, SaveError>;
@@ -1688,7 +1689,7 @@ impl Contents for Storing<'_> {
         &mut self,
         path: &str,
         stored: &Entry,
-        conflict: &Record,
+        conflict: &Summary,
         built: Option<(EntryKind, Id, u64)>,
     ) -> Result<Option<(EntryKind, Id, u64)>, SaveError> {
         let fixed = self.recording.fixes(path);
@@ -1701,7 +1702,9 @@ impl Contents for Storing<'_> {
         };
         Ok(match conflict::settled(conflict, seen, built, fixed) {
             Settled::Kept => Some((stored.kind, stored.id, stored.size)),
-            Settled::Again(record) => {
+            Settled::Again(own) => {
+                // Written again with its terms, read whole only here.
+                let record = conflict::again_at(self.store, path, &stored.id, own)?;
                 let id = store_record(self.store, self.packs, &record)?;
                 Some((EntryKind::Conflict, id, 0))
             }
@@ -1726,7 +1729,7 @@ impl Storing<'_> {
     fn seen(
         &mut self,
         path: &str,
-        conflict: &Record,
+        conflict: &Summary,
         built: Option<(EntryKind, Id, u64)>,
     ) -> Result<conflict::Seen, SaveError> {
         let now = built.map(|(kind, id, _)| (kind, id));
@@ -1983,7 +1986,7 @@ pub(crate) fn ingest_failed(e: IngestError, rel: &str) -> SaveError {
 struct Last<'a> {
     listings: &'a HashMap<String, Option<Listing>>,
     ids: &'a HashMap<String, Id>,
-    records: &'a HashMap<Id, Record>,
+    records: &'a HashMap<Id, Summary>,
 }
 
 impl Last<'_> {
@@ -2238,11 +2241,11 @@ fn build_with<'a>(
             // One the walk didn't read, below a search of gone folders that ended early, is read
             // here: a save never drops a conflict for want of its record.
             let record = match (last.records.get(&e.id), contents.records()) {
-                (Some(record), _) => record,
+                (Some(record), _) => *record,
                 (None, Some(store)) => conflict::record_at(store, &mut unread, &path, &e.id)?,
                 (None, None) => continue,
             };
-            if let Some((kind, id, size)) = contents.conflict(&path, e, record, None)? {
+            if let Some((kind, id, size)) = contents.conflict(&path, e, &record, None)? {
                 met_conflicts += u64::from(kind == EntryKind::Conflict);
                 found.push((e.name.as_str(), kind, id, size));
                 placed = true;
@@ -2531,8 +2534,8 @@ pub(crate) struct FolderNow {
     /// by path.
     pub(crate) not_written_here: Vec<String>,
     pub(crate) warnings: Vec<Warning>,
-    /// The records of the conflicts the walk met, by ID.
-    pub(crate) records: HashMap<Id, Record>,
+    /// What is kept of the records of the conflicts the walk met, by ID.
+    pub(crate) records: HashMap<Id, Summary>,
     /// The base save's conflicts kept as they were, in parts of it this computer can't hold, by
     /// path, with their records' IDs.
     pub(crate) kept_conflicts: Vec<(String, Id)>,
@@ -2693,7 +2696,7 @@ impl Contents for Reading {
         &mut self,
         _: &str,
         _: &Entry,
-        _: &Record,
+        _: &Summary,
         built: Option<(EntryKind, Id, u64)>,
     ) -> Result<Option<(EntryKind, Id, u64)>, SaveError> {
         Ok(built)
@@ -6460,6 +6463,70 @@ mod tests {
             lay_out(root, &on_disk);
         };
         assert_eq!(save_reads(conflicted, false), (with.0, 1));
+    }
+
+    /// What `status`, then `save`, keep of the 300 records a planted save names, each of `width`
+    /// versions: how many records, and how many versions those hold, for each command.
+    fn held_for(width: usize) -> Vec<(usize, usize)> {
+        let (dir, mut repo) = with_versions();
+        let root = dir.path();
+        // Each its own record: a middle version no other names, never read.
+        let record = |i: usize| {
+            let mut terms = vec![None; width];
+            let mut id = [1u8; 32];
+            id[..8].copy_from_slice(&(i as u64).to_le_bytes());
+            terms[0] = Some(file_of(PICTURE));
+            terms[width / 2] = Some(Term {
+                kind: EntryKind::File,
+                id: Id(id),
+                size: 1,
+            });
+            terms[width - 1] = Some(file_of(b"theirs"));
+            Record { terms, own: None }
+        };
+        let names: Vec<String> = (0..300)
+            .map(|i| format!("d{}/c{i:03}.png", i % 3))
+            .collect();
+        let conflicts: Vec<(&str, Record)> = (names.iter().enumerate())
+            .map(|(i, n)| (n.as_str(), record(i)))
+            .collect();
+        let files: &[(&str, EntryKind, &[u8])] = &[("keep.txt", EntryKind::File, b"k")];
+        plant_conflicted(&mut repo, files, &conflicts);
+        // `d0` as the combine left it, `d1` gone from the folder, `d2` there with nothing in it.
+        write(root, "keep.txt", b"k");
+        for n in names.iter().filter(|n| n.starts_with("d0/")) {
+            write(root, n, PICTURE);
+        }
+        fs::create_dir_all(root.join("d2")).unwrap();
+        let mut held = Vec::new();
+        let before = repo.store().kept();
+        status(&repo, false, None).unwrap();
+        let after = repo.store().kept();
+        held.push((after.0 - before.0, after.1 - before.1));
+        let (top, _) = saved_with(save_now(&mut repo));
+        let last = repo.store().kept();
+        // Written again with nothing in the folder there, read whole for it: every version kept.
+        for gone in ["d1/c001.png", "d2/c002.png"] {
+            let again = record_at(repo.store(), top, gone);
+            assert_eq!(again.terms, record(gone[4..7].parse().unwrap()).terms);
+            let own = Own {
+                version: None,
+                marker: 0,
+            };
+            assert_eq!(again.own, Some(own), "{gone}");
+        }
+        held.push((last.0 - after.0, last.1 - after.1));
+        held
+    }
+
+    #[test]
+    fn status_and_save_keep_as_little_of_a_wide_record_as_of_a_narrow_one() {
+        let (narrow, wide) = (held_for(3), held_for(255));
+        for &(records, versions) in narrow.iter().chain(&wide) {
+            assert_eq!(records, 300, "{narrow:?} {wide:?}");
+            assert!(versions <= records, "{narrow:?} {wide:?}");
+        }
+        assert_eq!(narrow, wide);
     }
 
     #[test]

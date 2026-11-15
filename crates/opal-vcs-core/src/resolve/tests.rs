@@ -453,24 +453,51 @@ fn resolve_a_path_records_only_that_place_and_leaves_other_unsaved_changes_unsav
     assert_eq!(fx.read("pic.png").unwrap(), b"\0painted");
 }
 
+/// What `resolve` gave back when it recorded nothing: each place left and how it stands.
+fn nothing(outcome: ResolveOutcome) -> Vec<(String, Standing)> {
+    match outcome {
+        ResolveOutcome::Nothing { left, .. } => {
+            left.into_iter().map(|c| (c.path, c.standing)).collect()
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
 #[test]
-fn resolve_a_folder_means_every_conflict_below_it() {
-    let (mut fx, _) = conflicted();
+fn resolve_a_folder_takes_what_is_fixed_below_it_as_a_pattern_does() {
+    let (mut fx, combined) = conflicted();
+    // A fixed text, a picture a program rewrote by itself, a picture as the combine left it.
+    fx.write("a.txt", A_FIXED);
+    fx.write("pic.png", b"\0re-exported");
+    let head = fx.head();
+    // A folder's path: neither picture is recorded, or refused; each is listed as it stands.
+    let rows = nothing(fx.resolve(Some(&["art"]), None).unwrap());
+    assert_eq!(rows[1], ("art/hero.png".to_owned(), Standing::Yours));
     fx.write("art/hero.png", b"\0hero painted");
-    fx.write("pic.png", b"\0painted");
-    // Typed in another case on a drive that ignores it, it still names the stored place.
+    let rows = nothing(fx.resolve(Some(&["art"]), None).unwrap());
+    assert_eq!(
+        rows[1],
+        ("art/hero.png".to_owned(), Standing::ChangedInPlace)
+    );
+    assert_eq!((fx.head(), fx.tip()), (head, combined));
+    // The whole project records what `resolve` without paths records: the fixed text alone.
+    let (id, _, _, done, left, _) = recorded(fx.resolve(Some(&[""]), None).unwrap());
+    assert_eq!(done, ["a.txt"]);
+    assert_eq!(left, ["art/hero.png", "gone.bin", "pic.png"]);
+    assert_eq!(fx.entry(id, "pic.png").unwrap().kind, EntryKind::Conflict);
+    // Named by its own path, a picture is recorded as the folder holds it, typed in another
+    // case on a drive that ignores it too.
     let typed = if fx.repo.drive().unwrap().ignores_case {
-        "ART"
+        "ART/Hero.png"
     } else {
-        "art"
+        "art/hero.png"
     };
-    let (id, _, _, done, left, _) = recorded(fx.resolve(Some(&[typed]), None).unwrap());
+    let (id, _, _, done, _, _) = recorded(fx.resolve(Some(&[typed]), None).unwrap());
     assert_eq!(done, ["art/hero.png"]);
-    assert_eq!(left, ["a.txt", "gone.bin", "pic.png"]);
     assert_eq!(fx.file(id, "art/hero.png"), b"\0hero painted");
-    // The whole project is a folder too, with a version for each.
+    // With a side named, a folder's path takes every place below it.
     let (_, _, _, done, left, _) = recorded(fx.resolve(Some(&[""]), Some(Side::Theirs)).unwrap());
-    assert_eq!(done, ["a.txt", "gone.bin", "pic.png"]);
+    assert_eq!(done, ["gone.bin", "pic.png"]);
     assert!(left.is_empty());
 }
 
@@ -515,9 +542,10 @@ fn resolve_refuses_an_untouched_version_conflict_without_keep() {
         "Say which to keep: opalro resolve <path> --keep mine, or --keep theirs. Or put the \
          version you want in the folder and run opalro resolve <path>."
     );
-    // All of them named together; one standing as nothing still holds your version too.
+    // All of them named together; one standing as nothing still holds your version too. One
+    // below a folder's path is only listed, as a pattern's would be.
     let err = fx
-        .resolve(Some(&["pic.png", "art", "gone.bin"]), None)
+        .resolve(Some(&["pic.png", "art/hero.png", "gone.bin", "art"]), None)
         .unwrap_err();
     match &err {
         ResolveError::StillYours { paths } => {
@@ -530,6 +558,11 @@ fn resolve_refuses_an_untouched_version_conflict_without_keep() {
         "These still hold your version, and Opalro won't guess which one you want, so nothing \
          was recorded:\n  art/hero.png\n  gone.bin\n  pic.png"
     );
+    let err = fx.resolve(Some(&["pic.png", "art"]), None).unwrap_err();
+    match &err {
+        ResolveError::StillYours { paths } => assert_eq!(paths, &["pic.png"]),
+        other => panic!("{other:?}"),
+    }
     assert_eq!(fx.head(), head);
     assert_eq!(fx.tip(), combined);
 }
@@ -1064,7 +1097,8 @@ fn copy_before_with_nothing_there_is_refused() {
     let err = copy_version(&fx.repo, "dir", Pick::Before, &to).unwrap_err();
     assert_eq!(
         err.to_string(),
-        "There was no file at dir where the lines parted, so there is nothing to copy."
+        "Opalro has no version of dir from where the lines parted (nothing was there, or Opalro \
+         can't tell what was), so there is nothing to copy."
     );
     assert!(!to.exists());
 }

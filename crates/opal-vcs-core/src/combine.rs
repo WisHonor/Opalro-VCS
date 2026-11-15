@@ -296,6 +296,15 @@ pub enum Which {
     Theirs,
 }
 
+/// Who holds the conflicts a clean combine would carry: the two lines, the target's save on a
+/// forward, or the line's own save when there is nothing to combine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeldBy {
+    Lines,
+    Target,
+    Line,
+}
+
 /// The line and the target as a combine's words name them, each safe to print: the line's name
 /// escaped, the target as [`Named::shown`] has it. Empty until the combine knows them.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
@@ -326,7 +335,7 @@ pub enum CombineError {
     Tangled { names: Names },
     /// The first 100 conflicts in path order, and how many more there were; `rules_not_whole`
     /// says whose `opalro.toml`, if any, wasn't read whole and left one, named or counted, there.
-    #[error("{}", conflicts_words(names, conflicts, *more, *rules_not_whole, *why, *held, *forward))]
+    #[error("{}", conflicts_words(names, conflicts, *more, *rules_not_whole, *why, *held, *by))]
     Conflicts {
         names: Names,
         conflicts: Vec<Conflict>,
@@ -336,9 +345,9 @@ pub enum CombineError {
         /// can't be read whole would decide a place (then `rules_not_whole` says whose).
         why: NotKept,
         /// Places asked not to be kept that the lines hold in conflict already, counted only
-        /// for `OnlyIfClean`; on a `forward`, those the target's save holds.
+        /// for `OnlyIfClean`, and who holds them.
         held: u64,
-        forward: bool,
+        by: HeldBy,
     },
     /// Both lines changed `path`, and `on` holds it in conflict (`at == path`) or holds the
     /// conflict `at` below it.
@@ -502,7 +511,7 @@ fn conflicts_words(
     rules_not_whole: Option<Side>,
     why: NotKept,
     held: u64,
-    forward: bool,
+    by: HeldBy,
 ) -> String {
     let made = conflicts.len() as u64 + more;
     let count = made + held;
@@ -525,10 +534,10 @@ fn conflicts_words(
             )
         }
         NotKept::OnlyIfClean if made == 0 => {
-            let (who, hold) = if forward {
-                (target.as_str(), "holds")
-            } else {
-                ("The two lines", "hold")
+            let (who, hold) = match by {
+                HeldBy::Lines => ("The two lines", "hold"),
+                HeldBy::Target => (target.as_str(), "holds"),
+                HeldBy::Line => (line.as_str(), "holds"),
             };
             let them = if count == 1 { "it" } else { "them" };
             return format!(
@@ -1061,7 +1070,29 @@ fn combine_locked(
             carried,
             holds_conflicts,
         };
+    // Asked for a clean line, a save looked through for conflicts: the line's own when there is
+    // nothing to combine, the target's on a forward.
+    let clean =
+        |save: Id, which: Which, by: HeldBy, limits: SaveLimits| -> Result<(), CombineError> {
+            if asked.keep != Keep::OnlyIfClean || !repo.keeps_conflicts() {
+                return Ok(());
+            }
+            let held = held_in(repo, &names, save, which, limits)?;
+            if held == 0 {
+                return Ok(());
+            }
+            Err(CombineError::Conflicts {
+                names: names.clone(),
+                conflicts: vec![],
+                more: 0,
+                rules_not_whole: None,
+                why: NotKept::OnlyIfClean,
+                held,
+                by,
+            })
+        };
     if only_in(repo, with, &[from])? == 0 {
+        clean(from, Which::Ours, HeldBy::Line, bounds.limits)?;
         let nothing = (Applied::default(), 0, 0, false);
         return Ok(outcome(Combined::Nothing, from, nothing));
     }
@@ -1072,21 +1103,7 @@ fn combine_locked(
         from,
     };
     if only_in(repo, from, &[with])? == 0 {
-        // Asked for a clean line, the target's save is looked through for conflicts.
-        if asked.keep == Keep::OnlyIfClean && repo.keeps_conflicts() {
-            let held = held_in(repo, &names, with, bounds.limits)?;
-            if held > 0 {
-                return Err(CombineError::Conflicts {
-                    names,
-                    conflicts: vec![],
-                    more: 0,
-                    rules_not_whole: None,
-                    why: NotKept::OnlyIfClean,
-                    held,
-                    forward: true,
-                });
-            }
-        }
+        clean(with, Which::Theirs, HeldBy::Target, bounds.limits)?;
         let mut done = to.switch(repo, lock, earlier, asked, with, vec![])?;
         done.0.warnings.extend(repo.read_rules().warnings());
         return Ok(outcome(Combined::Forward, with, done));
@@ -1267,7 +1284,7 @@ fn make_save(
         rules_not_whole: merged.rules_not_whole,
         why,
         held,
-        forward: false,
+        by: HeldBy::Lines,
     };
     // A project that can't keep conflicts says so, whatever was asked.
     let unkept = made.keep.is_none() && !merged.conflicts.is_empty();
@@ -1426,26 +1443,32 @@ fn tangled() -> CombineError {
     }
 }
 
-/// How many places in conflict the target's `save` holds, measured as a combined save is. One
-/// past the limits can't be looked through, so it is refused as a combine refuses such a target.
+/// How many places in conflict `save`, `which` of the two, holds, measured as a combined save is.
+/// One past the limits can't be looked through, so it is refused as a combine refuses such a
+/// version.
 fn held_in(
     repo: &Repository,
     names: &Names,
     save: Id,
+    which: Which,
     mut limits: SaveLimits,
 ) -> Result<u64, CombineError> {
     let store = repo.store();
     let root = version_of(repo, save)?.root;
+    let at = match which {
+        Which::Ours => "in the save the line is on",
+        _ => "in the save combined in",
+    };
     let stand = |id: &Id| {
         store
             .met_conflict(id)
             .map(|r| stands_as(&r))
-            .map_err(|e| unreadable("in the save combined in", id, e))
+            .map_err(|e| unreadable(at, id, e))
     };
     let measured = limits.add_all_standing(root, 0, 0, |id| store.listing(id), stand)?;
     measured.map_err(|detail| CombineError::Past {
         names: names.clone(),
-        which: Which::Theirs,
+        which,
         detail,
     })
 }

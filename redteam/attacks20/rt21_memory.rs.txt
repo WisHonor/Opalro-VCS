@@ -1,0 +1,106 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+mod support;
+
+use opal_core::conflict::{Record, Term};
+use opal_core::id::Id;
+use opal_core::listing::{Entry, EntryKind, Listing};
+use opal_core::pack::{ObjectKind, PackSet};
+use support::{Env, add_conflict, plant_save};
+
+/// A record of 255 versions, all absent but the middle one, which differs for each `i`.
+fn wide(i: u64) -> Record {
+    let mut terms = vec![None; 255];
+    let mut id = [0u8; 32];
+    id[..8].copy_from_slice(&i.to_le_bytes());
+    terms[127] = Some(Term {
+        kind: EntryKind::File,
+        id: Id(id),
+        size: 1,
+    });
+    Record { terms, own: None }
+}
+
+/// Plants on `main` a save of `folders` folders of `each` entries: conflicts naming a record each,
+/// or (`plain`) ordinary files.
+fn plant(env: &Env, folders: u64, each: u64, plain: bool) {
+    plant_save(env.root(), |pack: &mut PackSet| {
+        let file = pack.add_content(b"x").unwrap();
+        let mut top = Vec::new();
+        for f in 0..folders {
+            let entries = (0..each)
+                .map(|n| {
+                    let i = f * each + n;
+                    let (kind, id, size) = if plain {
+                        (EntryKind::File, file, 1)
+                    } else {
+                        (EntryKind::Conflict, add_conflict(pack, &wide(i)), 0)
+                    };
+                    Entry {
+                        name: format!("c{n:06}"),
+                        kind,
+                        id,
+                        size,
+                    }
+                })
+                .collect();
+            let id = pack
+                .add_record(
+                    ObjectKind::FolderListing,
+                    &Listing::new(entries).unwrap().encode(),
+                )
+                .unwrap();
+            top.push(Entry {
+                name: format!("d{f:04}"),
+                kind: EntryKind::Folder,
+                id,
+                size: 0,
+            });
+        }
+        pack.add_record(
+            ObjectKind::FolderListing,
+            &Listing::new(top).unwrap().encode(),
+        )
+        .unwrap()
+    });
+}
+
+fn disk(path: &std::path::Path) -> u64 {
+    let mut total = 0;
+    for e in std::fs::read_dir(path).unwrap() {
+        let e = e.unwrap();
+        let m = e.metadata().unwrap();
+        total += if m.is_dir() { disk(&e.path()) } else { m.len() };
+    }
+    total
+}
+
+#[cfg(unix)]
+#[test]
+fn rt21_memory_of_many_wide_records() {
+    let n: u64 = std::env::var("RT21_N")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(20_000);
+    for plain in [true, false] {
+        let env = Env::empty();
+        env.opalro()
+            .args(["start", "--preset", "custom"])
+            .assert()
+            .success();
+        plant(&env, n / 1000, 1000, plain);
+        let store = disk(&env.root().join(".opalro"));
+        for args in [&["status"][..], &["goto", "main"][..], &["save", "again"][..]] {
+            let cmd = support::opal_capped_at(env.config(), env.root(), 3_500_000, args);
+            let ended = support::run_limited(cmd, 600);
+            println!(
+                "plain={plain} n={n} store={}KB {args:?}: code {:?} {:.1}s peak {} MB {}",
+                store >> 10,
+                ended.code,
+                ended.secs,
+                ended.peak_mb,
+                ended.stderr.lines().next().unwrap_or("")
+            );
+        }
+    }
+}

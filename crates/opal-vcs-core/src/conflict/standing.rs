@@ -5,7 +5,7 @@ use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::Rc;
 
-use super::{Record, nested, stands_as, unreadable};
+use super::{Summary, nested, stands_as, unreadable};
 use crate::id::Id;
 use crate::listing::{Entry, EntryKind, Listing};
 use crate::repo::Repository;
@@ -17,13 +17,13 @@ use crate::text::escape;
 /// is, borrowed.
 pub(crate) fn as_it_stands<'e>(
     e: &'e Entry,
-    records: &HashMap<Id, Record>,
+    records: &HashMap<Id, Summary>,
 ) -> Option<Cow<'e, Entry>> {
     let record = match records.get(&e.id) {
         Some(record) if e.kind == EntryKind::Conflict => record,
         _ => return Some(Cow::Borrowed(e)),
     };
-    stands_as(record).map(|t| {
+    record.stands_as.map(|t| {
         Cow::Owned(Entry {
             name: e.name.clone(),
             kind: t.kind,
@@ -156,7 +156,7 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
     use crate::conflict::tests::{file_of, plant_conflicted};
-    use crate::conflict::{Own, Term};
+    use crate::conflict::{Own, Record, Term};
     use crate::save::Person;
     use crate::test_support::{HOSTILE, assert_hostile_text_escaped, plant_save};
 

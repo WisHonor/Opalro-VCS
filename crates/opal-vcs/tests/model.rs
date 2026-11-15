@@ -9,7 +9,9 @@ use std::path::Path;
 use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
-use opal_core::combine::{self, CombineError, Combined, Held, Keep, Named, NotKept, Stands};
+use opal_core::combine::{
+    self, CombineError, Combined, Held, HeldBy, Keep, Named, NotKept, Stands,
+};
 use opal_core::conflict::Term;
 use opal_core::diary::{self, Action, FolderChange, Position, Tag, TagList};
 use opal_core::diff::ChangeKind;
@@ -1578,7 +1580,11 @@ fn then_with_conflicts(repo: &mut Repository, m: &mut Model, root: &Path, pick: 
             resolve_at(repo, m, asked, ResolveHow::Pattern, true);
         }
         2 => drop(resolve_at(repo, m, path(&place), ResolveHow::Paths, yes)),
-        3 => drop(resolve_at(repo, m, path("d"), ResolveHow::Paths, yes)),
+        3 => {
+            // One place fixed by hand: a folder's path records it and leaves the rest.
+            fix_file(m, root, pick);
+            resolve_at(repo, m, path("d"), ResolveHow::Paths, yes);
+        }
         4 => drop(resolve_at(
             repo,
             m,
@@ -2833,12 +2839,12 @@ type MadeRow = (String, String, Option<Stands>);
 enum Stopped {
     Unrelated,
     Tangled,
-    /// Asked for a clean line: the conflicts it would make, and how many the result would hold
-    /// already, on a forward the target's.
+    /// Asked for a clean line: the conflicts it would make, how many the result would hold
+    /// already, and who holds those: the two lines, the target's save, or the line's own.
     Unclean {
         made: Vec<MadeRow>,
         held: u64,
-        forward: bool,
+        by: HeldBy,
     },
     /// Both lines changed `path`, and `on` holds a conflict at `at`, the path or below it.
     Held {
@@ -2854,36 +2860,38 @@ impl Stopped {
             (Stopped::Unrelated, Err(CombineError::Unrelated { .. }))
             | (Stopped::Tangled, Err(CombineError::Tangled { .. })) => {}
             (
-                Stopped::Unclean {
-                    made,
-                    held,
-                    forward,
-                },
+                Stopped::Unclean { made, held, by },
                 Err(CombineError::Conflicts {
                     conflicts,
                     more,
                     why,
                     held: got_held,
-                    forward: got_forward,
+                    by: got_by,
                     ..
                 }),
             ) => {
                 let got: Vec<MadeRow> = conflicts.iter().map(row_of).collect();
                 assert_eq!(
-                    (&got, *more, *why, *got_held, *got_forward),
-                    (made, 0, NotKept::OnlyIfClean, *held, *forward),
+                    (&got, *more, *why, *got_held, *got_by),
+                    (made, 0, NotKept::OnlyIfClean, *held, *by),
                     "what a combine asked for a clean line met"
                 );
                 for (_, row, _) in made {
                     met(clash_kind(row));
                 }
-                if *forward {
-                    met("--only-if-clean: a forward onto a save in conflict");
-                } else if !made.is_empty() {
-                    met("--only-if-clean: a conflict it would make");
-                }
-                if *held > 0 && !*forward {
-                    met("--only-if-clean: a conflict carried from a line");
+                match by {
+                    HeldBy::Target => met("--only-if-clean: a forward onto a save in conflict"),
+                    HeldBy::Line => {
+                        met("--only-if-clean: nothing to combine on a save in conflict")
+                    }
+                    HeldBy::Lines => {
+                        if !made.is_empty() {
+                            met("--only-if-clean: a conflict it would make");
+                        }
+                        if *held > 0 {
+                            met("--only-if-clean: a conflict carried from a line");
+                        }
+                    }
                 }
             }
             (
@@ -2973,6 +2981,14 @@ fn combine_into(
     };
     let from = m.state.on;
     if history(m, &[from]).contains(&with) {
+        // Asked for a clean line, nothing to combine still promises the line's save is clean.
+        let held = m.saves[from].stored.kept.len() as u64;
+        if keep == Keep::OnlyIfClean && held > 0 {
+            let (made, by) = (Vec::new(), HeldBy::Line);
+            Stopped::Unclean { made, held, by }.holds(&done);
+            settle(repo, m, Vec::new());
+            return;
+        }
         let done = done.unwrap();
         assert_eq!(
             (done.result, done.save),
@@ -2984,14 +3000,8 @@ fn combine_into(
     let (into, made) = if history(m, &[with]).contains(&from) {
         let held = m.saves[with].stored.kept.len() as u64;
         if keep == Keep::OnlyIfClean && held > 0 {
-            let made = Vec::new();
-            let forward = true;
-            Stopped::Unclean {
-                made,
-                held,
-                forward,
-            }
-            .holds(&done);
+            let (made, by) = (Vec::new(), HeldBy::Target);
+            Stopped::Unclean { made, held, by }.holds(&done);
             settle(repo, m, Vec::new());
             return;
         }
@@ -3220,11 +3230,10 @@ fn combined(
     // Asked for a clean line, the conflicts it would make stop it, and so do those it carries.
     let held = done.tree.kept.len() as u64;
     if sides.is_none() && (!done.made.is_empty() || held > 0) {
-        let forward = false;
         return Err(Stopped::Unclean {
             made: done.made,
             held,
-            forward,
+            by: HeldBy::Lines,
         });
     }
     Ok(Combine {
@@ -4330,19 +4339,26 @@ fn resolve_at(
     let several = matches!(&asked_for, Some(Asked::Path(top)) if !top.is_empty()
         && listed.iter().filter(|(p, _)| within(p, top)).count() > 1);
     let fixed = |s: &Standing| *s == Standing::Fixed;
-    // The places named, or those the folder shows fixed; a pattern takes only those too.
+    let below = |top: &str| -> Vec<&(String, Standing)> {
+        (listed.iter())
+            .filter(|(p, _)| top.is_empty() || within(p, top))
+            .collect()
+    };
+    // A place named by its own path, whatever it shows. A folder's path stands for the places
+    // below it and a pattern for those it matches, and of those, without a side named, both take
+    // only what the folder shows fixed, as no paths do.
     let chosen: Vec<&(String, Standing)> = match &asked_for {
         None => listed.iter().filter(|(_, s)| fixed(s)).collect(),
-        Some(Asked::Path(top)) => listed
-            .iter()
-            .filter(|(p, _)| top.is_empty() || within(p, top))
+        Some(Asked::Path(top)) => below(top)
+            .into_iter()
+            .filter(|(p, s)| p == top || keep.is_some() || fixed(s))
             .collect(),
         Some(Asked::Pattern(place)) => listed
             .iter()
             .filter(|(p, s)| p == place && (keep.is_some() || fixed(s)))
             .collect(),
     };
-    if matches!(asked_for, Some(Asked::Path(_))) && chosen.is_empty() {
+    if matches!(&asked_for, Some(Asked::Path(top)) if below(top).is_empty()) {
         refused(&done, "not in conflict");
         met("resolve refused: not in conflict");
         settle(repo, m, Vec::new());
@@ -4458,7 +4474,7 @@ fn resolve_at(
     let held = std::mem::replace(&mut m.folder, folder);
     stepped(repo, m, "resolve", was, held);
     if several {
-        met("resolve at a folder above several places");
+        met("resolve at a folder above several places, of what is fixed");
     }
     met(match how {
         ResolveHow::All => "resolve with no paths",
@@ -5010,7 +5026,7 @@ const MUST_MEET: [&str; 37] = [
     "resolve refused: not in conflict",
     "resolve refused: still yours",
     "resolve refused: markers left, answered no",
-    "resolve at a folder above several places",
+    "resolve at a folder above several places, of what is fixed",
     "a marked file fixed by hand",
     "save fixed a marked text",
     "save kept a half-fixed text",

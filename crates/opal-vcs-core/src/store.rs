@@ -240,6 +240,9 @@ pub struct Store {
     listings_read: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     conflicts_read: std::sync::atomic::AtomicUsize,
+    /// How many records commands kept something of, and the versions that holds, on any thread.
+    #[cfg(test)]
+    kept: Mutex<(usize, usize)>,
     /// This store's packs while they are open.
     #[cfg(test)]
     counted: Arc<crate::pack::open_files::Count>,
@@ -444,6 +447,8 @@ impl Store {
             listings_read: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             conflicts_read: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            kept: Mutex::default(),
             #[cfg(test)]
             counted: Arc::default(),
         };
@@ -986,6 +991,8 @@ impl Store {
             #[cfg(test)]
             conflicts_read: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
+            kept: Mutex::default(),
+            #[cfg(test)]
             counted: Arc::default(),
         }
     }
@@ -1403,6 +1410,19 @@ impl Store {
     pub(crate) fn conflicts_read(&self) -> usize {
         self.conflicts_read
             .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// A command kept what it uses of a record, holding `versions` of its versions.
+    #[cfg(test)]
+    pub(crate) fn note_kept(&self, versions: usize) {
+        let mut kept = self.kept.lock().unwrap_or_else(PoisonError::into_inner);
+        *kept = (kept.0 + 1, kept.1 + versions);
+    }
+
+    /// How many records commands kept something of, and how many versions that holds.
+    #[cfg(test)]
+    pub(crate) fn kept(&self) -> (usize, usize) {
+        *self.kept.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     #[cfg(test)]
