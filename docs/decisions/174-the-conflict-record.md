@@ -5,7 +5,7 @@
 - **Agenda topic:** none (milestone 9 planning)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 007](007-conflicts.md) (a conflict keeps every version, as a list of terms, with the person's half-fixed version); [decision 148](148-what-format-1s-spec-says-before-it-freezes.md) (the conflict record's layout was left a draft, to arrive with the `conflicts` feature)
-- **Refined by:** [decision 181](181-what-building-milestone-9-refined.md) (a command reads each record once, and remembers records within a budget)
+- **Refined by:** [decision 181](181-what-building-milestone-9-refined.md) (a command reads each record once, and remembers records within a budget); [decision 182](182-red-team-m9-rulings.md) (a command keeps of a record what it uses, not the record)
 
 ## Context
 

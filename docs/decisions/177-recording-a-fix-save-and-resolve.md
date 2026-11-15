@@ -5,7 +5,7 @@
 - **Agenda topic:** none (milestone 9 planning)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 007](007-conflicts.md) ("fixed" means the markers are gone, or the person marks the file as fixed; a command keeps any version); [decision 003](003-working-copy-model.md) (a save can hold conflicts, so people can keep working and fix them later); [decision 142](142-bolt-sends-nothing-and-each-build-proves-it.md) (Opalro starts no other program)
-- **Refined by:** [decision 181](181-what-building-milestone-9-refined.md) (renames; names; `save <paths>`; what `resolve` takes, records and refuses; where `--copy` may write; "N places")
+- **Refined by:** [decision 181](181-what-building-milestone-9-refined.md) (renames; names; `save <paths>`; what `resolve` takes, records and refuses; where `--copy` may write; "N places"); [decision 182](182-red-team-m9-rulings.md) (a folder's path given to `resolve` is read as a pattern is; what `--copy before` says with nothing to copy)
 
 ## Context
 

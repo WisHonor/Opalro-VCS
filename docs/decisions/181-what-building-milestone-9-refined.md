@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 9 build)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 174](174-the-conflict-record.md) (how often a record is read, and how many are remembered); [decision 175](175-what-a-combine-keeps-as-a-conflict.md) (what `--only-if-clean` promises; when a held conflict stops a combine; starting points that disagree; the check below a folder); [decision 176](176-a-conflict-in-the-folder.md) (a label's long name; what `status` reads); [decision 177](177-recording-a-fix-save-and-resolve.md) (renames, names and `save <paths>`; what `resolve` takes, records and refuses; where `--copy` may write); [decision 178](178-the-conflicts-feature.md) (what `setup --upgrade` offers); [decision 179](179-every-command-and-a-conflict.md) (what `status`, `goto`, `show` and `combine` say); [decision 004](004-project-contents.md) (new names are judged against a conflict's name too); [decision 116](116-gits-words-as-shortcuts.md) (how long an explanation of a Git word is); [decision 117](117-what-json-covers-at-v0.1.md) (when a `--json` field may take a new value); [decisions 172](172-red-team-m8-session-2-rulings.md) and [173](173-the-rules-of-both-lines-decide-what-a-combine-merges.md) (which files the rules are asked about)
+- **Refined by:** [decision 182](182-red-team-m9-rulings.md) (the red team's four findings: the promise of `--only-if-clean` has no exception; the memory a command holds for records is settled)
 
 ## Context
 
