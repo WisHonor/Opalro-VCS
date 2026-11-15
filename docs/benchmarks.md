@@ -1146,4 +1146,20 @@ Time grows in a straight line with the number of conflicts. `goto` to the save o
 
 - Linux and macOS for the times above: they are from one Windows laptop.
 
-A Nightly run on the milestone's last commit is still to come.
+### The Nightly run on the milestone's last code
+
+The Nightly workflow, started by hand on `a695479` ([run 43768324503](https://github.com/WisHonor/Opalro-VCS/actions/runs/43768324503)), the last commit of the milestone that changes code (those after it change documents and one check in the workflow). Measured on 2026-11-15.
+
+- **Git's own repository** (the differential job): imported in 114.3 s, 441 MiB at peak (86,289 commits, 1 line, 8 server lines, 1,018 tags), every commit, tree, file and ref matching Git. The common starting points match `git merge-base --all` on the 64 pairs of tips; the ancestry walk on those pairs took 11,331.6 ms; a change ID no save has took 0.84 s to look for (§12: 150.0 s, 19,136.5 ms and 1.44 s; how long these take depends on the runner's processor, §3).
+- **The gate** (`bench/run.sh gate`: Opalro's median, Git's median, the ratio; limits: `status` and the small save 2, `goto` 3.5). The Linux job was run a second time, and got another processor:
+
+  | | `status` | Small save | `goto` |
+  |---|---|---|---|
+  | Linux, Xeon 6975P-C | 14.1 ms, 6.2 ms, **2.288, over** | 17.8 ms, 17.1 ms, 1.046 | 20.6 ms, 9.0 ms, 2.297 |
+  | Linux again, EPYC 7763 | 22.3 ms, 11.6 ms, 1.924 | 28.6 ms, 26.7 ms, 1.072 | 32.6 ms, 15.0 ms, 2.180 |
+  | Windows | 71.8 ms, 43.4 ms, 1.654 | 80.8 ms, 126.1 ms, 0.641 | 87.6 ms, 52.8 ms, 1.659 |
+
+- **`status` on Linux is over its limit on the Xeon and under it on the EPYC,** as in §11 and §12: the ratio depends on which processor the runner has. On the Xeon, Opalro's own time was 14.1 ms in this run, where milestone 8's run on the same processor type had 12.7 ms and §11's runs 13.1 to 13.9 ms. One run can't tell a slowdown of a millisecond from the spread between runners, and nothing was timed part by part; the engine's tests that count what is read say a project without conflicts reads nothing more than before. Whether `status` got slower is the first thing the next milestone's speed work times.
+- **`goto` is over the v0.2 goal of twice Git's time** on Linux in both runs (2.297 and 2.180), and under it on Windows.
+- **The model test** ran 1,024 new cases in a release build beside its fixed pass: all five of its tests passed, in 143.7 s. The job was marked failed all the same: its last line still looked for "1 passed", from when the file held one test. That check now asks for at least one test passed and none failed.
+- Every other job passed: `status` on 100,000 unchanged files, the two sweeps, the move notes, the memory gate and the fuzz targets.
