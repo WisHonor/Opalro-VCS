@@ -15,7 +15,9 @@ use crate::conflict::{Own, Record, Term};
 use crate::diff::again;
 use crate::id::Id;
 use crate::ingest::store_held;
-use crate::listing::{Entry, EntryKind, Listing, MAX_ENTRIES, SaveLimits};
+use crate::listing::{
+    Entry, EntryKind, Listing, MAX_ENTRIES, MAX_SAVE_DEPTH, MAX_SAVE_ENTRIES, SaveLimits,
+};
 use crate::names::{PortabilityProblem, folder_problems};
 use crate::pack::PackSet;
 use crate::rules::{LineMerge, RuleMatcher};
@@ -53,6 +55,12 @@ pub(crate) struct Made {
     /// Whether conflicts are kept (the project keeps them, and `Keep::Conflicts`), with what
     /// every label of this combine is made from; each file's labels come from it.
     pub keep: Option<Sides>,
+    /// Whether the project keeps conflicts: only then is a place a line holds in conflict
+    /// refused as one.
+    pub keeps: bool,
+    /// The most entries the checks for a conflict below a folder may read in each version
+    /// (`MAX_SAVE_ENTRIES`; tests lower it).
+    pub max_below: u64,
 }
 
 impl Default for Made {
@@ -68,13 +76,15 @@ impl Default for Made {
             notes_spent: false,
             records: HashMap::new(),
             keep: None,
+            keeps: false,
+            max_below: MAX_SAVE_ENTRIES,
         }
     }
 }
 
 #[derive(Debug)]
 pub(crate) struct Merged {
-    /// The merged root listing, in `packs` and `made`; meaningless when there are conflicts.
+    /// The merged root listing, in `packs` and `made`; meaningless when a conflict isn't kept.
     pub root: Id,
     /// Files merged line by line, in path order.
     pub merged_files: Vec<String>,
@@ -135,6 +145,7 @@ pub(crate) fn merge_trees(
         merged.root = root.unwrap_or(ours);
         return Ok(merged);
     }
+    let max_below = made.max_below;
     let mut walk = Walk {
         store,
         packs,
@@ -144,6 +155,7 @@ pub(crate) fn merge_trees(
         moved,
         deadline,
         limits: [(); 3].map(|()| SaveLimits::default()),
+        below: [(); 2].map(|()| (SaveLimits::new(MAX_SAVE_DEPTH, max_below), HashSet::new())),
         merged,
     };
     // What is left to do waits here, not in a call per folder level: a save may nest deeper than
@@ -280,6 +292,9 @@ struct Walk<'a> {
     deadline: Duration,
     /// Each version is held to a save's limits on its own.
     limits: Three<SaveLimits>,
+    /// Ours' and theirs' checks for a conflict below a folder: their limits, held across the
+    /// merge, and the folders walked already, each walked once however many places name it.
+    below: [(SaveLimits, HashSet<Id>); 2],
     merged: Merged,
 }
 
@@ -371,8 +386,9 @@ impl Walk<'_> {
     ) -> Result<Option<Entry>, CombineError> {
         let held = |e: &Option<Entry>| e.as_ref().is_some_and(|e| e.kind == EntryKind::Conflict);
         // A conflict is never made inside another one: the line holding it fixes it first.
+        // Without the feature such an entry is no conflict to Opalro, as before.
         let on = match (held(&o), held(&t)) {
-            _ if self.inner => None,
+            _ if self.inner || !self.made.keeps => None,
             (true, true) => Some(Held::Both),
             (true, false) => Some(Held::Ours),
             (false, true) => Some(Held::Theirs),
@@ -440,7 +456,10 @@ impl Walk<'_> {
         here: Parted,
     ) -> Result<Option<Entry>, CombineError> {
         let (o, t) = match &terms {
-            [Some(o), _, Some(t)] if is_file(o) && is_file(t) => (o.clone(), t.clone()),
+            // The same contents (the executable mark aside) are nothing for the rules to decide.
+            [Some(o), _, Some(t)] if is_file(o) && is_file(t) && o.id != t.id => {
+                (o.clone(), t.clone())
+            }
             _ => return self.clashed(path, name, clash, terms),
         };
         match self.contents(path, None, &o, &t, here)? {
@@ -677,13 +696,20 @@ impl Walk<'_> {
     }
 
     /// The first conflict found in the folder listing `id` at `path` of version `v`, or below
-    /// it: that folder alone is walked, held to a save's limits.
-    fn conflict_below(&self, path: &str, id: Id, v: usize) -> Result<Option<String>, CombineError> {
-        let mut limits = SaveLimits::default();
-        let mut seen = HashSet::new();
+    /// it (`v` 1 for ours, 2 for theirs): only folders not walked before are read, all of them
+    /// together held to that version's limits.
+    fn conflict_below(
+        &mut self,
+        path: &str,
+        id: Id,
+        v: usize,
+    ) -> Result<Option<String>, CombineError> {
+        let [ours, theirs] = &mut self.below;
+        let (limits, seen) = if v == 1 { ours } else { theirs };
         let mut todo = vec![(path.to_owned(), id, path.split('/').count())];
         while let Some((at, id, depth)) = todo.pop() {
-            // A listing met again holds what it held the first time.
+            // A listing met again holds what it held the first time; a conflict found in one
+            // stops the combine, so every folder in `seen` holds none.
             if !seen.insert(id) {
                 continue;
             }

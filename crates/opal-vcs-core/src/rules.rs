@@ -1559,18 +1559,27 @@ mod tests {
         /// The rules read from a save whose top folder holds a file of `NO_MARKERS` under each
         /// name of `names`, and `other.txt`.
         fn saved_as(repo: &mut Repository, names: &[&str]) -> Result<RulesRead, StoreError> {
+            let named: Vec<_> = names.iter().map(|n| (*n, NO_MARKERS)).collect();
+            saved_with(repo, &named)
+        }
+
+        /// The rules read from a save whose top folder holds each `(name, contents)`, and
+        /// `other.txt`.
+        fn saved_with(
+            repo: &mut Repository,
+            files: &[(&str, &[u8])],
+        ) -> Result<RulesRead, StoreError> {
             let lock = repo.lock_for_change("test", &mut |_| {}).unwrap();
             let mut packs = repo.new_packs().unwrap();
-            let id = packs.add_content(NO_MARKERS).unwrap();
-            repo.store_packs(&lock, packs).unwrap();
-            let entry = |name: &str| crate::listing::Entry {
+            let mut entry = |name: &str, bytes: &[u8]| crate::listing::Entry {
                 name: name.into(),
                 kind: EntryKind::File,
-                id,
-                size: NO_MARKERS.len() as u64,
+                id: packs.add_content(bytes).unwrap(),
+                size: bytes.len() as u64,
             };
-            let mut entries: Vec<_> = names.iter().map(|n| entry(n)).collect();
-            entries.push(entry("other.txt"));
+            let mut entries: Vec<_> = files.iter().map(|(n, b)| entry(n, b)).collect();
+            entries.push(entry("other.txt", NO_MARKERS));
+            repo.store_packs(&lock, packs).unwrap();
             entries.sort_by(|a, b| a.name.cmp(&b.name));
             read_saved(repo.store(), &Listing::new(entries).unwrap())
         }
@@ -1578,12 +1587,18 @@ mod tests {
         #[test]
         fn the_other_sides_rules_file_is_found_by_its_exact_name() {
             let (_dir, mut repo) = project();
-            // The exact name wins over one alike but for case.
-            for names in [&["opalro.toml"][..], &["OPALRO.TOML", "opalro.toml"]] {
-                let read = saved_as(&mut repo, names).unwrap();
-                assert!(read.file && read.skipped.is_none(), "{names:?}");
+            // The exact name wins over one alike but for case, which holds two rules.
+            let two = [NO_MARKERS, NO_MARKERS].concat();
+            for files in [
+                &[("opalro.toml", NO_MARKERS)][..],
+                &[("OPALRO.TOML", &two[..]), ("opalro.toml", NO_MARKERS)],
+            ] {
+                let read = saved_with(&mut repo, files).unwrap();
+                assert!(read.file && read.skipped.is_none());
                 assert_eq!(read.rules.rules.len(), 1);
             }
+            let read = saved_with(&mut repo, &[("OPALRO.TOML", &two[..])]).unwrap();
+            assert_eq!(read.rules.rules.len(), 2);
         }
 
         #[test]
@@ -1628,6 +1643,27 @@ mod tests {
                 let root = Listing::new(vec![entry]).unwrap();
                 let err = read_saved(repo.store(), &root).unwrap_err();
                 assert!(matches!(err, StoreError::Missing(_)), "{err:?}");
+            }
+            // Its only copy fails its check.
+            let damaged = b"[[rule]]
+files = [\"*.x\"]
+conflict-markers = false
+";
+            crate::test_support::plant_damaged_copies(
+                repo.packs_dir(),
+                &[(ObjectKind::Content, damaged)],
+            );
+            let repo = Repository::open(repo.root()).unwrap();
+            for name in ["opalro.toml", "Opalro.toml"] {
+                let entry = crate::listing::Entry {
+                    name: name.into(),
+                    kind: EntryKind::File,
+                    id: hash_content(damaged),
+                    size: damaged.len() as u64,
+                };
+                let root = Listing::new(vec![entry]).unwrap();
+                let err = read_saved(repo.store(), &root).unwrap_err();
+                assert!(!matches!(err, StoreError::Missing(_)), "{err:?}");
             }
         }
     }

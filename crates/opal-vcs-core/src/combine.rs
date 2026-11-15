@@ -1051,6 +1051,7 @@ fn make_save(
     let start = inner.start_from(&starts)?;
     let starts_unfollowed = inner.unfollowed;
     let keeps = repo.keeps_conflicts();
+    made.keeps = keeps;
     if asked.keep == Keep::Conflicts && keeps {
         made.keep = Some(sides(repo, asked, line, from, with, &starts)?);
     }

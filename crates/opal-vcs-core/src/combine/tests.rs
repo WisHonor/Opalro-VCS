@@ -6212,3 +6212,213 @@ fn every_kept_record_reads_back_and_names_stored_versions() {
     }
     h.assert_as_goto_gives();
 }
+
+/// Ours holding the same folder (one listing) at each of `n` places;
+/// theirs a file at each of those places.
+fn folders_against_files(n: usize) -> [Tree; 2] {
+    let mut o = Tree::new();
+    let mut t = Tree::new();
+    for i in 0..n {
+        o.insert(format!("p{i}/a.txt"), f("a\n"));
+        o.insert(format!("p{i}/deep/b.txt"), f("b\n"));
+        t.insert(format!("p{i}"), f("a file\n"));
+    }
+    [o, t]
+}
+
+#[test]
+fn a_folder_held_at_many_places_is_checked_once() {
+    let mut fx = Fixture::new();
+    let [o, t] = folders_against_files(10);
+    let ids = fx.three(&Tree::new(), &o, &t);
+    let read = |fx: &mut Fixture, keep| {
+        let mut made = Made {
+            keep,
+            ..Made::default()
+        };
+        let before = counted::listings();
+        let m = fx.merge_with(ids, &no_rules(), false, &mut made).unwrap();
+        (m, counted::listings() - before)
+    };
+    let (_, clean) = read(&mut fx, None);
+    let (m, kept) = read(&mut fx, Some(sides()));
+    assert_eq!(m.conflicts.len(), 10);
+    // The folder and the one in it, once for all ten places.
+    assert_eq!(kept - clean, 2);
+}
+
+#[test]
+fn the_checks_of_one_version_together_are_held_to_its_limits() {
+    let mut fx = Fixture::new();
+    // Two different folders of three entries each, against a limit of five.
+    let o = tree(&[
+        ("p/a.txt", f("a\n")),
+        ("p/b.txt", f("b\n")),
+        ("p/c.txt", f("c\n")),
+        ("q/a.txt", f("d\n")),
+        ("q/b.txt", f("e\n")),
+        ("q/c.txt", f("f\n")),
+    ]);
+    let t = tree(&[("p", f("p\n")), ("q", f("q\n"))]);
+    let ids = fx.three(&Tree::new(), &o, &t);
+    let merge = |fx: &mut Fixture, max_below| {
+        let mut made = Made {
+            keep: Some(sides()),
+            max_below,
+            ..Made::default()
+        };
+        fx.merge_with(ids, &no_rules(), false, &mut made)
+    };
+    assert_eq!(merge(&mut fx, 6).unwrap().conflicts.len(), 2);
+    let err = merge(&mut fx, 5).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            CombineError::Past {
+                which: Which::Ours,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+}
+
+#[test]
+fn without_the_feature_a_conflict_entry_on_a_line_is_milestone_8s_clash() {
+    let dir = tempfile::tempdir().unwrap();
+    Repository::init(dir.path(), &ada()).unwrap();
+    let repo = crate::test_support::without_conflicts_feature(dir.path());
+    let first = repo.current().unwrap().1.state.lines["main"];
+    let mut h = Hist {
+        dir,
+        repo,
+        first,
+        keep: Keep::Conflicts,
+    };
+    let c = plant_record(&mut h, [b"mine\n", b"was\n", b"theirs\n"]);
+    let base = tree(&[("x.txt", f("was\n"))]);
+    let main = tree(&[("x.txt", V::Conflict(c))]);
+    let side = tree(&[("x.txt", f("side\n"))]);
+    planted_lines(&mut h, &base, &main, &side);
+    let before = h.untouched();
+    let err = combine_in(&mut h, "side").unwrap_err();
+    assert_eq!(
+        err.to_string(),
+        "Combining side into main would leave 1 file in conflict, which Opalro can't keep yet, \
+         so nothing was changed:\n  x.txt: changed on both lines, and only files are merged \
+         line by line"
+    );
+    assert_untouched(&h, &before);
+}
+
+#[test]
+fn files_both_added_alike_but_for_the_mark_are_no_question_for_the_rules() {
+    let mut fx = Fixture::new();
+    let broken = RulesRead {
+        skipped: Some("it isn't TOML".into()),
+        ..RulesRead::default()
+    };
+    let none = RulesRead::default();
+    let ids = fx.three(
+        &Tree::new(),
+        &tree(&[("a.sh", x("echo\n"))]),
+        &tree(&[("a.sh", f("echo\n"))]),
+    );
+    for rules in [
+        no_rules(),
+        RuleMatcher::new(&broken, &none),
+        RuleMatcher::new(&none, &broken),
+    ] {
+        let (m, _) = fx.keeping(ids, &rules);
+        one_kept(&m, "a.sh", Clash::BothAdded, Stands::Yours);
+        assert_eq!(m.rules_not_whole, None);
+    }
+}
+
+#[test]
+fn while_the_rules_are_not_read_whole_text_both_added_stops_the_combine() {
+    let added = |h: &mut Hist, side_rules: &[(&str, V)]| {
+        let first = h.first;
+        let base = h.save("main", first, &tree(&[("b.txt", f("b\n"))]));
+        let side = with(
+            &tree(&[("b.txt", f("b\n")), ("a.txt", f("side\n"))]),
+            side_rules,
+        );
+        let side = h.plant(&[base], &side, Some(&[]));
+        h.set(|s| {
+            s.lines.insert("side".into(), side);
+        });
+        h.save(
+            "main",
+            base,
+            &tree(&[("b.txt", f("b\n")), ("a.txt", f("main\n"))]),
+        );
+    };
+    let mut h = Hist::new();
+    added(&mut h, &[]);
+    rules_file(&h, BROKEN);
+    let before = h.untouched();
+    let err = combine_in(&mut h, "side").unwrap_err();
+    assert_eq!(undecided(&err), (vec!["a.txt"], Side::Ours));
+    assert_eq!(err.hint().unwrap(), RULES_HINT);
+    assert_untouched(&h, &before);
+    let mut h = Hist::new();
+    added(&mut h, &[("opalro.toml", f(BROKEN))]);
+    let before = h.untouched();
+    let err = combine_in(&mut h, "side").unwrap_err();
+    assert_eq!(undecided(&err), (vec!["a.txt"], Side::Theirs));
+    assert_eq!(err.hint().unwrap(), THEIRS_HINT);
+    assert_untouched(&h, &before);
+}
+
+#[test]
+fn a_file_against_a_link_is_kept_standing_as_yours() {
+    let mut fx = Fixture::new();
+    for [s, o, t] in [
+        [f("a\n"), f("b\n"), link("x")],
+        [f("a\n"), link("x"), f("b\n")],
+    ] {
+        let one = |v: &V| tree(&[("l", v.clone())]);
+        let (m, _) = fx.kept(&one(&s), &one(&o), &one(&t));
+        one_kept(
+            &m,
+            "l",
+            Clash::BothChanged(NotMerged::NotFiles),
+            Stands::Yours,
+        );
+        let r = fx.record(m.root, "l");
+        assert_eq!(fx.terms(&r), [Some(o), Some(s), Some(t)]);
+        assert_eq!(r.own, None);
+    }
+}
+
+#[test]
+fn a_held_conflict_met_after_places_were_kept_leaves_nothing_behind() {
+    let mut h = Hist::new();
+    let c = plant_record(&mut h, [b"mine\n", b"was\n", b"theirs\n"]);
+    // `a.txt` is kept with markers and `b.bin` as yours before `z.txt` is met.
+    let base = tree(&[
+        ("a.txt", f(BODY)),
+        ("b.bin", f("b\0")),
+        ("z.txt", f("was\n")),
+    ]);
+    let main = tree(&[
+        ("a.txt", edit(2, "main")),
+        ("b.bin", f("main\0")),
+        ("z.txt", V::Conflict(c)),
+    ]);
+    let side = tree(&[
+        ("a.txt", edit(2, "side")),
+        ("b.bin", f("side\0")),
+        ("z.txt", f("side\n")),
+    ]);
+    planted_lines(&mut h, &base, &main, &side);
+    let before = h.untouched();
+    let err = combine_in(&mut h, "side").unwrap_err();
+    assert!(
+        matches!(&err, CombineError::HeldConflict { path, .. } if path == "z.txt"),
+        "{err:?}"
+    );
+    // No pack, and so no record, marked text or listing, and nothing in `tmp`; the line stays.
+    assert_untouched(&h, &before);
+}
