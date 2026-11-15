@@ -1379,3 +1379,105 @@ fn keep_replaces_a_fix_and_a_saved_own_version() {
     assert_eq!(fx.file(id, "pic.png"), PIC_SIDE);
     fx.assert_folder_is_goto_of(id);
 }
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn markers_gone_only_while_status_scans_are_never_recorded() {
+    use crate::fsio::fault;
+    // Markers when the walk takes the file's ID, none when it is scanned, markers again before
+    // the walk that records: the scanned bytes are what was decided on, so nothing is recorded.
+    let (mut fx, combined) = conflicted();
+    fx.write("a.txt", A_HALF);
+    let head = fx.head();
+    let at = fx.root().join("a.txt");
+    fault::act_at("status:scanning", move || {
+        fs::write(&at, A_FIXED).unwrap();
+        fault::act_at("resolve:chosen", move || fs::write(&at, A_HALF).unwrap());
+    });
+    let mut asked = 0;
+    let err = fx
+        .resolve_with(None, None, false, &mut |_| {
+            asked += 1;
+            true
+        })
+        .unwrap_err();
+    assert!(
+        matches!(&err, ResolveError::Save(SaveError::ChangedDuringSave { path }) if path == "a.txt"),
+        "{err:?}"
+    );
+    assert_eq!(asked, 0);
+    assert_eq!((fx.head(), fx.tip()), (head, combined));
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn status_shows_the_bytes_it_scanned() {
+    use crate::fsio::fault;
+    // The marked text untouched when the walk takes its ID, fixed when it is scanned.
+    let (fx, _) = conflicted();
+    let at = fx.root().join("a.txt");
+    fault::act_at("status:scanning", move || fs::write(&at, A_FIXED).unwrap());
+    let status = crate::status::status(&fx.repo, false, None).unwrap();
+    let a = &status.conflicts[0];
+    assert_eq!(a.standing, Standing::Fixed);
+    assert_eq!(
+        a.now,
+        Some((EntryKind::File, crate::id::hash_content(A_FIXED)))
+    );
+}
+
+/// `main` made the folder `dir` holding two files, `side` the file `dir`. The project is on
+/// `main`, at the save combining them, which holds a conflict at `dir` standing as the folder.
+fn folder_against_file() -> (Fx, Id) {
+    let mut fx = Fx::new();
+    fx.write("keep.txt", b"k\n");
+    fx.save("Start");
+    fx.line_new("side");
+    fx.write("dir", b"a file\n");
+    fx.save("Side work");
+    fx.goto(Target::Line("main".into()));
+    fx.write("dir/x.txt", b"x\n");
+    fx.write("dir/y.txt", b"y\n");
+    fx.save("Main work");
+    let combined = fx.combine("side");
+    assert_eq!(fx.rows(), [("dir".to_owned(), Standing::Yours)]);
+    (fx, combined)
+}
+
+#[test]
+fn a_folder_changed_in_place_is_recorded_as_it_stands() {
+    let (mut fx, _) = folder_against_file();
+    fx.write("dir/x.txt", b"x fixed\n");
+    let (id, _, _, done, ..) = recorded(fx.resolve(Some(&["dir"]), None).unwrap());
+    assert_eq!(done, ["dir"]);
+    assert_eq!(fx.entry(id, "dir").unwrap().kind, EntryKind::Folder);
+    assert_eq!(fx.file(id, "dir/x.txt"), b"x fixed\n");
+    fx.assert_folder_is_goto_of(id);
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn a_folder_that_changes_between_the_reads_stops_resolve() {
+    type Change = fn(&Path);
+    let changes: [(&str, Change); 3] = [
+        ("changed", |root| {
+            fs::write(root.join("dir/y.txt"), b"y again\n").unwrap()
+        }),
+        ("added", |root| {
+            fs::write(root.join("dir/z.txt"), b"z\n").unwrap()
+        }),
+        ("removed", |root| {
+            fs::remove_file(root.join("dir/y.txt")).unwrap()
+        }),
+    ];
+    for (what, change) in changes {
+        let (mut fx, _) = folder_against_file();
+        fx.write("dir/x.txt", b"x fixed\n");
+        let root = fx.root().to_path_buf();
+        let err = changed_between_the_reads(&mut fx, Some(&["dir"]), move || change(&root));
+        assert!(
+            matches!(&err, ResolveError::Save(SaveError::ChangedDuringSave { path }) if path == "dir"),
+            "{what}: {err:?}"
+        );
+    }
+}

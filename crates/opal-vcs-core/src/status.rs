@@ -5,7 +5,7 @@ use std::ffi::OsStr;
 use std::io;
 use std::path::Path;
 
-use crate::conflict::{self, Left, MIN_MARKER, Record, Seen, markers, stands_as};
+use crate::conflict::{self, Left, MIN_MARKER, Record, Seen, stands_as};
 use crate::diary::Position;
 use crate::diff::{ChangeKind, FileChange, change_at, for_each_entry_change_in};
 use crate::history::tip_of;
@@ -13,7 +13,7 @@ use crate::id::Id;
 use crate::listing::{Entry, EntryKind};
 use crate::repo::Repository;
 use crate::save::Save;
-use crate::snapshot::{FolderNow, SaveError, kept_in_the_way, read_folder};
+use crate::snapshot::{FolderNow, SaveError, kept_in_the_way, read_folder, scan_hashed};
 use crate::store::StoreError;
 use crate::text::escape;
 use crate::warning::Warning;
@@ -155,17 +155,23 @@ pub(crate) fn each_difference<E: From<StoreError>>(
 }
 
 /// The marker lines of length `len` in the file at `path`, read through `disk`, opened when
-/// first needed.
-fn markers_at(disk: &mut Option<Folders>, root: &Path, path: &str, len: u8) -> io::Result<Left> {
+/// first needed, and the content ID of the bytes scanned.
+fn markers_at(
+    disk: &mut Option<Folders>,
+    root: &Path,
+    path: &str,
+    len: u8,
+) -> io::Result<(Left, Id)> {
     let disk = match disk {
         Some(disk) => disk,
         None => disk.insert(Folders::open(root)?),
     };
     let (up, name) = path.rsplit_once('/').unwrap_or(("", path));
     disk.enter(up)?;
+    crate::fsio::act_point("status:scanning");
     crate::fsio::open_point(path)?;
-    let mut file = disk.here().open_file(OsStr::new(name))?;
-    markers::scan(&mut file, len)
+    let file = disk.here().open_file(OsStr::new(name))?;
+    scan_hashed(file, len)
 }
 
 /// How the place in conflict at `path` stands, the folder holding `now` there.
@@ -179,15 +185,28 @@ fn conflict_at(
         path: path.to_owned(),
         source,
     };
-    let now = now.map(|e| (e.kind, e.id));
-    let seen =
-        conflict::seen(record, now, |len| markers_at(disk, root, path, len)).map_err(unreadable)?;
+    let mut now = now.map(|e| (e.kind, e.id));
     let marker = record.marker();
+    let mut scanned = None;
+    let mut seen = conflict::seen(record, now, |len| {
+        let (left, id) = markers_at(disk, root, path, len)?;
+        scanned = Some((left, id));
+        Ok(left)
+    })
+    .map_err(unreadable)?;
+    if seen == Seen::Untouched && marker >= MIN_MARKER {
+        scanned = Some(markers_at(disk, root, path, marker).map_err(unreadable)?);
+    }
+    // A file that changed between the walk and the scan is shown as the bytes scanned.
+    if let Some((left, scanned_id)) = scanned
+        && now.is_some_and(|(_, walked)| walked != scanned_id)
+    {
+        now = now.map(|(kind, _)| (kind, scanned_id));
+        seen = conflict::seen(record, now, |_| Ok(left)).map_err(unreadable)?;
+    }
     let standing = match seen {
         Seen::Untouched if marker >= MIN_MARKER => Standing::Marked {
-            left: markers_at(disk, root, path, marker)
-                .map_err(unreadable)?
-                .opening,
+            left: scanned.map_or(0, |(left, _)| left.opening),
         },
         Seen::Untouched => match (record.own, stands_as(record)) {
             (Some(_), _) => Standing::ChangedInPlace,

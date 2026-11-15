@@ -855,8 +855,13 @@ mod tests {
     fn a_start_under_another_dated_alike_is_dropped() {
         // C <- X <- D, and O and T each with parents [D, C], all at once. D is the one starting
         // point; when C is taken before D, D's mark never reaches C and only the drop removes it.
-        let mut extra = HashSet::new();
-        for k in 0..16 {
+        // Which tie order a history gives depends on its saves' IDs, which are new each run, so
+        // histories are made until both have turned up (about two in three take C first): 16
+        // alone left only one order about once in 650 runs.
+        let mut orders: HashMap<usize, usize> = HashMap::new();
+        let mut k = 0;
+        while k < 16 || orders.len() < 2 {
+            assert!(k < 400, "both tie orders: only {orders:?} in {k} histories");
             let (_dir, mut repo) = project();
             let mut saves = filler(k);
             let c = saves.len();
@@ -871,9 +876,11 @@ mod tests {
             let ids = plant(&mut repo, &saves);
             let got = common_starts(&repo, &[ids[o]], &[ids[t]]).unwrap();
             assert_eq!(got, found(vec![ids[d]]), "history {k}");
-            extra.insert(CANDIDATES.get());
+            let candidates = CANDIDATES.get();
+            assert!(matches!(candidates, 1 | 2), "history {k}: {candidates}");
+            *orders.entry(candidates).or_default() += 1;
+            k += 1;
         }
-        assert_eq!(extra, HashSet::from([1, 2]), "both tie orders");
     }
 
     #[test]

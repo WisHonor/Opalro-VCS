@@ -424,11 +424,10 @@ fn choose<'c>(
     ask: &mut dyn FnMut(&Ask) -> bool,
 ) -> Result<Vec<&'c ConflictAt>, ResolveError> {
     let places: Vec<&ConflictAt> = match req.paths {
-        None if req.keep.is_none() => conflicts
+        None => conflicts
             .iter()
             .filter(|c| c.seen == Some(Seen::Fixed))
             .collect(),
-        None => conflicts.iter().collect(),
         Some(paths) => {
             let folded: Vec<String> = conflicts
                 .iter()

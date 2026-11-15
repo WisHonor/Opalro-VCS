@@ -1708,12 +1708,7 @@ impl Storing<'_> {
         self.disk.enter(up)?;
         fsio::open_point(path)?;
         let file = self.disk.here().open_file(OsStr::new(name))?;
-        let mut hashed = Hashed {
-            read: file,
-            hasher: ContentHasher::new(),
-        };
-        let left = markers::scan(&mut hashed, len)?;
-        Ok((left, hashed.hasher.finish()))
+        scan_hashed(file, len)
     }
 
     /// Stores what the workers made of `rel`, the next file or link in the order. A big file
@@ -2283,6 +2278,17 @@ pub(crate) fn store_record(
         packs.add_record(ObjectKind::Conflict, &encoded)?;
     }
     Ok(id)
+}
+
+/// The marker lines of length `len` in what `read` gives, and its content ID, from one read: the
+/// markers counted are always those of the bytes whose ID is kept.
+pub(crate) fn scan_hashed(read: impl Read, len: u8) -> io::Result<(markers::Left, Id)> {
+    let mut hashed = Hashed {
+        read,
+        hasher: ContentHasher::new(),
+    };
+    let left = markers::scan(&mut hashed, len)?;
+    Ok((left, hashed.hasher.finish()))
 }
 
 /// What `read` gives, hashed as it goes.
