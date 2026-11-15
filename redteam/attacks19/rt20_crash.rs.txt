@@ -1,0 +1,131 @@
+//! RT20 exploration: a combine stopped at each write.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+mod support;
+use support::{Env, files, text};
+
+fn run(env: &Env, args: &[&str]) -> (i32, String) {
+    let out = env.opalro().args(args).output().unwrap();
+    (
+        out.status.code().unwrap_or(-1),
+        format!("{}{}", text(&out.stdout), text(&out.stderr)),
+    )
+}
+
+fn ok(env: &Env, args: &[&str]) {
+    let (c, s) = run(env, args);
+    assert_eq!(c, 0, "{args:?}: {s}");
+}
+
+/// kind 0: a combined save; 1: forward; with unsaved work in c.txt and an ignored file.
+fn template(kind: u8) -> Env {
+    let env = Env::empty();
+    ok(&env, &["start", "--preset", "custom"]);
+    support::write(&env, ".opalroignore", "*.log\n");
+    support::write(&env, "a.txt", "1\n2\n3\n4\n5\n6\n7\n8\n");
+    support::write(&env, "c.txt", "c\n");
+    support::write(&env, "gone.txt", "g\n");
+    ok(&env, &["save", "A"]);
+    ok(&env, &["line", "new", "side"]);
+    support::write(&env, "a.txt", "one\n2\n3\n4\n5\n6\n7\n8\n");
+    support::write(&env, "b/b.txt", "b\n");
+    std::fs::remove_file(env.root().join("gone.txt")).unwrap();
+    ok(&env, &["save", "S"]);
+    ok(&env, &["goto", "main"]);
+    if kind == 0 {
+        support::write(&env, "a.txt", "1\n2\n3\n4\n5\n6\n7\neight\n");
+        ok(&env, &["save", "M"]);
+    }
+    support::write(&env, "c.txt", "unsaved\n");
+    support::write(&env, "x.log", "ignored\n");
+    if kind == 2 {
+        support::write(&env, "a.txt", "mine\n2\n3\n4\n5\n6\n7\n8\n");
+    }
+    if kind == 3 {
+        support::write(&env, "b/keep.log", "x\n");
+        support::write(&env, "gone.txt", "mine\n");
+    }
+    if kind == 4 {
+        support::write(&env, "b/b.txt", "untracked\n");
+    }
+    env
+}
+
+fn tmp_left(env: &Env) -> Vec<String> {
+    std::fs::read_dir(env.root().join(".opalro/tmp"))
+        .map(|d| {
+            d.map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn rt20_combine_stopped_at_each_write() {
+    let mut problems = Vec::new();
+    for kind in [2u8, 3, 4] {
+        let template = template(kind);
+        let before = files(template.root());
+        // The finished combine, for comparison.
+        let done = Env::empty();
+        support::copy_dir(template.root(), done.root());
+        let (want_code, said) = run(&done, &["combine", "side"]);
+        eprintln!("kind {kind}: said {said}");
+        eprintln!("kind {kind}: a whole combine exits {want_code}");
+        let after = files(done.root());
+        eprintln!("kind {kind}: after {:?}", after.iter().map(|(p, b)| (p.clone(), String::from_utf8_lossy(b).into_owned())).collect::<Vec<_>>());
+
+        for n in 1.. {
+            assert!(n < 200, "never finished");
+            let env = Env::empty();
+            support::copy_dir(template.root(), env.root());
+            let out = env
+                .opalro()
+                .args(["combine", "side"])
+                .env("OPALRO_FAULT_AT", n.to_string())
+                .output()
+                .unwrap();
+            let crashed = text(&out.stderr).contains("injected crash");
+            let stopped = files(env.root());
+            if stopped.get("c.txt").map(Vec::as_slice) != Some(b"unsaved\n") {
+                problems.push(format!("k{kind} n{n}: c.txt after the stop: {stopped:?}"));
+            }
+            // The next command finishes, or the combine was never done.
+            let (code, said) = run(&env, &["combine", "side"]);
+            if code != want_code {
+                problems.push(format!("k{kind} n{n}: rerun {code}: {said}"));
+            }
+            let now = files(env.root());
+            if now != after {
+                problems.push(format!(
+                    "k{kind} n{n}: after rerun {now:?}\n want {after:?}\n said {said}"
+                ));
+            }
+            let (code, said) = if want_code == 0 {
+                run(&env, &["undo"])
+            } else {
+                (0, String::new())
+            };
+            let back = files(env.root());
+            if code != 0 || back != before {
+                problems.push(format!(
+                    "k{kind} n{n}: undo {code} {said}\n got {back:?}\n want {before:?}"
+                ));
+            }
+            let (code, said) = run(&env, &["verify"]);
+            if code != 0 {
+                problems.push(format!("k{kind} n{n}: verify {code}: {said}"));
+            }
+            let left = tmp_left(&env);
+            if !left.is_empty() {
+                problems.push(format!("k{kind} n{n}: tmp left {left:?}"));
+            }
+            if !crashed {
+                eprintln!("kind {kind}: finished at n={n}");
+                break;
+            }
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
