@@ -169,9 +169,9 @@ impl<'r, W: Watch> Walk<'r, W> {
         Ok(node.marks)
     }
 
-    /// Takes the newest waiting save while `go_on` says so for its time, and returns the marks it
-    /// now gives its parents, with them.
-    fn next(&mut self, go_on: impl Fn(&W, i64) -> bool) -> Option<(u8, Vec<Id>)> {
+    /// Takes the newest waiting save while `go_on` says so for its time, and returns it, the marks
+    /// it now gives its parents, and them.
+    fn next(&mut self, go_on: impl Fn(&W, i64) -> bool) -> Option<(Id, u8, Vec<Id>)> {
         while let Some(&(time, id)) = self.heap.peek() {
             let Some(node) = self.nodes.get_mut(&id).filter(|n| n.waiting()) else {
                 self.heap.pop();
@@ -185,7 +185,7 @@ impl<'r, W: Watch> Walk<'r, W> {
             self.watch.remove(node);
             node.spread = node.marks;
             self.watch.add(node);
-            return Some((node.marks, node.parents.clone()));
+            return Some((id, node.marks, node.parents.clone()));
         }
         None
     }
@@ -202,7 +202,7 @@ pub fn only_in(repo: &Repository, tip: Id, others: &[Id]) -> Result<u64, RepoErr
             return Ok(0);
         }
     }
-    while let Some((marks, parents)) = walk.next(|tally, time| tally.must_go_on(time)) {
+    while let Some((_, marks, parents)) = walk.next(|tally, time| tally.must_go_on(time)) {
         for parent in parents {
             if walk.mark(parent, marks)? & OTHERS != 0 && parent == tip {
                 return Ok(0);
@@ -210,6 +210,35 @@ pub fn only_in(repo: &Repository, tip: Id, others: &[Id]) -> Result<u64, RepoErr
         }
     }
     Ok(walk.nodes.values().filter(|n| n.marks == TIP).count() as u64)
+}
+
+/// The first found of `others` that is `save` or has it in its history through any parent,
+/// by its index; `None` when none does. Exact whatever the saves' clocks say.
+pub fn holder(repo: &Repository, save: Id, others: &[Id]) -> Result<Option<usize>, RepoError> {
+    let mut walk = Walk::new(repo, Tally::default());
+    walk.mark(save, TIP)?;
+    // For each save the others reach, one of them it was reached from.
+    let mut from: HashMap<Id, usize> = HashMap::new();
+    for (i, &other) in others.iter().enumerate() {
+        walk.mark(other, OTHERS)?;
+        if other == save {
+            return Ok(Some(i));
+        }
+        from.entry(other).or_insert(i);
+    }
+    while let Some((id, marks, parents)) = walk.next(|tally, time| tally.must_go_on(time)) {
+        let by = from.get(&id).copied();
+        for parent in parents {
+            walk.mark(parent, marks)?;
+            if let Some(i) = by {
+                if parent == save {
+                    return Ok(Some(i));
+                }
+                from.entry(parent).or_insert(i);
+            }
+        }
+    }
+    Ok(None)
 }
 
 /// The saves both sides have in their history that no other such save has in its history;
@@ -223,7 +252,7 @@ pub fn common_starts(repo: &Repository, ours: &[Id], theirs: &[Id]) -> Result<St
     }
     // Every path down to a starting point runs through saves only one side has, which keep the
     // walk going until both marks arrive.
-    while let Some((marks, parents)) = walk.next(|unsettled, _| unsettled.0 > 0) {
+    while let Some((_, marks, parents)) = walk.next(|unsettled, _| unsettled.0 > 0) {
         let marks = if marks & BOTH == BOTH {
             marks | BELOW
         } else {
@@ -549,6 +578,147 @@ mod tests {
         let (a2, b1) = (ids[2], ids[3]);
         assert_eq!(only_in(&repo, a2, &[b1]).unwrap(), 2);
         assert_eq!(only_in(&repo, b1, &[a2]).unwrap(), 1);
+    }
+
+    #[test]
+    fn a_save_is_held_by_one_that_names_it() {
+        let (_dir, mut repo) = project();
+        let mut saves = Vec::new();
+        chain_after(&mut saves, None, 2, 0);
+        let [a, b] = plant(&mut repo, &saves)[..] else {
+            panic!()
+        };
+        assert_eq!(holder(&repo, b, &[a, b]).unwrap(), Some(1));
+    }
+
+    #[test]
+    fn a_save_is_held_along_first_parents() {
+        let (_dir, mut repo) = project();
+        let mut saves = Vec::new();
+        chain_after(&mut saves, None, 3, 0);
+        let [a, _b, c] = plant(&mut repo, &saves)[..] else {
+            panic!()
+        };
+        assert_eq!(holder(&repo, a, &[c]).unwrap(), Some(0));
+    }
+
+    #[test]
+    fn a_save_is_held_through_a_second_parent() {
+        let (_dir, mut repo) = project();
+        let [_x, y, m] = plant(
+            &mut repo,
+            &[(vec![], 1000), (vec![], 2000), (vec![0, 1], 3000)],
+        )[..] else {
+            panic!()
+        };
+        assert_eq!(holder(&repo, y, &[m]).unwrap(), Some(0));
+    }
+
+    #[test]
+    fn a_save_is_held_through_a_second_parent_of_a_second_parent() {
+        let (_dir, mut repo) = project();
+        // S is P's second parent, and P is M's.
+        let [_r, s, _p, _q, m] = plant(
+            &mut repo,
+            &[
+                (vec![], 1000),
+                (vec![], 1500),
+                (vec![0, 1], 2000),
+                (vec![], 2500),
+                (vec![3, 2], 3000),
+            ],
+        )[..] else {
+            panic!()
+        };
+        assert_eq!(holder(&repo, s, &[m]).unwrap(), Some(0));
+    }
+
+    #[test]
+    fn a_save_beside_another_is_not_held() {
+        let (_dir, mut repo) = project();
+        let [_base, a1, b1] = plant(
+            &mut repo,
+            &[(vec![], 1000), (vec![0], 2000), (vec![0], 2500)],
+        )[..] else {
+            panic!()
+        };
+        assert_eq!(holder(&repo, a1, &[b1]).unwrap(), None);
+        assert_eq!(holder(&repo, b1, &[a1]).unwrap(), None);
+    }
+
+    #[test]
+    fn an_older_save_does_not_hold_a_newer_one() {
+        let (_dir, mut repo) = project();
+        let mut saves = Vec::new();
+        chain_after(&mut saves, None, 3, 0);
+        let [a, b, c] = plant(&mut repo, &saves)[..] else {
+            panic!()
+        };
+        assert_eq!(holder(&repo, c, &[a, b]).unwrap(), None);
+    }
+
+    #[test]
+    fn a_holder_is_found_whatever_the_clocks_say() {
+        let (_dir, mut repo) = project();
+        // S, then T and H each dated before their parents, H also holding X; N beside them all.
+        let [s, _t, _x, h, n] = plant(
+            &mut repo,
+            &[
+                (vec![], 5000),
+                (vec![0], 3000),
+                (vec![], 8000),
+                (vec![2, 1], 1000),
+                (vec![], 9000),
+            ],
+        )[..] else {
+            panic!()
+        };
+        assert_eq!(holder(&repo, s, &[n, h]).unwrap(), Some(1));
+    }
+
+    #[test]
+    fn each_holder_is_found_once_it_is_the_only_one_left() {
+        let (_dir, mut repo) = project();
+        // S, held by A along first parents and by B through a second parent.
+        let [s, a, _y, b] = plant(
+            &mut repo,
+            &[
+                (vec![], 1000),
+                (vec![0], 2000),
+                (vec![], 1500),
+                (vec![2, 0], 3000),
+            ],
+        )[..] else {
+            panic!()
+        };
+        let both = [a, b];
+        let first = holder(&repo, s, &both).unwrap().unwrap();
+        assert!(first < 2);
+        // Without the one found, the other; without both, none.
+        let other = both[1 - first];
+        assert_eq!(holder(&repo, s, &[other]).unwrap(), Some(0));
+        assert_eq!(holder(&repo, s, &[]).unwrap(), None);
+    }
+
+    #[test]
+    fn no_others_hold_nothing() {
+        let (_dir, mut repo) = project();
+        let [a] = plant(&mut repo, &[(vec![], 1000)])[..] else {
+            panic!()
+        };
+        assert_eq!(holder(&repo, a, &[]).unwrap(), None);
+    }
+
+    #[test]
+    fn a_save_that_cant_be_read_stops_the_question() {
+        let (_dir, mut repo) = project();
+        let [a, b] = plant(&mut repo, &[(vec![], 1000), (vec![], 2000)])[..] else {
+            panic!()
+        };
+        let missing = crate::id::hash_content(b"no such save");
+        let want = format!("{:?}", only_in(&repo, a, &[b, missing]).unwrap_err());
+        let got = format!("{:?}", holder(&repo, a, &[b, missing]).unwrap_err());
+        assert_eq!(got, want);
     }
 
     #[test]
@@ -1156,6 +1326,98 @@ mod tests {
             crowded_but_few.get()
         );
         assert!(crowded_but_few.get() > 0, "no history had many candidates");
+    }
+
+    #[test]
+    fn holder_agrees_with_a_search_through_every_parent() {
+        use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
+        let strategy = (
+            prop::collection::vec(
+                (
+                    prop::collection::vec(any::<prop::sample::Index>(), 0..=3),
+                    0..1000i64,
+                ),
+                1..=40,
+            ),
+            any::<prop::sample::Index>(),
+            prop::collection::vec(any::<prop::sample::Index>(), 0..=3),
+            prop_oneof![
+                Just(Clock::Forwards),
+                Just(Clock::Random),
+                Just(Clock::Backwards),
+                Just(Clock::Ties),
+                Just(Clock::Ends),
+            ],
+            // Random times of a chain of new saves after the save, its last one among the others.
+            prop::option::of(prop::collection::vec(0..1000i64, 1..=3)),
+            // The save itself among the others.
+            prop::bool::weighted(0.1),
+        );
+        // Held by naming, along first parents, only through another parent, not held.
+        let kinds = std::cell::Cell::new([0usize; 4]);
+        let config = Config {
+            cases: 256,
+            failure_persistence: None,
+            ..Config::default()
+        };
+        let rng = TestRng::deterministic_rng(RngAlgorithm::ChaCha);
+        let mut runner = TestRunner::new_with_rng(config, rng);
+        let result = runner.run(&strategy, |(shape, save, others, clock, under, named)| {
+            let (mut parents, mut saves) = drawn(&shape, clock);
+            let save = save.index(saves.len());
+            let mut others: Vec<usize> = others.iter().map(|o| o.index(saves.len())).collect();
+            if let Some(times) = under {
+                let mut parent = save;
+                for t in times {
+                    parents.push(vec![parent]);
+                    let time = dated(clock, &saves, &[parent], t);
+                    saves.push((vec![parent], time));
+                    parent = saves.len() - 1;
+                }
+                others.push(parent);
+            }
+            if named {
+                others.push(save);
+            }
+
+            let first_parents = |mut n: usize| loop {
+                if n == save {
+                    return true;
+                }
+                match parents[n].first() {
+                    Some(&p) => n = p,
+                    None => return false,
+                }
+            };
+            let holds = |o: usize| ancestors(&parents, &[o]).contains(&save);
+            let kind = if others.contains(&save) {
+                0
+            } else if others.iter().any(|&o| first_parents(o)) {
+                1
+            } else if others.iter().any(|&o| holds(o)) {
+                2
+            } else {
+                3
+            };
+            let mut counts = kinds.get();
+            counts[kind] += 1;
+            kinds.set(counts);
+
+            let (_dir, mut repo) = project();
+            let ids = plant(&mut repo, &saves);
+            let other_ids: Vec<Id> = others.iter().map(|&o| ids[o]).collect();
+            match holder(&repo, ids[save], &other_ids).unwrap() {
+                Some(i) => prop_assert!(holds(others[i]), "{i} does not hold the save"),
+                None => prop_assert_eq!(kind, 3),
+            }
+            Ok(())
+        });
+        if let Err(e) = result {
+            panic!("{e}");
+        }
+        let counts = kinds.get();
+        println!("named, first parents, another parent, not held: {counts:?}");
+        assert!(counts.iter().all(|&n| n >= 3), "{counts:?}");
     }
 
     proptest! {
