@@ -7,7 +7,8 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
 use super::{
-    Clash, CombineError, Conflict, Held, Names, NotMerged, Side, Stands, Text, Which, merge_text,
+    Clash, CombineError, Conflict, Held, Names, NotMerged, Side, Stands, Text, Which, clash_whole,
+    merge_text,
 };
 use crate::changes::{self, stored};
 use crate::conflict::markers::{Parted, Sides};
@@ -115,7 +116,8 @@ pub(super) const WHICH: Three<Which> = [Which::Start, Which::Ours, Which::Theirs
 
 /// Merges `ours` and `theirs` against `start`, all root listings. `inner`: this merge makes a
 /// made-up starting point, whose merged texts a later merge reads. `moved` gives a followed
-/// file's name at the start, by where it is now.
+/// file's name at the start, by where it is now, and whether it came onto a start file the other
+/// line changed there, so that the two clash whole.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn merge_trees(
     store: &Store,
@@ -126,7 +128,7 @@ pub(crate) fn merge_trees(
     ours: Id,
     theirs: Id,
     rules: &RuleMatcher,
-    moved: &BTreeMap<String, String>,
+    moved: &BTreeMap<String, (String, bool)>,
     deadline: Duration,
 ) -> Result<Merged, CombineError> {
     let mut merged = Merged {
@@ -292,7 +294,7 @@ struct Walk<'a> {
     made: &'a mut Made,
     inner: bool,
     rules: &'a RuleMatcher,
-    moved: &'a BTreeMap<String, String>,
+    moved: &'a BTreeMap<String, (String, bool)>,
     deadline: Duration,
     /// Each version is held to a save's limits on its own.
     limits: Three<SaveLimits>,
@@ -533,7 +535,7 @@ impl Walk<'_> {
     ) -> Result<Contents, CombineError> {
         let rule = self
             .rules
-            .line_merge(path, self.moved.get(path).map(String::as_str));
+            .line_merge(path, self.moved.get(path).map(|(was, _)| was.as_str()));
         if let LineMerge::RuleSaysNo { theirs } = rule {
             return Ok(Contents::Not(NotMerged::NoMarkers { theirs }));
         }
@@ -547,7 +549,11 @@ impl Walk<'_> {
                 Some(b) => read(b)?,
                 None => Some(Cow::Borrowed(&b""[..])),
             };
+            let whole = self.moved.get(path).is_some_and(|(_, whole)| *whole);
             match (base, read(o)?, read(t)?) {
+                (Some(s), Some(o), Some(t)) if whole => {
+                    clash_whole(&s, &o, &t, self.deadline, labels.as_ref())
+                }
                 (Some(s), Some(o), Some(t)) => {
                     merge_text(&s, &o, &t, self.deadline, labels.as_ref())
                 }

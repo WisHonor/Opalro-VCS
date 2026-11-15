@@ -1,7 +1,7 @@
 //! Files that moved between two versions of the project: the same contents gone from one path and
 //! present at exactly one new one.
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::ancestry::only_in;
 use crate::combine::Made;
@@ -251,8 +251,9 @@ pub(crate) struct Followed {
     /// Start path to side path, each move checked.
     pub went: BTreeMap<String, String>,
     /// Paths where the side's notes show another file arriving, and a file is still there at
-    /// the side's end: the start's file at such a path is removed on that side.
-    pub replaced: BTreeSet<String>,
+    /// the side's end, each with where that file started: the start's file at such a path is
+    /// removed on that side.
+    pub replaced: BTreeMap<String, String>,
     /// Too many files left on the side to match them by their contents, so only notes count.
     pub too_many_left: bool,
     /// The combine's notes were too many to check, so no note counts.
@@ -292,7 +293,7 @@ pub(crate) fn followed(
         // The place counts as replaced only while a file is still there; edits in place keep
         // it the file that arrived.
         if on_side.entry(&to)?.is_some_and(|e| is_file(&e)) {
-            out.replaced.insert(to.clone());
+            out.replaced.insert(to.clone(), from.clone());
         }
         if fits(&mut at_start, &mut on_side, &from, &to)? {
             out.went.insert(from, to);

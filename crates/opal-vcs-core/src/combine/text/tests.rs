@@ -429,7 +429,7 @@ fn a_marked_text_past_the_limit_is_not_marked() {
     let run = |limit: usize| {
         let labels = labels();
         let (b, o, t) = (b"a\nb\nc\n", b"a\nB\nc\n", b"a\nX\nc\n");
-        merge_within(b, o, t, DEADLINE, Some(&labels), limit as u64).0
+        merge_within(b, o, t, DEADLINE, Some(&labels), limit as u64, false).0
     };
     assert_eq!(run(want.len()), marks(&want, 7, 1));
     assert_eq!(run(want.len() - 1), OVERLAP);

@@ -38,10 +38,23 @@ pub fn merge_text(
     deadline: Duration,
     labels: Option<&Labels>,
 ) -> (Text, bool) {
-    merge_within(base, ours, theirs, deadline, labels, MAX_LINES_SIZE)
+    merge_within(base, ours, theirs, deadline, labels, MAX_LINES_SIZE, false)
 }
 
-/// As `merge_text`, with a marked text of at most `limit` bytes.
+/// As `merge_text` for two files that each replaced `base` whole, as a file another line moved
+/// onto it does: never merged, and marked as one place.
+pub(crate) fn clash_whole(
+    base: &[u8],
+    ours: &[u8],
+    theirs: &[u8],
+    deadline: Duration,
+    labels: Option<&Labels>,
+) -> (Text, bool) {
+    merge_within(base, ours, theirs, deadline, labels, MAX_LINES_SIZE, true)
+}
+
+/// As `merge_text`, with a marked text of at most `limit` bytes; with `whole`, each side's
+/// change is all of it.
 fn merge_within(
     base: &[u8],
     ours: &[u8],
@@ -49,6 +62,7 @@ fn merge_within(
     deadline: Duration,
     labels: Option<&Labels>,
     limit: u64,
+    whole: bool,
 ) -> (Text, bool) {
     let sides = [base, ours, theirs];
     if sides
@@ -65,11 +79,20 @@ fn merge_within(
         return (Text::Not(NotMerged::TooManyLines), false);
     }
     let (b, o, t) = (lines_of(base), lines_of(ours), lines_of(theirs));
-    let (mut changes, ours_late) = changed(&b, &o, false, deadline);
-    let (theirs_changes, theirs_late) = changed(&b, &t, true, deadline);
-    changes.extend(theirs_changes);
-    changes.sort_by_key(|c| c.base.start);
-    let late = ours_late || theirs_late;
+    let (changes, late) = if whole {
+        let all = |side: &[&[u8]], theirs| Change {
+            base: 0..b.len(),
+            side: 0..side.len(),
+            theirs,
+        };
+        (vec![all(&o, false), all(&t, true)], false)
+    } else {
+        let (mut changes, ours_late) = changed(&b, &o, false, deadline);
+        let (theirs_changes, theirs_late) = changed(&b, &t, true, deadline);
+        changes.extend(theirs_changes);
+        changes.sort_by_key(|c| c.base.start);
+        (changes, ours_late || theirs_late)
+    };
     if let Some((bytes, _)) = settle(&b, &o, &t, &changes, None, u64::MAX) {
         return (Text::Merged(bytes), late);
     }

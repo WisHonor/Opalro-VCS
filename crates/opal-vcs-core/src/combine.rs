@@ -5,6 +5,7 @@ mod tests;
 mod text;
 mod tree;
 
+use text::clash_whole;
 pub use text::{Text, merge_text};
 pub use tree::MAX_HELD_TEXT;
 pub(crate) use tree::Made;
@@ -620,7 +621,7 @@ pub(crate) fn merge_three(
             let (moved_on, to, apart) = match (went[0].went.get(from), went[1].went.get(from)) {
                 (Some(o), Some(t)) if o == t => {
                     move_in(&mut trees[0], &mut puts[0], from, o)?;
-                    moved.insert(o.clone(), from.clone());
+                    moved.insert(o.clone(), (from.clone(), false));
                     continue;
                 }
                 (Some(o), Some(t)) => (Side::Ours, o, Some(t)),
@@ -628,7 +629,8 @@ pub(crate) fn merge_three(
                 (None, Some(t)) => (Side::Theirs, t, None),
                 (None, None) => continue,
             };
-            // The file is at its places now, so whatever a line holds where it was is new there.
+            // The file is at its places now, so whatever a line holds where it was is new there,
+            // unless another followed file was put there already.
             if let Some(t) = apart {
                 for (moved_on, at, other_to) in [(Side::Ours, to, t), (Side::Theirs, t, to)] {
                     let clash = Clash::MovedApart {
@@ -643,14 +645,14 @@ pub(crate) fn merge_three(
                         (at, from, moved_on),
                         clash,
                     )?;
-                    moved.insert(at.clone(), from.clone());
+                    moved.insert(at.clone(), (from.clone(), false));
                 }
-                puts[0].insert(from.clone(), None);
+                puts[0].entry(from.clone()).or_insert(None);
                 continue;
             }
             let other = if moved_on == Side::Ours { 2 } else { 1 };
             // A file its own notes brought there is not the start's.
-            let held = if went[other - 1].replaced.contains(from) {
+            let held = if went[other - 1].replaced.contains_key(from) {
                 None
             } else {
                 trees[other].entry(from)?
@@ -668,7 +670,7 @@ pub(crate) fn merge_three(
                         (to, from, moved_on),
                         clash,
                     )?;
-                    puts[0].insert(from.clone(), None);
+                    puts[0].entry(from.clone()).or_insert(None);
                 }
                 // Made into something else: the tree merge tells of that.
                 Some(e) if !is_file(&e) => continue,
@@ -686,11 +688,15 @@ pub(crate) fn merge_three(
                     move_in(&mut trees[other], &mut puts[other], from, to)?;
                 }
             }
-            moved.insert(to.clone(), from.clone());
+            moved.insert(to.clone(), (from.clone(), false));
         }
         // Where a side's notes show another file arriving at a start file's place, the start's
         // file is gone on that side for the whole merge, never changed into the one that came.
-        let arrived: BTreeSet<&String> = went[0].replaced.iter().chain(&went[1].replaced).collect();
+        let arrived: BTreeSet<&String> = went[0]
+            .replaced
+            .keys()
+            .chain(went[1].replaced.keys())
+            .collect();
         for at in arrived {
             let was = trees[0].entry(at)?;
             let Some(was) = was.filter(is_file) else {
@@ -704,27 +710,28 @@ pub(crate) fn merge_three(
             if version(trees[1].entry(at)?) == version(trees[2].entry(at)?) {
                 continue;
             }
-            let on = went.each_ref().map(|w| w.replaced.contains(at));
-            let clash = match on {
-                [true, true] => None,
-                [gone_on_ours, _] => {
-                    let (removed_on, other) = if gone_on_ours {
-                        (Side::Ours, 2)
-                    } else {
-                        (Side::Theirs, 1)
-                    };
-                    match trees[other].entry(at)? {
-                        None => None,
-                        Some(e) if (e.kind, e.id) == (was.kind, was.id) => continue,
-                        Some(_) => Some(Clash::ChangedRemoved { removed_on }),
-                    }
+            let (moved_on, other, came) = match went.each_ref().map(|w| w.replaced.get(at)) {
+                [Some(came), None] => (Side::Ours, 2, came),
+                [None, Some(came)] => (Side::Theirs, 1, came),
+                // Both lines' notes brought a file there: two new things.
+                _ => {
+                    puts[0].insert(at.clone(), None);
+                    continue;
                 }
             };
-            // The start holds nothing there, so what the sides hold there is new; a clash the
-            // tree merge keeps there is named as this one.
-            puts[0].insert(at.clone(), None);
-            if let Some(clash) = clash {
-                renames.insert(at.clone(), clash);
+            match trees[other].entry(at)? {
+                // The start holds nothing there, so what the sides hold there is new.
+                None => {
+                    puts[0].insert(at.clone(), None);
+                }
+                Some(e) if (e.kind, e.id) == (was.kind, was.id) => continue,
+                // Changed in place on the other line: the file that came is set against that
+                // change whole, from the start's file, and named as a move onto it.
+                Some(_) => {
+                    moved.insert(at.clone(), (came.clone(), true));
+                    let from = came.clone();
+                    renames.insert(at.clone(), Clash::MovedOnto { moved_on, from });
+                }
             }
         }
     }
@@ -733,16 +740,9 @@ pub(crate) fn merge_three(
         if changes.is_empty() {
             continue;
         }
-        let mut built = Vec::new();
-        // A folder emptied only by these changes (moved files put in place, a conflict's path
+        // A folder emptied only by these changes (moved files put in place, a start's file
         // cleared) is no version's own.
-        let stored = Listings::stored(store, &made.listings);
-        *root = overlay_with(&stored, *root, changes, true, &mut |listing| {
-            let id = store_listing(store, packs, listing)?;
-            built.push((id, listing.clone()));
-            Ok(id)
-        })?;
-        made.listings.extend(built);
+        *root = overlay_made(store, packs, made, *root, changes, true)?;
     }
     let [s, o, t] = roots;
     let time = made.deadline;
@@ -755,7 +755,12 @@ pub(crate) fn merge_three(
         .collect();
     merged.notes_unbelieved = went.iter().any(|w| w.notes_unbelieved);
     for c in &mut merged.conflicts {
-        if let (Clash::BothAdded, Some(clash)) = (&c.clash, renames.get(&c.path)) {
+        let two_things = match &c.clash {
+            Clash::BothAdded => true,
+            Clash::BothChanged(why) => !matches!(why, NotMerged::RulesNotWhole { .. }),
+            _ => false,
+        };
+        if let (true, Some(clash)) = (two_things, renames.get(&c.path)) {
             c.clash = clash.clone();
         }
     }
@@ -831,6 +836,8 @@ fn put_places(
             let plain = result
                 .entry(&p.path)?
                 .is_some_and(|e| e.kind != EntryKind::Conflict);
+            // A second place at one path holds the same lines' entries as the first (a plain
+            // result means they hold it alike), so only its start term is not kept.
             if plain && taken.insert(p.path.clone()) {
                 open.push(p);
             }
@@ -853,16 +860,29 @@ fn put_places(
     all.truncate(tree::MAX_NAMED);
     merged.conflicts = all;
     if !puts.is_empty() {
-        let mut built = Vec::new();
-        let stored = Listings::stored(store, &made.listings);
-        merged.root = overlay_with(&stored, merged.root, &puts, false, &mut |listing| {
-            let id = store_listing(store, packs, listing)?;
-            built.push((id, listing.clone()));
-            Ok(id)
-        })?;
-        made.listings.extend(built);
+        merged.root = overlay_made(store, packs, made, merged.root, &puts, false)?;
     }
     Ok(())
+}
+
+/// [`overlay_with`] on `root`, reading and keeping the listings it builds in `made` too.
+fn overlay_made(
+    store: &Store,
+    packs: &mut PackSet,
+    made: &mut Made,
+    root: Id,
+    changes: &BTreeMap<String, Option<Put>>,
+    drop_emptied: bool,
+) -> Result<Id, CombineError> {
+    let mut built = Vec::new();
+    let stored = Listings::stored(store, &made.listings);
+    let root = overlay_with(&stored, root, changes, drop_emptied, &mut |listing| {
+        let id = store_listing(store, packs, listing)?;
+        built.push((id, listing.clone()));
+        Ok(id)
+    })?;
+    made.listings.extend(built);
+    Ok(root)
 }
 
 /// The first of the three versions past a save's limits, as the tree merge would name it: what
