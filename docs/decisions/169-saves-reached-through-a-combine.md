@@ -5,7 +5,7 @@
 - **Agenda topic:** none (milestone 8 planning)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 055](055-lines-in-v0.1.md) (what `goto` takes); [decision 105](105-the-change-id-cache-keeps-each-lines-saves-in-order.md) (a save is found by its ID along the line's first parents); [decision 165](165-combine-the-command.md) (`history` lists a combined save as one save)
-- **Refined by:** [decision 170](170-what-building-milestone-8-refined.md) (damage met while looking for a save is the error; only the line the project is on keeps short IDs in `history`)
+- **Refined by:** [decision 170](170-what-building-milestone-8-refined.md) (damage met while looking for a save is the error; only the line the project is on keeps short IDs in `history`); [decision 185](185-save-amend-and-a-save-something-else-holds.md) (the amend check follows every parent)
 
 ## Context
 
