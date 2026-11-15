@@ -51,11 +51,19 @@ pub fn combined(
         } => {
             let mut details = vec![];
             let made = conflicts.len() as u64 + more;
-            if *conflict_count > made {
-                let held = conflict_count - made;
-                let noun = if held == 1 { "place" } else { "places" };
+            let held = conflict_count.saturating_sub(made);
+            let (noun, them) = if held == 1 {
+                ("place", "it")
+            } else {
+                ("places", "them")
+            };
+            if held > 0 && made == 0 {
                 details.push(format!(
-                    "The two lines held {} more {noun} in conflict already; the save keeps them.",
+                    "The two lines held {them} in conflict already; the save keeps {them}."
+                ));
+            } else if held > 0 {
+                details.push(format!(
+                    "The two lines held {} more {noun} in conflict already; the save keeps {them}.",
                     thousands(held)
                 ));
             }
@@ -69,6 +77,9 @@ pub fn combined(
             let mut text = format!("{combined} {painted_target} into {painted_line}: save {at}");
             if *conflict_count == 0 {
                 text += ".\n";
+            } else if made == 0 {
+                let places = counted(*conflict_count, "place", "places");
+                text += &format!(", with {places} in conflict.\n");
             } else {
                 let places = counted(*conflict_count, "place", "places");
                 text += &format!(", with {places} in conflict:\n");
@@ -83,6 +94,12 @@ pub fn combined(
         }
     };
     details.extend(written(&done.applied, done.carried));
+    if done.result == Combined::Forward && done.holds_conflicts {
+        let status = style::whole(&s.paint(Role::Command, "opalro status"));
+        details.push(format!(
+            "The save your line moved to holds places in conflict: {status} lists them."
+        ));
+    }
     with_details(text, &details)
 }
 

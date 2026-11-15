@@ -4205,6 +4205,8 @@ fn many_conflicts_are_counted_after_the_first_100() {
         more: 1_234,
         rules_not_whole: None,
         why: NotKept::OnlyIfClean,
+        held: 0,
+        forward: false,
     };
     assert_eq!(
         err.to_string(),
@@ -4212,6 +4214,112 @@ fn many_conflicts_are_counted_after_the_first_100() {
          changed (--only-if-clean):\n  a: added on both lines, differently\n  b: added on both \
          lines, differently\n  … and 1,234 more"
     );
+}
+
+#[test]
+fn only_if_clean_counts_the_places_the_lines_hold_already() {
+    let names = Names {
+        line: "main".into(),
+        target: "side".into(),
+    };
+    let err = |conflicts: Vec<Conflict>, held, forward| CombineError::Conflicts {
+        names: names.clone(),
+        conflicts,
+        more: 0,
+        rules_not_whole: None,
+        why: NotKept::OnlyIfClean,
+        held,
+        forward,
+    };
+    let made = Conflict {
+        path: "b.txt".into(),
+        clash: Clash::BothAdded,
+        stands: None,
+    };
+    assert_eq!(
+        err(vec![made], 1_000, false).to_string(),
+        "Combining side into main would leave 1,001 places in conflict, so nothing was changed \
+         (--only-if-clean):\n  b.txt: added on both lines, differently\nThe two lines hold \
+         1,000 more in conflict already."
+    );
+    assert_eq!(
+        err(vec![], 1, false).to_string(),
+        "Combining side into main would leave 1 place in conflict, so nothing was changed \
+         (--only-if-clean).\nThe two lines hold it in conflict already."
+    );
+    assert_eq!(
+        err(vec![], 2, true).to_string(),
+        "Combining side into main would leave 2 places in conflict, so nothing was changed \
+         (--only-if-clean).\nside holds them in conflict already."
+    );
+    let hint = "Run it again without --only-if-clean to keep the conflicts and fix them one at a \
+                time.";
+    assert_eq!(err(vec![], 2, true).hint().unwrap(), hint);
+}
+
+/// `main` at a save, `side` one save ahead holding a planted conflict at `x.txt`; the project
+/// is on `main`.
+fn ahead_onto_a_conflict(h: &mut Hist) {
+    let c = plant_record(h, [b"mine\n", b"was\n", b"theirs\n"]);
+    let first = h.first;
+    let base = tree(&[("a.txt", f("a\n"))]);
+    let b = h.plant(&[first], &base, Some(&[]));
+    let t = h.plant(&[b], &with(&base, &[("x.txt", V::Conflict(c))]), Some(&[]));
+    h.set(|s| {
+        s.lines.insert("side".into(), t);
+        s.lines.insert("main".into(), b);
+    });
+    h.on("main", &base);
+}
+
+#[test]
+fn only_if_clean_stops_a_forward_onto_a_save_that_holds_a_conflict() {
+    let mut h = Hist::new();
+    h.keep = Keep::OnlyIfClean;
+    ahead_onto_a_conflict(&mut h);
+    let before = h.untouched();
+    let err = combine_in(&mut h, "side").unwrap_err();
+    assert!(
+        matches!(
+            err,
+            CombineError::Conflicts {
+                held: 1,
+                forward: true,
+                why: NotKept::OnlyIfClean,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert_untouched(&h, &before);
+    // Kept, the line moves, and the switch says it met a conflict.
+    h.keep = Keep::Conflicts;
+    let done = combine_in(&mut h, "side").unwrap();
+    assert_eq!(done.result, Combined::Forward);
+    assert!(done.holds_conflicts);
+}
+
+#[test]
+fn without_the_feature_a_forward_is_not_looked_through() {
+    let mut reads = vec![];
+    for keep in [Keep::Conflicts, Keep::OnlyIfClean] {
+        let dir = tempfile::tempdir().unwrap();
+        Repository::init(dir.path(), &ada()).unwrap();
+        let repo = crate::test_support::without_conflicts_feature(dir.path());
+        let first = repo.current().unwrap().1.state.lines["main"];
+        let mut h = Hist {
+            dir,
+            repo,
+            first,
+            keep,
+        };
+        ahead_onto_a_conflict(&mut h);
+        let before = h.repo.store().listings_read();
+        let done = combine_in(&mut h, "side").unwrap();
+        assert_eq!(done.result, Combined::Forward);
+        reads.push(h.repo.store().listings_read() - before);
+    }
+    assert_eq!(reads[0], reads[1]);
 }
 
 #[test]
@@ -5015,9 +5123,9 @@ fn while_the_rules_are_not_read_whole_no_file_is_merged_line_by_line() {
         assert_eq!(conflicts, &[want], "{text}");
         assert_eq!(
             err.to_string(),
-            "Combining side into main would leave 1 place in conflict, so nothing was \
-         changed (--only-if-clean):\n  a.txt: changed on both lines, and opalro.toml can't \
-             be read whole, so no file is merged line by line"
+            "Combining side into main would leave 1 place in conflict, so nothing was changed \
+             (--only-if-clean):\n  a.txt: changed on both lines, and opalro.toml can't be read \
+             whole, so no file is merged line by line"
         );
         assert_eq!(err.hint().unwrap(), RULES_HINT);
         assert_untouched(&h, &before);
@@ -5238,8 +5346,8 @@ fn a_rule_only_the_line_combined_in_has_stops_the_combine_and_names_that_line() 
     assert_eq!(not_whole, None);
     assert_eq!(
         err.to_string(),
-        "Combining art into main would leave 1 place in conflict, so nothing was \
-         changed (--only-if-clean):\n  Main.unity: changed on both lines, and opalro.toml on art says \
+        "Combining art into main would leave 1 place in conflict, so nothing was changed \
+         (--only-if-clean):\n  Main.unity: changed on both lines, and opalro.toml on art says \
          conflict-markers = false for it"
     );
     assert_eq!(err.hint().unwrap(), CONFLICTS_HINT);
@@ -5314,9 +5422,9 @@ fn while_the_other_sides_rules_are_not_read_whole_no_file_is_merged_and_that_sid
         assert_eq!(not_whole, Some(Side::Theirs), "{case}");
         assert_eq!(
             err.to_string(),
-            "Combining side into main would leave 1 place in conflict, so nothing was \
-         changed (--only-if-clean):\n  a.txt: changed on both lines, and opalro.toml on \
-             side can't be read whole, so no file is merged line by line",
+            "Combining side into main would leave 1 place in conflict, so nothing was changed \
+             (--only-if-clean):\n  a.txt: changed on both lines, and opalro.toml on side can't \
+             be read whole, so no file is merged line by line",
             "{case}"
         );
         assert_eq!(err.hint().unwrap(), THEIRS_HINT, "{case}");
@@ -5388,8 +5496,8 @@ fn when_both_rules_files_are_broken_the_folders_is_named() {
     assert_eq!(not_whole, Some(Side::Ours));
     assert_eq!(
         err.to_string(),
-        "Combining side into main would leave 1 place in conflict, so nothing was \
-         changed (--only-if-clean):\n  a.txt: changed on both lines, and opalro.toml can't be read \
+        "Combining side into main would leave 1 place in conflict, so nothing was changed \
+         (--only-if-clean):\n  a.txt: changed on both lines, and opalro.toml can't be read \
          whole, so no file is merged line by line"
     );
     assert_eq!(err.hint().unwrap(), RULES_HINT);
@@ -6879,8 +6987,8 @@ fn without_the_feature_a_conflict_still_stops_the_combine_and_stores_no_record()
     assert!(no_feature, "{err:?}");
     assert_eq!(
         err.to_string(),
-        "Combining side into main would leave 1 place in conflict, which this project \
-         can't keep yet, so nothing was changed:\n  a.txt: changed on both lines, in the same place"
+        "Combining side into main would leave 1 place in conflict, which this project can't \
+         keep yet, so nothing was changed:\n  a.txt: changed on both lines, in the same place"
     );
     // No pack, so no record, was stored, and nothing is left in `tmp`.
     assert_untouched(&h, &before);
@@ -7018,9 +7126,9 @@ fn without_the_feature_a_conflict_entry_on_a_line_is_milestone_8s_clash() {
     let err = combine_in(&mut h, "side").unwrap_err();
     assert_eq!(
         err.to_string(),
-        "Combining side into main would leave 1 place in conflict, which this project \
-         can't keep yet, so nothing was changed:\n  x.txt: changed on both lines, and only files are merged \
-         line by line"
+        "Combining side into main would leave 1 place in conflict, which this project can't \
+         keep yet, so nothing was changed:\n  x.txt: changed on both lines, and only files are \
+         merged line by line"
     );
     assert_untouched(&h, &before);
 }

@@ -2307,6 +2307,10 @@ fn combine_command(
             "conflicts": conflicts,
             "more_conflicts": more,
             "conflict_count": count,
+            "holds_conflicts": match count {
+                Some(count) => count > 0,
+                None => done.holds_conflicts,
+            },
             "written": done.applied.written,
             "removed": done.applied.removed,
             "not_written": done.applied.not_written,

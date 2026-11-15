@@ -27,6 +27,7 @@ expression: "support::masked(doc)"
       "why": "binary"
     }
   ],
+  "holds_conflicts": true,
   "line": "main",
   "merged_files": [],
   "more_conflicts": 0,

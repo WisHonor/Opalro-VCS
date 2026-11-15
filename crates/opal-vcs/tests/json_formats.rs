@@ -35,6 +35,10 @@ fn fields_in_json_md() -> BTreeMap<(String, usize), BTreeSet<String>> {
             if !before.starts_with("**A ") && !before.starts_with("**An ") {
                 filling = Some((section.clone(), count));
                 count += 1;
+            } else {
+                // A piece's table is kept under its section and the piece's name.
+                let piece = before.trim_start_matches("**").split("**").next();
+                filling = Some((format!("{section}: {}", piece.unwrap_or_default()), 0));
             }
         } else if let Some(key) = &filling {
             let first = line.split('|').nth(1).unwrap_or_default();
@@ -235,7 +239,9 @@ fn every_document() -> Vec<(&'static str, usize, Value)> {
     run(&["save", "Main"], 0);
     let combined = run(&["combine", "side"], 0);
     assert_eq!(combined["conflict_count"], 1, "{combined}");
+    let conflict = combined["conflicts"][0].clone();
     docs.push(("`opalro combine --json`", 0, combined));
+    docs.push(("`opalro combine --json`: A conflict", 0, conflict));
     docs
 }
 
@@ -257,7 +263,9 @@ fn every_document_has_only_the_fields_json_md_lists() {
 
 #[test]
 fn every_document_parses_and_holds_opalro_json_and_warnings() {
-    for (section, _, doc) in every_document() {
+    // A piece of a document (`<section>: A conflict`) is no document of its own.
+    let documents = every_document().into_iter();
+    for (section, _, doc) in documents.filter(|(s, _, _)| !s.contains("`: ")) {
         assert_eq!(doc["opalro_json"], 1, "{section}: {doc}");
         assert!(doc["warnings"].is_array(), "{section}: {doc}");
     }

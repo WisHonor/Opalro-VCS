@@ -110,6 +110,9 @@ pub struct CombineOutcome {
     pub applied: Applied,
     pub safety_copies: usize,
     pub carried: usize,
+    /// Whether a folder of the save switched to that the switch read holds a place in conflict,
+    /// as `goto` says it.
+    pub holds_conflicts: bool,
 }
 
 /// How the target is named: `raw` goes into the default message as it is; `shown` is the same
@@ -323,7 +326,7 @@ pub enum CombineError {
     Tangled { names: Names },
     /// The first 100 conflicts in path order, and how many more there were; `rules_not_whole`
     /// says whose `opalro.toml`, if any, wasn't read whole and left one, named or counted, there.
-    #[error("{}", conflicts_words(names, conflicts, *more, *rules_not_whole, *why))]
+    #[error("{}", conflicts_words(names, conflicts, *more, *rules_not_whole, *why, *held, *forward))]
     Conflicts {
         names: Names,
         conflicts: Vec<Conflict>,
@@ -332,6 +335,10 @@ pub enum CombineError {
         /// Why conflicts weren't kept: asked not to, the project can't keep them, or rules that
         /// can't be read whole would decide a place (then `rules_not_whole` says whose).
         why: NotKept,
+        /// Places asked not to be kept that the lines hold in conflict already, counted only
+        /// for `OnlyIfClean`; on a `forward`, those the target's save holds.
+        held: u64,
+        forward: bool,
     },
     /// Both lines changed `path`, and `on` holds it in conflict (`at == path`) or holds the
     /// conflict `at` below it.
@@ -494,8 +501,11 @@ fn conflicts_words(
     more: u64,
     rules_not_whole: Option<Side>,
     why: NotKept,
+    held: u64,
+    forward: bool,
 ) -> String {
-    let count = conflicts.len() as u64 + more;
+    let made = conflicts.len() as u64 + more;
+    let count = made + held;
     let places = if count == 1 {
         "1 place".to_owned()
     } else {
@@ -514,6 +524,18 @@ fn conflicts_words(
                  decides, and {which} can't be read whole, so nothing was changed:"
             )
         }
+        NotKept::OnlyIfClean if made == 0 => {
+            let (who, hold) = if forward {
+                (target.as_str(), "holds")
+            } else {
+                ("The two lines", "hold")
+            };
+            let them = if count == 1 { "it" } else { "them" };
+            return format!(
+                "Combining {target} into {line} would leave {places} in conflict, so nothing was \
+                 changed (--only-if-clean).\n{who} {hold} {them} in conflict already."
+            );
+        }
         NotKept::OnlyIfClean => format!(
             "Combining {target} into {line} would leave {places} in conflict, so nothing was \
              changed (--only-if-clean):"
@@ -529,6 +551,12 @@ fn conflicts_words(
     }
     if more > 0 {
         text += &format!("\n  … and {} more", thousands(more));
+    }
+    if held > 0 {
+        text += &format!(
+            "\nThe two lines hold {} more in conflict already.",
+            thousands(held)
+        );
     }
     text
 }
@@ -1016,17 +1044,20 @@ fn combine_locked(
     };
     let from = tip_of(&entry)?;
     let (_, with) = landing(repo, &entry.state, asked.target).map_err(CombineError::Switch)?;
-    let outcome = |result, save, (applied, safety_copies, carried)| CombineOutcome {
-        line: line.clone(),
-        result,
-        save,
-        with,
-        applied,
-        safety_copies,
-        carried,
-    };
+    let outcome =
+        |result, save, (applied, safety_copies, carried, holds_conflicts)| CombineOutcome {
+            line: line.clone(),
+            result,
+            save,
+            with,
+            applied,
+            safety_copies,
+            carried,
+            holds_conflicts,
+        };
     if only_in(repo, with, &[from])? == 0 {
-        return Ok(outcome(Combined::Nothing, from, (Applied::default(), 0, 0)));
+        let nothing = (Applied::default(), 0, 0, false);
+        return Ok(outcome(Combined::Nothing, from, nothing));
     }
     let to = Landing {
         head,
@@ -1035,6 +1066,21 @@ fn combine_locked(
         from,
     };
     if only_in(repo, from, &[with])? == 0 {
+        // Asked for a clean line, the target's save is looked through for conflicts.
+        if asked.keep == Keep::OnlyIfClean && repo.keeps_conflicts() {
+            let held = held_in(repo, with, bounds.limits)?;
+            if held > 0 {
+                return Err(CombineError::Conflicts {
+                    names,
+                    conflicts: vec![],
+                    more: 0,
+                    rules_not_whole: None,
+                    why: NotKept::OnlyIfClean,
+                    held,
+                    forward: true,
+                });
+            }
+        }
         let mut done = to.switch(repo, lock, earlier, asked, with, vec![])?;
         done.0.warnings.extend(repo.read_rules().warnings());
         return Ok(outcome(Combined::Forward, with, done));
@@ -1102,7 +1148,8 @@ struct Landing<'a> {
 
 impl Landing<'_> {
     /// Points the line at `to` and switches the folder there as `goto` does, one diary step
-    /// telling `warnings` first. Gives what the switch did, its safety copies, and what came along.
+    /// telling `warnings` first. Gives what the switch did, its safety copies, what came along,
+    /// and whether it met a conflict in the save it wrote.
     fn switch(
         &self,
         repo: &mut Repository,
@@ -1111,13 +1158,14 @@ impl Landing<'_> {
         asked: &Asked,
         to: Id,
         warnings: Vec<Warning>,
-    ) -> Result<(Applied, usize, usize), CombineError> {
+    ) -> Result<(Applied, usize, usize, bool), CombineError> {
         let (mut plan, drive) =
             plan_switch(repo, self.from, to, asked.git_excludes).map_err(|e| match e {
                 SwitchError::Collisions { paths } => CombineError::Collisions { paths },
                 e => CombineError::Switch(e),
             })?;
         plan.warnings.splice(0..0, warnings);
+        let holds_conflicts = plan.holds_conflicts;
         let mut state = self.state.clone();
         state.lines.insert(self.line.to_owned(), to);
         let planned = Planned {
@@ -1129,8 +1177,10 @@ impl Landing<'_> {
             plan,
             drive,
         };
-        make_switch(repo, lock, planned, asked.who, "combine", earlier)
-            .map_err(CombineError::Switch)
+        let (applied, safety_copies, carried) =
+            make_switch(repo, lock, planned, asked.who, "combine", earlier)
+                .map_err(CombineError::Switch)?;
+        Ok((applied, safety_copies, carried, holds_conflicts))
     }
 }
 
@@ -1204,23 +1254,28 @@ fn make_save(
     let merged = merge_three(
         repo, &mut packs, &mut made, false, &start, &ours, &theirs, &rules,
     )?;
-    let stopped = |conflicts, more, why| CombineError::Conflicts {
+    let stopped = |conflicts, more, why, held| CombineError::Conflicts {
         names: Names::default(),
         conflicts,
         more,
         rules_not_whole: merged.rules_not_whole,
         why,
+        held,
+        forward: false,
     };
-    if made.keep.is_none() && !merged.conflicts.is_empty() {
-        let why = match asked.keep {
-            Keep::OnlyIfClean => NotKept::OnlyIfClean,
-            Keep::Conflicts => NotKept::NoFeature,
-        };
-        return Err(stopped(merged.conflicts, merged.more, why));
+    // A project that can't keep conflicts says so, whatever was asked.
+    let unkept = made.keep.is_none() && !merged.conflicts.is_empty();
+    if unkept && !keeps {
+        return Err(stopped(
+            merged.conflicts,
+            merged.more,
+            NotKept::NoFeature,
+            0,
+        ));
     }
     if made.keep.is_some() && merged.rules_not_whole.is_some() {
         let (stops, more) = (merged.undecided, merged.undecided_more);
-        return Err(stopped(stops, more, NotKept::RulesNotWhole));
+        return Err(stopped(stops, more, NotKept::RulesNotWhole, 0));
     }
     let store = repo.store();
     let read = |id: &Id| match made.listings.get(id) {
@@ -1242,6 +1297,19 @@ fn make_save(
     } else {
         bounds.limits.add_all(merged.root, 0, 0, read)?.map(|()| 0)
     };
+    // Asked for a clean line, nothing in conflict may come in: made here, or carried. Unkept,
+    // only carried conflicts are in the result; past the limits, the made ones still stop it.
+    if asked.keep == Keep::OnlyIfClean {
+        let held = *measured.as_ref().unwrap_or(&0);
+        if unkept || held > 0 {
+            return Err(stopped(
+                merged.conflicts,
+                merged.more,
+                NotKept::OnlyIfClean,
+                held,
+            ));
+        }
+    }
     let conflict_count = match measured {
         Ok(count) => count,
         Err(detail) => return Err(CombineError::TooBig { detail }),
@@ -1350,6 +1418,21 @@ fn tangled() -> CombineError {
     CombineError::Tangled {
         names: Names::default(),
     }
+}
+
+/// How many places in conflict `save` holds, measured as a combined save is; none when it is
+/// past the limits, which the switch to it then says.
+fn held_in(repo: &Repository, save: Id, mut limits: SaveLimits) -> Result<u64, CombineError> {
+    let store = repo.store();
+    let root = version_of(repo, save)?.root;
+    let stand = |id: &Id| {
+        store
+            .met_conflict(id)
+            .map(|r| stands_as(&r))
+            .map_err(|e| unreadable("in the save combined in", id, e))
+    };
+    let measured = limits.add_all_standing(root, 0, 0, |id| store.listing(id), stand)?;
+    Ok(measured.unwrap_or(0))
 }
 
 fn version_of(repo: &Repository, save: Id) -> Result<Version, CombineError> {

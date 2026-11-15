@@ -303,6 +303,10 @@ fn without_the_feature_the_combine_stops_and_names_setup_upgrade() {
     let doc = json(&env, &["combine", "side"], 1);
     assert_eq!(doc["error"]["hint"], hint);
     assert_eq!(env.standing(), before);
+    // Asked for a clean line, it says the same: running it again without the flag won't help.
+    let (_, flagged) = run(&env, &["combine", "side", "--only-if-clean"], 1);
+    assert_eq!(flagged, said);
+    assert_eq!(env.standing(), before);
 }
 
 #[test]
@@ -370,7 +374,7 @@ fn the_count_is_every_place_and_the_rows_the_made_ones() {
         shown.contains(
             " \"Combine other into main\", with 2 places in conflict:\n  b.txt: changed on both \
              lines, in the same place; marked in the file (1 place)\n\n    The two lines held 1 \
-             more place in conflict already; the save keeps them.\n"
+             more place in conflict already; the save keeps it.\n"
         ),
         "{shown}"
     );
@@ -381,9 +385,157 @@ fn the_count_is_every_place_and_the_rows_the_made_ones() {
     let doc = json(&env, &["combine", "other"], 0);
     assert_eq!(doc["conflict_count"], 2, "{doc}");
     assert_eq!(doc["more_conflicts"], 0, "{doc}");
+    assert_eq!(doc["holds_conflicts"], true, "{doc}");
     let conflicts = doc["conflicts"].as_array().unwrap();
     assert_eq!(conflicts.len(), 1, "{doc}");
     assert_eq!(conflicts[0]["path"], "b.txt");
+    // Asked for a clean line, it names the one it would make and counts the one held.
+    run(&env, &["undo"], 0);
+    let before = env.standing();
+    let (shown, said) = run(&env, &["combine", "other", "--only-if-clean"], 1);
+    assert_eq!(shown, "");
+    assert_eq!(
+        said,
+        format!(
+            "error: Combining other into main would leave 2 places in conflict, so nothing was \
+             changed (--only-if-clean):\n  b.txt: changed on both lines, in the same place\nThe \
+             two lines hold 1 more in conflict already.\n\nhint: {ONLY_IF_CLEAN_HINT}\n"
+        )
+    );
+    assert_eq!(env.standing(), before);
+}
+
+/// `main` holding the conflicts a kept combine of `side` made at `a.txt`, and at `c.txt` too
+/// when `two`, and line `other` from before that combine with `b.txt` added; the project is on
+/// `main`.
+fn main_holds_conflicts(env: &Env, two: bool) {
+    run(env, &["line", "new", "other"], 0);
+    env.overwrite("b.txt", "b\n");
+    run(env, &["save", "B"], 0);
+    run(env, &["goto", "main"], 0);
+    if two {
+        env.overwrite("c.txt", "c\n");
+        run(env, &["save", "C"], 0);
+    }
+    run(env, &["line", "new", "side"], 0);
+    env.overwrite("a.txt", "1\nside\n3\n4\n5\n6\n7\n8\n");
+    if two {
+        env.overwrite("c.txt", "side\n");
+    }
+    run(env, &["save", "On side"], 0);
+    run(env, &["goto", "main"], 0);
+    env.overwrite("a.txt", "1\nmain\n3\n4\n5\n6\n7\n8\n");
+    if two {
+        env.overwrite("c.txt", "main\n");
+    }
+    run(env, &["save", "On main"], 0);
+    run(env, &["combine", "side"], 0);
+}
+
+#[test]
+fn a_combine_that_made_none_but_carries_some_says_the_lines_held_them() {
+    for (two, places, them) in [(false, "1 place", "it"), (true, "2 places", "them")] {
+        let env = project();
+        main_holds_conflicts(&env, two);
+        let (shown, _) = run(&env, &["combine", "other"], 0);
+        assert!(
+            shown.contains(&format!(
+                " \"Combine other into main\", with {places} in conflict.\n\n    The two lines \
+                 held {them} in conflict already; the save keeps {them}.\n    1 file written.\n"
+            )),
+            "{shown}"
+        );
+        run(&env, &["undo"], 0);
+        let doc = json(&env, &["combine", "other"], 0);
+        assert_eq!(doc["conflicts"], serde_json::json!([]), "{doc}");
+        assert_eq!(doc["conflict_count"], if two { 2 } else { 1 }, "{doc}");
+    }
+}
+
+#[test]
+fn only_if_clean_stops_for_a_conflict_your_line_holds() {
+    let env = project();
+    main_holds_conflicts(&env, false);
+    let before = env.standing();
+    let (shown, said) = run(&env, &["combine", "other", "--only-if-clean"], 1);
+    assert_eq!(shown, "");
+    assert_eq!(
+        said,
+        format!(
+            "error: Combining other into main would leave 1 place in conflict, so nothing was \
+             changed (--only-if-clean).\nThe two lines hold it in conflict already.\n\nhint: \
+             {ONLY_IF_CLEAN_HINT}\n"
+        )
+    );
+    assert_eq!(env.standing(), before);
+}
+
+#[test]
+fn only_if_clean_stops_for_a_conflict_carried_from_the_other_line() {
+    let env = project();
+    run(&env, &["line", "new", "side"], 0);
+    env.overwrite("a.txt", "1\nside\n3\n4\n5\n6\n7\n8\n");
+    run(&env, &["save", "On side"], 0);
+    run(&env, &["goto", "main"], 0);
+    // `other` keeps a conflict with side; main stays clean and moves on.
+    run(&env, &["line", "new", "other"], 0);
+    env.overwrite("a.txt", "1\nother\n3\n4\n5\n6\n7\n8\n");
+    run(&env, &["save", "On other"], 0);
+    run(&env, &["combine", "side"], 0);
+    run(&env, &["goto", "main"], 0);
+    env.overwrite("d.txt", "d\n");
+    run(&env, &["save", "D"], 0);
+    let before = env.standing();
+    let (shown, said) = run(&env, &["combine", "other", "--only-if-clean"], 1);
+    assert_eq!(shown, "");
+    assert_eq!(
+        said,
+        format!(
+            "error: Combining other into main would leave 1 place in conflict, so nothing was \
+             changed (--only-if-clean).\nThe two lines hold it in conflict already.\n\nhint: \
+             {ONLY_IF_CLEAN_HINT}\n"
+        )
+    );
+    assert_eq!(env.standing(), before);
+}
+
+#[test]
+fn a_forward_onto_a_save_that_holds_a_conflict_says_so() {
+    let env = project();
+    main_holds_conflicts(&env, false);
+    // `other` takes main's conflict in; main has nothing other lacks.
+    run(&env, &["goto", "other"], 0);
+    run(&env, &["combine", "main"], 0);
+    run(&env, &["goto", "main"], 0);
+    let before = env.standing();
+    let (shown, said) = run(&env, &["combine", "other", "--only-if-clean"], 1);
+    assert_eq!(shown, "");
+    assert_eq!(
+        said,
+        format!(
+            "error: Combining other into main would leave 1 place in conflict, so nothing was \
+             changed (--only-if-clean).\nother holds it in conflict already.\n\nhint: \
+             {ONLY_IF_CLEAN_HINT}\n"
+        )
+    );
+    assert_eq!(env.standing(), before);
+    let (shown, _) = run(&env, &["combine", "other"], 0);
+    assert!(
+        shown.starts_with("Moved main forward to other: save "),
+        "{shown}"
+    );
+    assert!(
+        shown.ends_with(
+            "\n    The save your line moved to holds places in conflict: opalro status lists \
+             them.\n"
+        ),
+        "{shown}"
+    );
+    run(&env, &["undo"], 0);
+    let doc = json(&env, &["combine", "other"], 0);
+    assert_eq!(doc["result"], "forward", "{doc}");
+    assert_eq!(doc["holds_conflicts"], true, "{doc}");
+    assert_eq!(doc["conflict_count"], serde_json::Value::Null, "{doc}");
 }
 
 #[test]
@@ -645,7 +797,10 @@ fn imported_apart(name: &str) -> Env {
 
 #[test]
 fn a_hostile_path_in_a_kept_conflict_is_escaped() {
-    let env = imported_apart("x\u{1b}[31m\u{202e}.txt");
+    let name = "x\u{1b}[31m\u{202e}.txt";
+    let env = imported_apart(name);
+    // `git fast-import` checks nothing out: the folder is brought to the save first.
+    run(&env, &["discard"], 0);
     let (shown, said) = run(&env, &["combine", "side", "--only-if-clean"], 1);
     assert_eq!(shown, "");
     assert!(
@@ -665,6 +820,15 @@ fn a_hostile_path_in_a_kept_conflict_is_escaped() {
     );
     support::assert_escaped(&shown, "combine");
     support::assert_escaped(&said, "combine");
+    // Windows can't hold the name, so nothing is written there; elsewhere the marked text is.
+    let stands = if cfg!(windows) {
+        "not_here"
+    } else {
+        let marked = std::fs::read_to_string(env.root().join(name)).unwrap();
+        assert!(marked.starts_with("<<<<<<< "), "{marked}");
+        "markers"
+    };
+    assert_eq!(standing(&env), [(name.to_owned(), stands.to_owned())]);
 }
 
 #[test]

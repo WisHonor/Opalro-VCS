@@ -5,6 +5,7 @@ expression: "support::masked(combined)"
 {
   "conflict_count": 0,
   "conflicts": [],
+  "holds_conflicts": false,
   "line": "main",
   "merged_files": [
     "a.txt"
