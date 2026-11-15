@@ -458,6 +458,13 @@ impl CombineError {
                  afterwards). Or make the two lines agree on these files, save, and run opalro \
                  combine again."
             }
+            // Nothing to combine: the conflicts are on the line already, and a run without the
+            // flag would only say so.
+            CombineError::Conflicts {
+                by: HeldBy::Line, ..
+            } => {
+                "opalro status lists what is in conflict here, and opalro resolve records your fixes."
+            }
             CombineError::Conflicts { .. } => {
                 "Run it again without --only-if-clean to keep the conflicts and fix them one at a \
                  time."

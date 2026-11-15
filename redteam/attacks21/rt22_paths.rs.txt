@@ -1,0 +1,82 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+mod support;
+use support::{Env, text};
+
+fn run_in(env: &Env, dir: &std::path::Path, args: &[&str]) -> (i32, String) {
+    let out = env.opal_in(dir).args(args).output().unwrap();
+    let said = format!("{}{}", text(&out.stdout), text(&out.stderr));
+    (out.status.code().unwrap_or(-1), said)
+}
+
+fn ok(env: &Env, args: &[&str]) -> String {
+    let (code, said) = run_in(env, env.root(), args);
+    assert_eq!(code, 0, "{args:?}: {said}");
+    said
+}
+
+const PIC_START: &[u8] = b"\x89PNG\r\n\x1a\n\0start";
+const PIC_SIDE: &[u8] = b"\x89PNG\r\n\x1a\n\0side";
+const PIC_MAIN: &[u8] = b"\x89PNG\r\n\x1a\n\0main";
+
+fn base() -> Env {
+    let env = Env::empty();
+    ok(&env, &["start", "--preset", "custom"]);
+    env.overwrite("a.txt", "1\n2\n3\n4\n5\n6\n7\n8\n");
+    support::write(&env, "art/pic.png", PIC_START);
+    support::write(&env, "art/b.txt", "1\n2\n3\n4\n5\n6\n7\n8\n");
+    ok(&env, &["save", "A"]);
+    ok(&env, &["line", "new", "side"]);
+    env.overwrite("a.txt", "1\nside\n3\n4\n5\n6\n7\n8\n");
+    support::write(&env, "art/b.txt", "1\nside\n3\n4\n5\n6\n7\n8\n");
+    support::write(&env, "art/pic.png", PIC_SIDE);
+    ok(&env, &["save", "On side"]);
+    ok(&env, &["goto", "main"]);
+    env.overwrite("a.txt", "1\nmain\n3\n4\n5\n6\n7\n8\n");
+    support::write(&env, "art/b.txt", "1\nmain\n3\n4\n5\n6\n7\n8\n");
+    support::write(&env, "art/pic.png", PIC_MAIN);
+    ok(&env, &["save", "On main"]);
+    ok(&env, &["combine", "side"]);
+    env.overwrite("a.txt", "1\nboth\n3\n4\n5\n6\n7\n8\n");
+    support::write(&env, "art/b.txt", "1\nboth\n3\n4\n5\n6\n7\n8\n");
+    support::write(&env, "art/pic.png", b"\x89PNG\r\n\x1a\n\0engine");
+    env
+}
+
+#[test]
+fn rt22_folder_paths_in_every_spelling() {
+    let base = base();
+    let cases: Vec<(&str, Vec<&str>)> = vec![
+        ("", vec!["art/"]),
+        ("", vec!["./art"]),
+        ("", vec!["art/."]),
+        ("", vec!["art/../art"]),
+        ("", vec!["art//"]),
+        ("", vec!["art", "--yes"]),
+        ("", vec!["art", "--json"]),
+        ("", vec!["art", "a.txt"]),
+        ("", vec!["art/*"]),
+        ("", vec!["*"]),
+        ("", vec!["**"]),
+        ("", vec!["art/p*"]),
+        ("", vec!["art/pic.png/.."]),
+        ("art", vec!["."]),
+        ("art", vec![".."]),
+        ("art", vec!["../art"]),
+        ("art", vec!["*"]),
+    ];
+    for (dir, paths) in cases {
+        let env = Env::empty();
+        support::copy_dir(base.root(), env.root());
+        support::copy_dir(base.config(), env.config());
+        let mut args = vec!["resolve"];
+        args.extend(paths.iter().copied());
+        let (code, said) = run_in(&env, &env.root().join(dir), &args);
+        let (_, st) = run_in(&env, env.root(), &["status"]);
+        let recorded_pic = !st.contains("pic.png");
+        println!(
+            "in {dir:?} {args:?}: exit {code}, pic recorded: {recorded_pic}\n  {}",
+            said.lines().next().unwrap_or("")
+        );
+    }
+}

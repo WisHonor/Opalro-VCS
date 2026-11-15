@@ -76,8 +76,9 @@ impl<'a> Listings<'a> {
         }
     }
 
-    /// Another side of the same command: the records read are shared, and so is what is
-    /// nesting, but each side says for itself whether it stood a conflict in.
+    /// Another side of the same command: it reads through the same store, whose memory of
+    /// records both share, and shares what is nesting, but says for itself whether it stood a
+    /// conflict in.
     pub(crate) fn side(&self) -> Listings<'a> {
         Listings {
             store: self.store,

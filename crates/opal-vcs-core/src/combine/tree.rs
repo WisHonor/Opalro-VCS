@@ -594,7 +594,9 @@ impl Walk<'_> {
             Contents::Not(why @ NotMerged::RulesNotWhole { .. }) => {
                 self.clashed(path, name, Clash::BothChanged(why), terms)
             }
-            // Alike but for the executable mark, or not text: no markers.
+            // Not merged line by line and given no markers, or merged cleanly from an empty start
+            // (one line added an empty file, the other a text): it stands as yours, since nobody
+            // chose.
             _ => self.clashed(path, name, clash, terms),
         }
     }

@@ -297,17 +297,33 @@ pub(crate) fn overlay_with(
     drop_emptied: bool,
     keep: &mut dyn FnMut(&Listing) -> Result<Id, SaveError>,
 ) -> Result<Id, SaveError> {
-    let is_folder = |c: &Option<Put>| matches!(c, Some((EntryKind::Folder, ..)));
+    let whole = HashSet::new();
+    overlay_whole(listings, base_root, changes, &whole, drop_emptied, keep)
+}
+
+/// [`overlay_with`], where a folder put at a path in `whole` goes in as it is, by its listing's
+/// ID, not built from the changes below it.
+pub(crate) fn overlay_whole(
+    listings: &Listings,
+    base_root: Id,
+    changes: &BTreeMap<String, Option<Put>>,
+    whole: &HashSet<String>,
+    drop_emptied: bool,
+    keep: &mut dyn FnMut(&Listing) -> Result<Id, SaveError>,
+) -> Result<Id, SaveError> {
+    let is_folder = |path: &str, c: &Option<Put>| {
+        matches!(c, Some((EntryKind::Folder, ..))) && !whole.contains(path)
+    };
     // Each folder to build, with what changes right in it: an entry put there, or `None` removed.
     let mut todo: HashMap<String, Vec<(String, Option<Entry>)>> = HashMap::new();
     for (path, change) in changes {
-        if ancestors(path).any(|up| changes.get(up).is_some_and(|c| !is_folder(c))) {
+        if ancestors(path).any(|up| changes.get(up).is_some_and(|c| !is_folder(up, c))) {
             continue;
         }
         for up in ancestors(path) {
             todo.entry(up.to_owned()).or_default();
         }
-        if is_folder(change) {
+        if is_folder(path, change) {
             // It goes in its folder once it is built.
             todo.entry(path.clone()).or_default();
             continue;

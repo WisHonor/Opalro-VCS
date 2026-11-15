@@ -949,7 +949,8 @@ pub(crate) fn read_and_build(
     };
     for again in &rebuilt_records {
         let record = conflict::again_at(storing.store, &again.path, &again.from, again.own)?;
-        store_record(storing.store, storing.packs, &record)?;
+        let stored = store_record(storing.store, storing.packs, &record)?;
+        stored_as_named(stored, again.id, &again.path)?;
     }
     for listing in rebuilt {
         storing.listing(listing)?;
@@ -2315,6 +2316,20 @@ pub(crate) fn store_listing(
     Ok(id)
 }
 
+/// A record written again at `path` is stored as `stored`, and its folder's rebuilt listing
+/// names `named`, worked out in the walk: they must be one, or the save would name a record it
+/// never stored.
+fn stored_as_named(stored: Id, named: Id, path: &str) -> Result<(), SaveError> {
+    if stored == named {
+        return Ok(());
+    }
+    let what = format!(
+        "the conflict record written again at {} isn't the one its folder names",
+        escape(path, false)
+    );
+    Err(RepoError::from(io::Error::other(what)).into())
+}
+
 /// Stores the conflict record `record` unless a good copy is held already, and returns its ID.
 pub(crate) fn store_record(
     store: &Store,
@@ -2322,6 +2337,10 @@ pub(crate) fn store_record(
     record: &Record,
 ) -> Result<Id, SaveError> {
     let encoded = record.encode();
+    debug_assert!(
+        Record::decode(&encoded).is_ok(),
+        "a record written that can't be read back"
+    );
     let id = record.id();
     let len = encoded.len() as u64;
     if !packs.contains(&id) && !store.has_good_copy(&id, ObjectKind::Conflict, len)? {
@@ -6465,9 +6484,9 @@ mod tests {
         assert_eq!(save_reads(conflicted, false), (with.0, 1));
     }
 
-    /// What `status`, then `save`, keep of the 300 records a planted save names, each of `width`
-    /// versions: how many records, and how many versions those hold, for each command.
-    fn held_for(width: usize) -> Vec<(usize, usize)> {
+    /// How many records `status`, then `save`, keep a summary of, of the 300 a planted save names,
+    /// each of `width` versions; a record the save writes again is checked to keep every version.
+    fn kept_for(width: usize) -> Vec<usize> {
         let (dir, mut repo) = with_versions();
         let root = dir.path();
         // Each its own record: a middle version no other names, never read.
@@ -6498,11 +6517,9 @@ mod tests {
             write(root, n, PICTURE);
         }
         fs::create_dir_all(root.join("d2")).unwrap();
-        let mut held = Vec::new();
         let before = repo.store().kept();
         status(&repo, false, None).unwrap();
         let after = repo.store().kept();
-        held.push((after.0 - before.0, after.1 - before.1));
         let (top, _) = saved_with(save_now(&mut repo));
         let last = repo.store().kept();
         // Written again with nothing in the folder there, read whole for it: every version kept.
@@ -6515,18 +6532,27 @@ mod tests {
             };
             assert_eq!(again.own, Some(own), "{gone}");
         }
-        held.push((last.0 - after.0, last.1 - after.1));
-        held
+        vec![after - before, last - after]
+    }
+
+    /// What a command keeps of a record is of a fixed size by its type (`conflict::Summary`);
+    /// this pins that each command keeps one per record, once, whatever the record's width, and
+    /// that writing one again keeps all of it.
+    #[test]
+    fn status_and_save_keep_one_summary_of_each_record_wide_or_narrow() {
+        assert_eq!(kept_for(3), [300, 300]);
+        assert_eq!(kept_for(255), [300, 300]);
     }
 
     #[test]
-    fn status_and_save_keep_as_little_of_a_wide_record_as_of_a_narrow_one() {
-        let (narrow, wide) = (held_for(3), held_for(255));
-        for &(records, versions) in narrow.iter().chain(&wide) {
-            assert_eq!(records, 300, "{narrow:?} {wide:?}");
-            assert!(versions <= records, "{narrow:?} {wide:?}");
-        }
-        assert_eq!(narrow, wide);
+    fn a_record_stored_under_another_id_than_its_folder_names_stops_the_save() {
+        assert!(stored_as_named(Id([1; 32]), Id([1; 32]), "a.png").is_ok());
+        let e = stored_as_named(Id([1; 32]), Id([2; 32]), "d/\u{1b}.png").unwrap_err();
+        assert!(
+            e.to_string()
+                .contains("written again at d/\\x1b.png isn't the one its folder names"),
+            "{e}"
+        );
     }
 
     #[test]

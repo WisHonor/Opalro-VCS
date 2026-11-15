@@ -1641,7 +1641,8 @@ fn then_with_conflicts(repo: &mut Repository, m: &mut Model, root: &Path, pick: 
 
 /// From the line the project is on, whose save holds a conflict: another line made from that
 /// save's first parent with a change elsewhere, combined in asking for a clean line, so the
-/// conflict would be carried.
+/// conflict would be carried; then that first parent, which the line has already, asking the
+/// same: nothing to combine, on a save in conflict.
 fn carried_into_a_clean_line(repo: &mut Repository, m: &mut Model, root: &Path) {
     let (Some(here), Some(parent)) = (m.state.line.clone(), m.saves[m.state.on].parent) else {
         return;
@@ -1670,6 +1671,7 @@ fn carried_into_a_clean_line(repo: &mut Repository, m: &mut Model, root: &Path) 
     apply(repo, m, root, &goto);
     if m.state.line.as_deref() == Some(here.as_str()) {
         combine_into(repo, m, &Aim::Line(there), None, Keep::OnlyIfClean);
+        combine_into(repo, m, &Aim::Save(parent), None, Keep::OnlyIfClean);
     }
 }
 
@@ -5002,7 +5004,7 @@ fn cases() -> u32 {
 /// that the model's files can make (two kinds at one place, a link, a rule against markers and
 /// files past the text limits they can't), the starting points that disagree, a line's conflict
 /// that stops a combine, and each way the other commands meet a conflict.
-const MUST_MEET: [&str; 37] = [
+const MUST_MEET: [&str; 38] = [
     "changed on both, in the same place",
     "changed on both, not text",
     "changed, removed",
@@ -5016,6 +5018,7 @@ const MUST_MEET: [&str; 37] = [
     "--only-if-clean: a conflict it would make",
     "--only-if-clean: a conflict carried from a line",
     "--only-if-clean: a forward onto a save in conflict",
+    "--only-if-clean: nothing to combine on a save in conflict",
     "resolve with no paths",
     "resolve with a path",
     "resolve with a pattern",

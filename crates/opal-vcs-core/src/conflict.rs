@@ -52,7 +52,7 @@ const VERSION: &str = "unknown conflict-record version";
 const TERM_COUNT: &str = "a conflict names an odd number of versions, from 3 to 255";
 const UNKNOWN_KIND: &str = "a version in a conflict is of an unknown kind";
 const SIZED: &str = "a folder or project link in a conflict has a size";
-const BAD_MARKER: &str = "a conflict's marker length is from 1 to 6";
+const BAD_MARKER: &str = "a conflict's marker length is 1 to 6, which Opalro never writes";
 const MARKED_NOT_FILE: &str = "a conflict has markers on a version that isn't a file";
 
 impl Record {
@@ -168,13 +168,11 @@ impl Summary {
             has_own: r.own.is_some(),
         }
     }
-
-    /// How many versions it holds: never more than one.
-    #[cfg(test)]
-    fn versions(&self) -> usize {
-        usize::from(self.stands_as.is_some())
-    }
 }
+
+// Copy holds no list, so a summary can't grow with the record: a wide record costs a command what
+// a narrow one does.
+const _: () = assert!(std::mem::size_of::<Summary>() <= 64);
 
 /// What the folder shows at a place in conflict, against what the conflict stands as.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -341,7 +339,7 @@ pub(crate) fn record_at(
     }
     let kept = Summary::of(&whole_at(store, path, id)?);
     #[cfg(test)]
-    store.note_kept(kept.versions());
+    store.note_kept();
     records.insert(*id, kept);
     Ok(kept)
 }

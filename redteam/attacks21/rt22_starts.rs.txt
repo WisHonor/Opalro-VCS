@@ -1,0 +1,115 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+mod support;
+use support::{Env, files, text};
+
+fn run(env: &Env, args: &[&str]) -> (i32, String) {
+    let out = env.opalro().args(args).output().unwrap();
+    let said = format!("{}{}", text(&out.stdout), text(&out.stderr));
+    (out.status.code().unwrap_or(-1), said)
+}
+
+fn ok(env: &Env, args: &[&str]) -> String {
+    let (code, said) = run(env, args);
+    assert_eq!(code, 0, "{args:?}: {said}");
+    said
+}
+
+fn show(env: &Env, what: &str) {
+    println!("--- {what}");
+    for (p, b) in files(env.root()) {
+        println!("  {p}: {:?}", String::from_utf8_lossy(&b));
+    }
+}
+
+/// Combines `target` in, and keeps `keep` at every place left in conflict.
+fn combine_keeping(env: &Env, target: &str, keep: &str) {
+    let said = ok(env, &["combine", target]);
+    println!("{said}");
+    let (_, st) = run(env, &["status", "--json"]);
+    let doc: serde_json::Value = serde_json::from_str(&st).unwrap();
+    let places: Vec<String> = doc["conflicts"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .map(|c| c["path"].as_str().unwrap().to_owned())
+                .collect()
+        })
+        .unwrap_or_default();
+    if !places.is_empty() {
+        let mut args = vec!["resolve"];
+        args.extend(places.iter().map(String::as_str));
+        args.extend(["--keep", keep]);
+        println!("{}", ok(env, &args));
+    }
+}
+
+#[test]
+fn rt22_three_starts_that_disagree() {
+    let env = Env::empty();
+    ok(&env, &["start", "--preset", "custom"]);
+    env.overwrite("f.txt", "0\n1\n2\n3\n4\n5\n");
+    env.overwrite("g.txt", "g\n");
+    ok(&env, &["save", "Base"]);
+    ok(&env, &["line", "new", "ax"]);
+    env.overwrite("f.txt", "0\nx\n2\n3\n4\n5\n");
+    ok(&env, &["save", "ax"]);
+    ok(&env, &["goto", "main"]);
+    ok(&env, &["line", "new", "by"]);
+    env.overwrite("f.txt", "0\ny\n2\n3\n4\n5\n");
+    env.overwrite("g.txt", "g by y\n");
+    ok(&env, &["save", "by"]);
+    ok(&env, &["goto", "main"]);
+    ok(&env, &["line", "new", "cz"]);
+    std::fs::rename(env.root().join("f.txt"), env.root().join("h.txt")).unwrap();
+    std::fs::remove_file(env.root().join("g.txt")).unwrap();
+    ok(&env, &["save", "z moves f to h, removes g"]);
+    // l1: x, then y and z, keeping its own.
+    ok(&env, &["goto", "ax"]);
+    ok(&env, &["line", "new", "l1"]);
+    combine_keeping(&env, "by", "mine");
+    combine_keeping(&env, "cz", "mine");
+    env.overwrite("f.txt", "0\nl1 own\n2\n3\n4\n5\n");
+    ok(&env, &["save", "l1 own"]);
+    show(&env, "l1");
+    // l2: y, then x and z, keeping theirs.
+    ok(&env, &["goto", "by"]);
+    ok(&env, &["line", "new", "l2"]);
+    combine_keeping(&env, "ax", "theirs");
+    combine_keeping(&env, "cz", "theirs");
+    show(&env, "l2");
+    let (_, l2_files) = (0, files(env.root()));
+    ok(&env, &["goto", "l1"]);
+    let l1_files = files(env.root());
+    let said = ok(&env, &["combine", "l2"]);
+    println!("final combine:\n{said}");
+    println!("{}", run(&env, &["status"]).1);
+    show(&env, "result");
+    // Every version either line holds is in the result: in a file, or a side of a conflict.
+    let mut held: Vec<Vec<u8>> = files(env.root()).into_values().collect();
+    let (_, st) = run(&env, &["status", "--json"]);
+    let doc: serde_json::Value = serde_json::from_str(&st).unwrap();
+    for c in doc["conflicts"].as_array().cloned().unwrap_or_default() {
+        let p = c["path"].as_str().unwrap();
+        for pick in ["mine", "theirs", "before"] {
+            let to = env.config().join(format!("{}-{pick}", p.replace('/', "_")));
+            let (code, said) = run(
+                &env,
+                &["resolve", p, "--copy", pick, "--to", to.to_str().unwrap()],
+            );
+            println!("copy {p} {pick}: {said}");
+            if code == 0 {
+                held.push(std::fs::read(to).unwrap());
+            }
+        }
+    }
+    let mut lost = Vec::new();
+    for (side, fs) in [("l1", &l1_files), ("l2", &l2_files)] {
+        for (p, b) in fs {
+            if !held.contains(b) {
+                lost.push(format!("{side} {p}: {:?}", String::from_utf8_lossy(b)));
+            }
+        }
+    }
+    assert!(lost.is_empty(), "versions in no file and no side: {lost:?}");
+}

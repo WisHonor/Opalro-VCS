@@ -540,6 +540,37 @@ fn a_forward_onto_a_save_that_holds_a_conflict_says_so() {
 }
 
 #[test]
+fn only_if_clean_with_nothing_to_combine_on_a_line_in_conflict_says_where_to_go() {
+    let env = project();
+    main_holds_conflicts(&env, false);
+    let before = env.standing();
+    let marked = std::fs::read(env.root().join("a.txt")).unwrap();
+    // `side` is in main's history already: nothing to combine, but main holds the conflict.
+    let (shown, said) = run(&env, &["combine", "side", "--only-if-clean"], 1);
+    assert_eq!(shown, "");
+    assert_eq!(
+        said,
+        "error: Combining side into main would leave 1 place in conflict, so nothing was \
+         changed (--only-if-clean).\nmain holds it in conflict already.\n\nhint: opalro status \
+         lists what is in conflict here, and opalro resolve records your fixes.\n"
+    );
+    assert_eq!(env.standing(), before);
+    assert_eq!(std::fs::read(env.root().join("a.txt")).unwrap(), marked);
+    let doc = json(&env, &["combine", "side", "--only-if-clean"], 1);
+    assert_eq!(
+        doc["error"]["message"],
+        "Combining side into main would leave 1 place in conflict, so nothing was changed \
+         (--only-if-clean).\nmain holds it in conflict already.",
+        "{doc}"
+    );
+    assert_eq!(
+        doc["error"]["hint"],
+        "opalro status lists what is in conflict here, and opalro resolve records your fixes."
+    );
+    assert_eq!(env.standing(), before);
+}
+
+#[test]
 fn a_combine_with_conflicts_keeps_unsaved_work_in_the_way_as_before() {
     let env = project();
     apart(

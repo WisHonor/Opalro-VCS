@@ -55,7 +55,8 @@ const STASH: &str = "`opalro shelf` sets your unsaved changes aside, new files t
                      `opalro shelf --list` lists them by that number, which stays with its shelf.";
 const LATER: &str = "Opalro can't show who changed each line of a file yet.\n\
                      Until then, `opalro history` lists the saves on your line.";
-const MERGE_ABORT: &str = "`opalro undo` takes back the last combine, conflicts and all.";
+const MERGE_ABORT: &str = "`opalro undo` takes back the last step;\n\
+                           right after a combine, that is the combine, conflicts and all.";
 const MERGE_CONTINUE: &str = "`opalro combine` is done as soon as it runs.\n\
                               `opalro resolve` records the conflicts you fixed.";
 const OURS: &str = "`opalro resolve <file> --keep mine` takes your version of a file in conflict.";

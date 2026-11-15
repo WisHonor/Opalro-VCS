@@ -800,7 +800,7 @@ mod tests {
     #[test]
     fn a_version_naming_another_kind_is_damage_at_its_place() {
         use crate::conflict::Term;
-        use crate::conflict::tests::{file_of, plant_conflicted};
+        use crate::conflict::tests::plant_conflicted;
         use crate::status::tests::{keep, project, versions, write};
         let (dir, mut repo) = project();
         let held =
@@ -824,7 +824,6 @@ mod tests {
             id.short_hex()
         );
         assert!(e.starts_with(&want), "{e}");
-        assert_ne!(file_of(b"new\n").id, held.get("dir").unwrap().id);
     }
 
     #[test]

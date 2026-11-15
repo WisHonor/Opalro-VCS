@@ -16,8 +16,8 @@ use crate::drive::Drive;
 use crate::fsio;
 use crate::history::tip_of;
 use crate::id::Id;
-use crate::kept::overlay_with;
-use crate::listing::{Entry, EntryKind, Listing};
+use crate::kept::overlay_whole;
+use crate::listing::EntryKind;
 use crate::names::Given;
 use crate::pack::PackSet;
 use crate::repo::{ChangeLock, RepoError, Repository};
@@ -480,19 +480,21 @@ fn choose<'c>(
                         }
                         own_or_fixed(below, path)
                     }
-                    // A name that is a place, read letter for letter, is that place, `[` and all.
-                    Given::Pattern { .. } if !at_or_below(&given.shown()).is_empty() => {
-                        own_or_fixed(at_or_below(&given.shown()), &given.shown())
-                    }
                     Given::Pattern { .. } => {
+                        // A name that is a place, read letter for letter, is that place, `[`
+                        // and all.
+                        let shown = given.shown();
+                        let as_path = at_or_below(&shown);
+                        if !as_path.is_empty() {
+                            named.extend(own_or_fixed(as_path, &shown));
+                            continue;
+                        }
                         let scope = Scope::new(std::slice::from_ref(given), drive);
                         let matched: Vec<usize> = (0..conflicts.len())
                             .filter(|&i| scope.holds(&conflicts[i].path))
                             .collect();
                         if matched.is_empty() {
-                            return Err(ResolveError::NothingMatches {
-                                pattern: given.shown(),
-                            });
+                            return Err(ResolveError::NothingMatches { pattern: shown });
                         }
                         // A pattern takes what is fixed among what it matches, as no paths do.
                         matched
@@ -671,8 +673,8 @@ impl Built<'_> {
     ) -> Result<(Id, Save, String, Vec<Warning>, PackSet), ResolveError> {
         let store = repo.store();
         let mut changes = BTreeMap::new();
-        // The overlay builds a folder it is given from the changes below it; a folder term goes
-        // in whole, so it is put as a leaf and made a folder again as its listing is stored.
+        // A folder term goes in whole, at the place it is kept: told by its path, never by what
+        // it names, so no other entry can be taken for it.
         let mut whole = HashSet::new();
         for (path, id) in places.iter().zip(records) {
             // Read whole to take a side, one at a time, and not kept.
@@ -683,34 +685,27 @@ impl Built<'_> {
                     copying: false,
                 });
             };
-            let put = term.map(|t| match t.kind {
-                EntryKind::Folder => {
-                    whole.insert(t.id);
-                    (EntryKind::Symlink, t.id, 0)
-                }
-                kind => (kind, t.id, t.size),
-            });
-            changes.insert(path.clone(), put);
+            if term.is_some_and(|t| t.kind == EntryKind::Folder) {
+                whole.insert(path.clone());
+            }
+            changes.insert(path.clone(), term.map(|t| (t.kind, t.id, t.size)));
         }
         let unstored = HashMap::new();
         let listings = Listings::stored(store, &unstored);
         let mut packs = repo.new_packs()?;
         let mut held = HashMap::new();
-        let root = overlay_with(&listings, self.parent.root, &changes, false, &mut |l| {
-            let folder = |e: &Entry| e.kind == EntryKind::Symlink && whole.contains(&e.id);
-            let l = if l.entries().iter().any(folder) {
-                let entries = l.entries().iter().map(|e| Entry {
-                    kind: if folder(e) { EntryKind::Folder } else { e.kind },
-                    ..e.clone()
-                });
-                Listing::new(entries.collect()).map_err(StoreError::from)?
-            } else {
-                l.clone()
-            };
-            let id = store_listing(store, &mut packs, &l)?;
-            held.insert(id, l);
-            Ok(id)
-        })?;
+        let root = overlay_whole(
+            &listings,
+            self.parent.root,
+            &changes,
+            &whole,
+            false,
+            &mut |l| {
+                let id = store_listing(store, &mut packs, l)?;
+                held.insert(id, l.clone());
+                Ok(id)
+            },
+        )?;
         // Held to a save's limits as the next save reads it, each conflict as what it stands as,
         // before anything is stored: a side kept whole may be larger than what stood there.
         let read = |id: &Id| match held.get(id) {

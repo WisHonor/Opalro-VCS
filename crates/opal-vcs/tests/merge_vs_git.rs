@@ -1023,15 +1023,18 @@ fn nothing_lost(
             let Some(was) = f.origin.as_ref().and_then(|o| made.first.get(o)) else {
                 let bytes = f.lines.concat().into_bytes();
                 // Made where the start held a file whose mark the other branch changed: that
-                // change is the other branch's, and lands on whatever is at the path.
+                // change is the other branch's, and lands on whatever is at the path. The new
+                // file then has its own mark or that one, never another.
                 let start = made.first.get(path);
-                let marked_by_other = made.ends[1 - branch].get(path).is_some_and(|o| {
-                    o.origin.as_deref() == Some(path.as_str())
-                        && start.is_some_and(|s| s.exec != o.exec)
-                });
+                let other_mark = (made.ends[1 - branch].get(path))
+                    .filter(|o| {
+                        o.origin.as_deref() == Some(path.as_str())
+                            && start.is_some_and(|s| s.exec != o.exec)
+                    })
+                    .map(|o| o.exec);
                 if !held
                     .iter()
-                    .any(|(b, x, _)| **b == bytes && (*x == f.exec || marked_by_other))
+                    .any(|(b, x, _)| **b == bytes && (*x == f.exec || Some(*x) == other_mark))
                 {
                     return lost("the file it added");
                 }
@@ -1458,9 +1461,34 @@ fn nothing_lost_reads_a_mark_from_the_new_file_where_the_old_was_removed() {
     let marked: &[Spec] = &[("a.txt", &["one"], true, Some("a.txt"))];
     let remade: &[Spec] = &[("a.txt", &["other"], false, None)];
     let made = three_trees([start, marked, remade]);
-    let kept = [
-        result(&[("a.txt", "one\n", true)]),
-        result(&[("a.txt", "other\n", true)]),
+    // The one result a combine gives: the new file there, with the mark.
+    let kept = [result(&[("a.txt", "other\n", true)])];
+    assert_eq!(nothing_lost(&made, &kept), Ok(()));
+}
+
+/// A branch moved the start's file away and added a marked file at its old path, where the
+/// other branch turned the start file's mark on: the new file must keep a mark one branch gave
+/// it at that path, and the moved file the other's.
+#[test]
+fn nothing_lost_wants_an_added_file_with_a_mark_a_branch_gave_it() {
+    let start: &[Spec] = &[("a.txt", &["one"], false, Some("a.txt"))];
+    let moved: &[Spec] = &[
+        ("b.txt", &["one"], false, Some("a.txt")),
+        ("a.txt", &["new"], true, None),
     ];
+    let marked: &[Spec] = &[("a.txt", &["one"], true, Some("a.txt"))];
+    let made = three_trees([start, moved, marked]);
+    let unmarked = [result(&[
+        ("a.txt", "new\n", false),
+        ("b.txt", "one\n", true),
+    ])];
+    assert_eq!(
+        nothing_lost(&made, &unmarked),
+        Err("branch 0's a.txt: the file it added is in none of Opalro's results".into())
+    );
+    let kept = [result(&[
+        ("a.txt", "new\n", true),
+        ("b.txt", "one\n", true),
+    ])];
     assert_eq!(nothing_lost(&made, &kept), Ok(()));
 }

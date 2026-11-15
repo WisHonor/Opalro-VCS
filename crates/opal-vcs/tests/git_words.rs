@@ -332,7 +332,8 @@ fn merge_abort_names_undo() {
     let said = explained(&env, &["merge", "--abort"]);
     assert_eq!(
         said,
-        "`opalro undo` takes back the last combine, conflicts and all.\n"
+        "`opalro undo` takes back the last step;\nright after a combine, that is the combine, \
+         conflicts and all.\n"
     );
 }
 

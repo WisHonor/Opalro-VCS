@@ -171,11 +171,12 @@ enum Command {
         #[arg(long)]
         only_if_clean: bool,
     },
-    /// Record fixed conflicts, either every one your folder shows fixed or those at the paths you
-    /// name.
+    /// Record fixed conflicts: every one your folder shows fixed, or those at or below the paths
+    /// you name.
     Resolve {
-        /// Files, folders and patterns (such as "*.png"), as save takes them; a folder means every
-        /// conflict below it, a pattern every conflict it matches.
+        /// Files, folders and patterns (such as "*.png"), as save takes them. A file is recorded as
+        /// it stands; a folder or a pattern records only the fixed conflicts in it, or, with
+        /// --keep, every one.
         paths: Vec<PathBuf>,
         /// Take this side's version, whole, at each path.
         #[arg(long, value_enum, requires = "paths", conflicts_with = "copy")]

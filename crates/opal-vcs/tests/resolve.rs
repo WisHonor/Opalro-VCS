@@ -923,3 +923,36 @@ fn a_hostile_path_is_escaped_in_the_default_messages_outcome() {
     support::assert_escaped(&shown, "resolve --keep");
     support::assert_escaped(&said, "resolve --keep");
 }
+
+/// Two lines that parted at a save holding `a.txt` in conflict fix it differently, then are
+/// combined: Opalro can't tell what was there where they parted, and `--copy before` says so in
+/// the sentence that is true whether nothing was there or Opalro can't tell what was.
+#[test]
+fn copy_before_where_opalro_cant_tell_what_was_there_says_it_has_no_version() {
+    let env = project();
+    one_conflict(&env);
+    run(&env, &["line", "new", "fix-one"], 0);
+    env.overwrite("a.txt", "1\nX\n3\n4\n5\n6\n7\n8\n");
+    run(&env, &["resolve"], 0);
+    run(&env, &["goto", "main"], 0);
+    run(&env, &["line", "new", "fix-two"], 0);
+    env.overwrite("a.txt", "1\nY\n3\n4\n5\n6\n7\n8\n");
+    run(&env, &["resolve"], 0);
+    run(&env, &["combine", "fix-one"], 0);
+    let marked = std::fs::read_to_string(env.root().join("a.txt")).unwrap();
+    assert!(marked.contains("which Opalro can't tell here"), "{marked}");
+    let to = env.config().join("before.txt");
+    let to = to.to_str().unwrap();
+    let (shown, said) = run(
+        &env,
+        &["resolve", "a.txt", "--copy", "before", "--to", to],
+        1,
+    );
+    assert_eq!(shown, "");
+    assert_eq!(
+        said,
+        "error: Opalro has no version of a.txt from where the lines parted (nothing was there, or \
+         Opalro can't tell what was), so there is nothing to copy.\n"
+    );
+    assert!(!Path::new(to).exists());
+}

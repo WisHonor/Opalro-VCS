@@ -4444,6 +4444,11 @@ fn only_if_clean_with_nothing_to_combine_stops_on_a_line_that_holds_a_conflict()
         "Combining side into main would leave 1 place in conflict, so nothing was changed \
          (--only-if-clean).\nmain holds it in conflict already."
     );
+    // A run without the flag would only say there is nothing to combine.
+    assert_eq!(
+        err.hint().unwrap(),
+        "opalro status lists what is in conflict here, and opalro resolve records your fixes."
+    );
     assert_untouched(&h, &before);
     // Without the flag there is nothing to combine, as before.
     h.keep = Keep::Conflicts;
@@ -7793,6 +7798,52 @@ fn moved_and_removed_keeps_the_moved_file_where_it_went() {
     assert_eq!(paths_of(&h, m.root), ["Characters", at, "Other.cs"]);
 }
 
+/// A move against a folder put at the moved file's old place is no clash of its own: the moved
+/// file is taken where it went, and the old place keeps a conflict whose versions are the file
+/// where the lines parted and the folder, the moving line counted as having removed the file
+/// there; every version either line saved is kept.
+#[test]
+fn a_file_moved_where_the_other_line_put_a_folder_at_its_old_place() {
+    let mut h = Hist::new();
+    let s = player(&mut h);
+    let at = "Characters/Player.cs";
+    let moved = h.save("main", s, &moved_to(at, f(BODY)));
+    let mut folder = moved_to("Player.cs/inner.txt", f("inner\n"));
+    folder.remove(at);
+    let folder = h.save("side", s, &folder);
+    let paths = ["Characters", at, "Other.cs", "Player.cs"];
+    // Moved on main, the folder on side; then the other way round.
+    let m = h.kept(s, moved, folder, &no_rules());
+    let removed = |removed_on| Clash::ChangedRemoved { removed_on };
+    assert_eq!(
+        m.conflicts,
+        [kept_at("Player.cs", removed(Side::Ours), Stands::Nothing)]
+    );
+    assert_eq!(
+        record_in(&h, m.root, "Player.cs").1,
+        [None, Some(f(BODY)), Some(V::Folder)]
+    );
+    assert_eq!(
+        read_tree(h.repo.store(), m.root, &HashMap::new())[at],
+        f(BODY)
+    );
+    assert_eq!(paths_of(&h, m.root), paths);
+    let m = h.kept(s, folder, moved, &no_rules());
+    assert_eq!(
+        m.conflicts,
+        [kept_at("Player.cs", removed(Side::Theirs), Stands::Yours)]
+    );
+    assert_eq!(
+        record_in(&h, m.root, "Player.cs").1,
+        [Some(V::Folder), Some(f(BODY)), None]
+    );
+    assert_eq!(
+        read_tree(h.repo.store(), m.root, &HashMap::new())[at],
+        f(BODY)
+    );
+    assert_eq!(paths_of(&h, m.root), paths);
+}
+
 /// On `main`, `Player.cs` moved to `Characters/Player.cs`; on `side`, something new put there
 /// and `Player.cs` held as `old`. Gives the three saves.
 fn moved_onto_new(h: &mut Hist, old: V) -> (Id, Id, Id) {
@@ -8303,6 +8354,7 @@ fn nothing_a_line_saved_is_left_out() {
         "moved onto",
         "move clash place below a conflict",
         "move clash place held alike",
+        "moved, changed on the other line",
     ] {
         assert!(seen.get(kind).is_some_and(|&n| n >= 3), "{seen:?}");
     }

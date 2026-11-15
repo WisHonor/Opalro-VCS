@@ -1,0 +1,26 @@
+   Compiling opal-vcs v0.1.0 (/work/crates/opal-vcs)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.39s
+     Running tests/rt22_memory.rs (target/debug/deps/rt22_memory-89bb8d812bff8ef1)
+
+running 1 test
+plain=true n=250000 store=4KB ["status"]: code Some(0) 1.9s peak 86 MB 
+plain=true n=250000 store=4KB ["goto", "main"]: code Some(0) 5.3s peak 80 MB 
+plain=true n=250000 store=4KB ["show"]: code Some(0) 2.0s peak 14 MB 
+plain=true n=250000 store=4KB ["changes", "--save", "main"]: code Some(0) 6.5s peak 14 MB 
+plain=true n=250000 store=4KB ["resolve"]: code Some(0) 0.8s peak 54 MB 
+plain=true n=250000 store=4KB ["tidy"]: code Some(0) 0.2s peak 13 MB 
+plain=true n=250000 store=4KB ["verify"]: code Some(0) 0.2s peak 11 MB 
+plain=true n=250000 store=4KB ["save", "again"]: code Some(0) 0.8s peak 16 MB 
+plain=false n=250000 store=42842KB ["status"]: code Some(0) 26.8s peak 196 MB 
+test rt22_memory_of_many_wide_records has been running for over 60 seconds
+plain=false n=250000 store=42842KB ["goto", "main"]: code Some(0) 70.4s peak 95 MB 
+plain=false n=250000 store=42842KB ["show"]: code Some(0) 2.6s peak 14 MB 
+plain=false n=250000 store=42842KB ["changes", "--save", "main"]: code Some(0) 2.0s peak 13 MB 
+plain=false n=250000 store=42842KB ["resolve"]: code Some(0) 27.5s peak 196 MB 
+plain=false n=250000 store=42842KB ["tidy"]: code Some(0) 27.4s peak 111 MB 
+plain=false n=250000 store=42842KB ["verify"]: code Some(1) 95.5s peak 336 MB hint: Opalro can't repair a project in this version. Saves that don't use the damaged or missing data still work; keep any other copy of this project safe.
+plain=false n=250000 store=42842KB ["save", "again"]: code Some(0) 27.7s peak 182 MB 
+test rt22_memory_of_many_wide_records ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 305.94s
+
