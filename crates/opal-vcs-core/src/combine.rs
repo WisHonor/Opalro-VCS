@@ -871,6 +871,12 @@ fn put_places(
                     continue 'places;
                 }
             }
+            // Where both lines hold the very same entry there is nothing to settle: it is taken.
+            let version = |e: &Option<Entry>| e.as_ref().map(|e| (e.kind, e.id));
+            let [yours, _, theirs] = &p.terms;
+            if version(yours) == version(theirs) {
+                continue;
+            }
             let plain = result
                 .entry(&p.path)?
                 .is_some_and(|e| e.kind != EntryKind::Conflict);

@@ -3105,7 +3105,8 @@ fn a_walk_over_saves_with_notes_builds_none() {
 /// the index of the file among those there and of where it goes: onto a start file still there
 /// it replaces it unnoted, unless that file is removed in a save of its own first (`true`).
 /// Then up to 2 changes saved together: an edit of a file's middle line (0), a removal (1), a new
-/// file where a start file no longer is (2), a start file made a folder (3), or a file `d` (4).
+/// file where a start file no longer is (2), a start file made a folder (3), a file `d` (4), or a
+/// copy of the file at `t1` at `t0` or the other way round (5, drawn only on purpose).
 /// The side's newest save is merged as a made-up version, followed by contents only, when
 /// `made_up`.
 #[derive(Debug, Clone)]
@@ -3224,6 +3225,18 @@ fn do_work(
                     files.insert(format!("{path}/in"), f(&format!("in {path} on {line}\n")));
                 }
             }
+            5 => {
+                // A copy of the file at `t1` put at `t0`, or of the one at `t0` at `t1`.
+                for (from, to) in [("t1", "t0"), ("t0", "t1")] {
+                    if let Some(v) = files.get(from).cloned()
+                        && !files.contains_key(to)
+                        && can_make(&files, to)
+                    {
+                        files.insert(to.to_owned(), v);
+                        break;
+                    }
+                }
+            }
             _ => {
                 if !files.contains_key("d") && can_make(&files, "d") {
                     files.insert("d".to_owned(), f(&format!("d on {line}\n")));
@@ -3284,9 +3297,20 @@ fn by_contents(start: &Tree, side: &Tree) -> Vec<(String, String)> {
         .collect()
 }
 
-/// The cases `following_moves_agrees_with_a_model` draws: two lines' work, and a fifth of the time
-/// a file that arrived where one was: one line empties `s0` or `s1` and moves another file there,
-/// noted, while the other line edits the file that was there.
+/// Two lines that moved one file apart, `s<k>` to `t0` on ours and to `t1` on theirs, where one or
+/// both of them also hold a copy of their moved file at the other's place: a place held alike.
+fn held_alike() -> impl Strategy<Value = (usize, Work, Work)> {
+    (1..=6usize, 0..6usize, 0..3u8).prop_map(|(n, k, which)| {
+        let copy = |on: bool| if on { vec![(0, 5)] } else { vec![] };
+        let ours = worked(&[(k, 0, false)], &copy(which != 1));
+        let theirs = worked(&[(k, 1, false)], &copy(which != 0));
+        (n, ours, theirs)
+    })
+}
+
+/// The cases `following_moves_agrees_with_a_model` draws: two lines' work, and on purpose a file
+/// that arrived where one was (one line empties `s0` or `s1` and moves another file there, noted,
+/// while the other line edits the file that was there), and a place a file went held alike.
 fn moves_cases() -> impl Strategy<Value = (usize, Work, Work)> {
     let arrival =
         (2..=6usize, 0..6usize, 6..8usize, any::<bool>()).prop_map(|(n, pick, to, swap)| {
@@ -3298,7 +3322,7 @@ fn moves_cases() -> impl Strategy<Value = (usize, Work, Work)> {
                 (n, arrived, edited)
             }
         });
-    prop_oneof![4 => (1..=6usize, work(), work()), 1 => arrival]
+    prop_oneof![4 => (1..=6usize, work(), work()), 1 => arrival, 1 => held_alike()]
 }
 
 #[test]
@@ -3332,6 +3356,8 @@ fn following_moves_agrees_with_a_model() {
         assert!(kinds.get(kind).is_some_and(|&n| n >= 5), "{kinds:?}");
     }
     assert!(kinds.get("arrived").is_some_and(|&n| n >= 3), "{kinds:?}");
+    let alike = ALIKE_PLACES.with(std::cell::Cell::get);
+    assert!(alike >= 3, "{alike} places held alike");
 }
 
 fn worked(moves: &[(usize, usize, bool)], changes: &[(usize, u8)]) -> Work {
@@ -3400,6 +3426,11 @@ fn start_files(n: usize) -> Tree {
             (format!("s{i}"), f(&text))
         })
         .collect()
+}
+
+thread_local! {
+    /// How many places a file went two ways that both lines hold alike `moves_case` has met.
+    static ALIKE_PLACES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Builds a start of `n` files, does `ours` and `theirs` on two lines, and checks the merge that
@@ -3616,6 +3647,13 @@ fn moves_case(
         // A move clash's place is named, and kept, only where the merge left a plain entry
         // under plain folders: a conflict at it or above it holds what each line has there.
         for (at, (clash, from)) in &places {
+            // Both lines hold the very same file there: nothing to settle, it is taken.
+            if node(&three[1], at) == node(&three[2], at) {
+                if !keep {
+                    ALIKE_PLACES.with(|n| n.set(n.get() + 1));
+                }
+                continue;
+            }
             let plain = |p: &str| want.files.get(p).is_some_and(|v| *v == V::Folder);
             let open = crate::scope::ancestors(at).all(plain)
                 && want.files.get(at).is_some_and(|v| *v != KEPT);
@@ -7415,7 +7453,6 @@ fn moved_apart_keeps_two_conflicts() {
 /// where ours has something of its own at `B`. At `A` both lines hold the same file: it is taken
 /// once, and only `B` clashes, as two added things.
 #[test]
-#[ignore = "F2: a file moved to two places keeps a conflict where both lines hold the very same file"]
 fn moved_apart_where_both_lines_hold_the_same_file_at_one_place_keeps_no_conflict_there() {
     let mut h = Hist::new();
     let s = player(&mut h);
@@ -7439,6 +7476,149 @@ fn moved_apart_where_both_lines_hold_the_same_file_at_one_place_keeps_no_conflic
     assert_eq!(merged["A/Player.cs"], f(BODY));
     let (_, terms) = record_in(&h, m.root, "B/Player.cs");
     assert_eq!(terms, [Some(f("mine\n")), None, Some(f(BODY))]);
+}
+
+/// `moved_apart_where_both_lines_hold_the_same_file_at_one_place_keeps_no_conflict_there` the
+/// other way round: the place held alike is where theirs moved it.
+#[test]
+fn moved_apart_where_both_lines_hold_the_same_file_at_theirs_place_keeps_no_conflict_there() {
+    let mut h = Hist::new();
+    let s = player(&mut h);
+    let o = h.save("main", s, &moved_to("A/Player.cs", f(BODY)));
+    let mut copied = moved_to("A/Player.cs", f(BODY));
+    copied.insert("B/Player.cs".to_owned(), f(BODY));
+    let o = h.save("main", o, &copied);
+    let mut theirs = moved_to("B/Player.cs", f(BODY));
+    theirs.insert("A/Player.cs".to_owned(), f("mine\n"));
+    let t = h.save("side", s, &theirs);
+    let m = h.kept(s, o, t, &no_rules());
+    let onto = Clash::MovedOnto {
+        moved_on: Side::Ours,
+        from: "Player.cs".into(),
+    };
+    let places: Vec<(&str, &Clash)> = (m.conflicts.iter())
+        .map(|c| (c.path.as_str(), &c.clash))
+        .collect();
+    assert_eq!(places, [("A/Player.cs", &onto)]);
+    let merged = read_tree(h.repo.store(), m.root, &HashMap::new());
+    assert_eq!(merged["B/Player.cs"], f(BODY));
+    let (_, terms) = record_in(&h, m.root, "A/Player.cs");
+    assert_eq!(terms, [Some(f(BODY)), None, Some(f("mine\n"))]);
+}
+
+#[test]
+fn moved_apart_where_both_lines_hold_the_same_file_at_both_places_keeps_no_conflict() {
+    let mut h = Hist::new();
+    let s = player(&mut h);
+    let both = with_folders(&tree(&[
+        ("A/Player.cs", f(BODY)),
+        ("B/Player.cs", f(BODY)),
+        ("Other.cs", f("other\n")),
+    ]));
+    let o = h.save("main", s, &moved_to("A/Player.cs", f(BODY)));
+    let o = h.save("main", o, &both);
+    let t = h.save("side", s, &moved_to("B/Player.cs", f(BODY)));
+    let t = h.save("side", t, &both);
+    assert_eq!(h.merged(s, o, t), both);
+    let m = h.kept(s, o, t, &no_rules());
+    assert!(m.conflicts.is_empty(), "{:?}", m.conflicts);
+    assert_eq!(read_tree(h.repo.store(), m.root, &HashMap::new()), both);
+}
+
+#[test]
+fn moved_and_removed_where_the_other_line_holds_the_same_file_where_it_went_keeps_no_conflict() {
+    // A second start file with the same contents, so that the line that removed `Player.cs` is
+    // not followed by contents to its own copy.
+    let mut h = Hist::new();
+    let first = h.first;
+    let start = [
+        ("Player.cs", f(BODY)),
+        ("Copy.cs", f(BODY)),
+        ("Other.cs", f("other\n")),
+    ];
+    let s = h.save("main", first, &tree(&start));
+    let ours = [
+        ("A/Player.cs", f(BODY)),
+        ("Copy.cs", f(BODY)),
+        ("Other.cs", f("other\n")),
+    ];
+    let o = h.save("main", s, &tree(&ours));
+    let mut added = tree(&start);
+    added.insert("A/Player.cs".to_owned(), f(BODY));
+    let t = h.save("side", s, &added);
+    let theirs = [("A/Player.cs", f(BODY)), ("Other.cs", f("other\n"))];
+    let t = h.save("side", t, &tree(&theirs));
+    assert_eq!(
+        h.followed(h.version(s), h.version(o)),
+        pairs(&[("Player.cs", "A/Player.cs")])
+    );
+    assert_eq!(h.followed(h.version(s), h.version(t)), pairs(&[]));
+    let want = with_folders(&tree(&theirs));
+    assert_eq!(h.merged(s, o, t), want);
+    let m = h.kept(s, o, t, &no_rules());
+    assert!(m.conflicts.is_empty(), "{:?}", m.conflicts);
+    assert_eq!(read_tree(h.repo.store(), m.root, &HashMap::new()), want);
+}
+
+#[test]
+fn moved_apart_alike_but_for_the_executable_mark_keeps_the_two_added_files() {
+    // Not the very same entry: the two are kept as two added things, standing as yours.
+    let mut h = Hist::new();
+    let s = player(&mut h);
+    let o = h.plant(
+        &[s],
+        &moved_to("A/Player.cs", f(BODY)),
+        Some(&[("Player.cs", "A/Player.cs")]),
+    );
+    let run = V::File(BODY.as_bytes().to_vec(), true);
+    let mut theirs = moved_to("B/Player.cs", f(BODY));
+    theirs.insert("A/Player.cs".to_owned(), run.clone());
+    let t = h.plant(&[s], &theirs, Some(&[("Player.cs", "B/Player.cs")]));
+    let m = h.kept(s, o, t, &no_rules());
+    let onto = Clash::MovedOnto {
+        moved_on: Side::Ours,
+        from: "Player.cs".into(),
+    };
+    let apart = Clash::MovedApart {
+        from: "Player.cs".into(),
+        moved_on: Side::Theirs,
+        other_to: "A/Player.cs".into(),
+    };
+    assert_eq!(
+        m.conflicts,
+        [
+            kept_at("A/Player.cs", onto, Stands::Yours),
+            kept_at("B/Player.cs", apart, Stands::Nothing),
+        ]
+    );
+    assert_eq!(
+        record_in(&h, m.root, "A/Player.cs").1,
+        [Some(f(BODY)), None, Some(run)]
+    );
+}
+
+#[test]
+fn moved_apart_into_a_folder_both_lines_hold_alike_keeps_no_conflict_there() {
+    // A place is a file; what can be alike above it is a folder, taken once whole.
+    let mut h = Hist::new();
+    let s = player(&mut h);
+    let o = h.save("main", s, &moved_to("d/Player.cs", f(BODY)));
+    let t = h.save("side", s, &moved_to("B/Player.cs", f(BODY)));
+    let mut copied = moved_to("B/Player.cs", f(BODY));
+    copied.insert("d/Player.cs".to_owned(), f(BODY));
+    let t = h.save("side", t, &copied);
+    let m = h.kept(s, o, t, &no_rules());
+    let apart = Clash::MovedApart {
+        from: "Player.cs".into(),
+        moved_on: Side::Theirs,
+        other_to: "d/Player.cs".into(),
+    };
+    assert_eq!(
+        m.conflicts,
+        [kept_at("B/Player.cs", apart, Stands::Nothing)]
+    );
+    let merged = read_tree(h.repo.store(), m.root, &HashMap::new());
+    assert_eq!(merged["d/Player.cs"], f(BODY));
 }
 
 #[test]
@@ -7831,7 +8011,7 @@ fn cases_near_d() -> impl Strategy<Value = (usize, Work, Work)> {
                 (n, into_d, file_d)
             }
         });
-    prop_oneof![3 => (1..=6usize, work(), work()), 1 => nested]
+    prop_oneof![3 => (1..=6usize, work(), work()), 1 => nested, 1 => held_alike()]
 }
 
 /// Each non-folder entry below the stored listing `root`, by path, as its kind and ID.
@@ -7916,15 +8096,16 @@ fn nothing_a_line_saved_is_left_out() {
                         continue;
                     }
                     // The one merge that keeps no copy of `x`: the line only moved the start's
-                    // file from `q`, the other line changed it there, and that change followed
-                    // the move to `p`.
+                    // file from `q`, the other line changed it, there or after moving it to `p`
+                    // too, and that change is what the result holds at `p`.
                     let followed = three[0].iter().any(|(q, start)| {
+                        let changed = |y: &(u8, Id)| y != x && plain_at.get(p) == Some(y);
                         q != p
                             && start == x
                             && three[i].get(q) != Some(x)
-                            && three[other]
-                                .get(q)
-                                .is_some_and(|y| y != x && plain_at.get(p) == Some(y))
+                            && (three[other].get(q).is_some_and(changed)
+                                || (!three[other].contains_key(q)
+                                    && three[other].get(p).is_some_and(changed)))
                     });
                     prop_assert!(followed, "{side}'s {p} is left out: {:?}", m.conflicts);
                     *seen.entry("moved, changed on the other line").or_default() += 1;
@@ -7941,6 +8122,9 @@ fn nothing_a_line_saved_is_left_out() {
                     _ => vec![],
                 };
                 for at in places {
+                    if three[1].get(at.as_str()) == three[2].get(at.as_str()) {
+                        *seen.entry("move clash place held alike").or_default() += 1;
+                    }
                     if crate::scope::ancestors(at).any(|up| conflicts_at.contains(up)) {
                         *seen.entry("move clash place below a conflict").or_default() += 1;
                     }
@@ -7955,6 +8139,7 @@ fn nothing_a_line_saved_is_left_out() {
         "moved, removed",
         "moved onto",
         "move clash place below a conflict",
+        "move clash place held alike",
     ] {
         assert!(seen.get(kind).is_some_and(|&n| n >= 3), "{seen:?}");
     }

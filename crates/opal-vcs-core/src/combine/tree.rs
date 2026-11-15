@@ -523,8 +523,10 @@ impl Walk<'_> {
             });
         }
         // Starting points that disagree here, or a conflict where the lines parted that each changed
-        // its own way since: what it held is unknown, never absent.
-        if unknown || (held(&s) && self.keeping().is_some()) {
+        // its own way since: what it held is unknown, never absent. Named so whether or not this
+        // combine keeps conflicts, wherever the project does.
+        let parted_in_conflict = !self.inner && (self.made.keeps || self.made.keep.is_some());
+        if unknown || (held(&s) && parted_in_conflict) {
             return self.no_start(
                 path,
                 name,

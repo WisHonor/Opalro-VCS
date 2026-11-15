@@ -4591,14 +4591,12 @@ fn a_start_in_conflict_that_both_lines_fixed_is_unknown() {
 }
 
 #[test]
-#[ignore = "the engine names this place \"only files are merged line by line\" under --only-if-clean"]
 fn a_start_in_conflict_that_both_lines_fixed_is_unknown_when_asked_for_a_clean_line() {
     run(&parted_in_conflict(true));
 }
 
 /// The seed's history: a file moved to two places where both lines hold it alike at one of them.
 #[test]
-#[ignore = "F2: a file moved to two places keeps a conflict where both lines hold the very same file"]
 fn a_file_moved_to_two_places_held_alike_at_one_is_no_conflict_there() {
     run(&[
         Act::Big("d/a", 0, 1_048_576),
