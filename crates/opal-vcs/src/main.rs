@@ -171,9 +171,11 @@ enum Command {
         #[arg(long)]
         only_if_clean: bool,
     },
-    /// Record fixed conflicts: all the folder shows fixed, or these paths.
+    /// Record fixed conflicts, either every one your folder shows fixed or those at the paths you
+    /// name.
     Resolve {
-        /// Files and folders in conflict; a folder means every conflict below it.
+        /// Files, folders and patterns (such as "*.png"), as save takes them; a folder means every
+        /// conflict below it, a pattern every conflict it matches.
         paths: Vec<PathBuf>,
         /// Take this side's version, whole, at each path.
         #[arg(long, value_enum, requires = "paths", conflicts_with = "copy")]
@@ -2487,7 +2489,7 @@ fn resolve_command(
     let drive = repo.drive()?;
     let paths = given
         .iter()
-        .map(|p| project_path(repo.root(), &here, p, drive))
+        .map(|p| project_given(repo.root(), &here, p, drive))
         .collect::<Result<Vec<_>, _>>()?;
     let who = now_person(&load_identity(Some(repo.root()))?);
     let git_excludes = git_excludes_file(repo.root())?;

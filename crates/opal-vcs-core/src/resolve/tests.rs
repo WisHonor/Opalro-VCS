@@ -138,7 +138,8 @@ impl Fx {
         accept_crlf: bool,
         ask: &mut dyn FnMut(&Ask) -> bool,
     ) -> Result<ResolveOutcome, ResolveError> {
-        let paths: Option<Vec<String>> = paths.map(|p| p.iter().map(|s| (*s).to_owned()).collect());
+        let paths: Option<Vec<Given>> =
+            paths.map(|p| p.iter().map(|s| Given::Path((*s).to_owned())).collect());
         let who = ada();
         let req = ResolveRequest {
             paths: paths.as_deref(),

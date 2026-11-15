@@ -364,14 +364,20 @@ impl SaveError {
     /// What the user can do next after a save, if there is something to say.
     #[must_use]
     pub fn hint(&self) -> Option<String> {
-        self.next_step(true)
+        self.next_step(Shown::Saving)
     }
 
     /// The same, for a command that only reads the folder, such as `status`: nothing was going
     /// to be saved.
     #[must_use]
     pub fn hint_when_reading(&self) -> Option<String> {
-        self.next_step(false)
+        self.next_step(Shown::Reading)
+    }
+
+    /// The same, for `resolve`, which records fixes through a save's checks.
+    #[must_use]
+    pub fn hint_when_resolving(&self) -> Option<String> {
+        self.next_step(Shown::Resolving)
     }
 
     /// This error, met reading the folders of the save `save`: a spelling of `.opalro` is told as
@@ -384,18 +390,35 @@ impl SaveError {
         }
     }
 
-    fn next_step(&self, saving: bool) -> Option<String> {
+    fn next_step(&self, shown: Shown) -> Option<String> {
+        let resolving = shown == Shown::Resolving;
+        let again = if resolving {
+            "then run opalro resolve again"
+        } else {
+            "then save again"
+        };
         let step = match self {
             SaveError::Repo(e) => return e.hint(),
             SaveError::InTheWay { path, .. } | SaveError::ConflictInTheWay { path, .. } => {
                 let path = escape(path, false);
-                if saving {
-                    format!("Rename or move {path}, then save again.")
-                } else {
+                if shown == Shown::Reading {
                     format!("Rename or move {path}.")
+                } else {
+                    format!("Rename or move {path}, {again}.")
                 }
             }
             // `git checkout` alone skips files whose stat data the index matches.
+            SaveError::LineEndingsChanged { .. } if resolving => {
+                return Some(
+                    "To keep history as Git stored it, commit or stash your changes in Git, then \
+                     run `git config core.autocrlf false`, `git rm --cached -r -q :/` and `git \
+                     reset --hard`, then run opalro resolve again. Files `.gitattributes` marks \
+                     `eol=crlf` stay CRLF after those steps, and --accept-crlf then records just \
+                     those. To record the files with CRLF anyway, run the same command again \
+                     with --accept-crlf."
+                        .to_owned(),
+                );
+            }
             SaveError::LineEndingsChanged { .. } => {
                 return Some(
                     "To keep history as Git stored it, commit or stash your changes in Git, then \
@@ -406,12 +429,11 @@ impl SaveError {
                         .to_owned(),
                 );
             }
-            SaveError::LfsPointersInFolder { .. } => {
-                "Run `git lfs checkout` to have Git LFS write the files, then save again. If Git \
-                 LFS can't, `opalro discard` with those paths puts back the files the import \
-                 brought in."
-                    .into()
-            }
+            SaveError::LfsPointersInFolder { .. } => format!(
+                "Run `git lfs checkout` to have Git LFS write the files, {again}. If Git LFS \
+                 can't, `opalro discard` with those paths puts back the files the import brought \
+                 in."
+            ),
             SaveError::NeedsMessage => {
                 "Say what you changed: opalro save \"describe your change\"".into()
             }
@@ -444,6 +466,10 @@ impl SaveError {
             // `.opalroignore` that isn't a regular file.
             SaveError::Ignore { .. } => "Fix that ignore file and try again.".into(),
             SaveError::TooLarge { .. } => "List the deep or huge folder in .opalroignore.".into(),
+            SaveError::LargeSave(_) if resolving => "To record them, run opalro resolve again \
+                                                     with --yes; to leave some out, list them in \
+                                                     .opalroignore."
+                .into(),
             SaveError::LargeSave(_) => "To save them, run the save again with --yes; to leave \
                                         some out, list them in .opalroignore."
                 .into(),
@@ -458,12 +484,20 @@ impl SaveError {
                     .into()
             }
         };
-        Some(if saving {
-            format!("Nothing was saved. {step}")
-        } else {
-            step
+        Some(match shown {
+            Shown::Saving => format!("Nothing was saved. {step}"),
+            Shown::Resolving => format!("Nothing was recorded. {step}"),
+            Shown::Reading => step,
         })
     }
+}
+
+/// The command a save's refusal is shown by, which its hint speaks of.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Shown {
+    Saving,
+    Reading,
+    Resolving,
 }
 
 /// Saves the project folder on the current line, or in place of its newest save for an amend.
@@ -3638,6 +3672,78 @@ mod tests {
         // A link, a pipe, a huge file or one Opalro can't read has no pattern to fix.
         let hint = SaveError::Ignore { detail: "x".into() }.hint().unwrap();
         assert!(!hint.contains("pattern"), "{hint}");
+    }
+
+    /// What `save` and `resolve` each say after the refusals `resolve` can meet.
+    #[test]
+    fn resolve_speaks_of_itself_in_a_saves_hints() {
+        let path = || "a.txt".to_owned();
+        let errors = [
+            SaveError::LineEndingsChanged {
+                count: 1,
+                first: vec![path()],
+            },
+            SaveError::InvalidName {
+                path: path(),
+                reason: "why".into(),
+            },
+            SaveError::NotPortable { problems: vec![] },
+            SaveError::LargeSave(LargeSave {
+                new_files: 1,
+                new_bytes: 1,
+                biggest_folders: vec![],
+            }),
+            SaveError::ChangedDuringSave { path: path() },
+            SaveError::InTheWay {
+                path: path(),
+                kept: "b".into(),
+            },
+            SaveError::ConflictInTheWay {
+                path: path(),
+                kept: "b".into(),
+            },
+            SaveError::KeptWhole { path: path() },
+            SaveError::LfsPointersInFolder {
+                paths: vec![path()],
+                count: 1,
+            },
+        ];
+        for e in &errors {
+            let (saving, resolving) = (e.hint().unwrap(), e.hint_when_resolving().unwrap());
+            assert!(!resolving.contains("save again"), "{resolving}");
+            assert!(!resolving.contains("Nothing was saved"), "{resolving}");
+            if saving.starts_with("Nothing was saved. ") {
+                assert!(
+                    resolving.starts_with("Nothing was recorded. "),
+                    "{resolving}"
+                );
+            }
+        }
+        let large = errors[3].hint_when_resolving().unwrap();
+        assert_eq!(
+            large,
+            "Nothing was recorded. To record them, run opalro resolve again with --yes; to leave \
+             some out, list them in .opalroignore."
+        );
+        let in_the_way = errors[5].hint_when_resolving().unwrap();
+        assert_eq!(
+            in_the_way,
+            "Nothing was recorded. Rename or move a.txt, then run opalro resolve again."
+        );
+        // Save's own words don't change.
+        assert_eq!(
+            errors[3].hint().unwrap(),
+            "Nothing was saved. To save them, run the save again with --yes; to leave some out, \
+             list them in .opalroignore."
+        );
+        assert_eq!(
+            errors[5].hint().unwrap(),
+            "Nothing was saved. Rename or move a.txt, then save again."
+        );
+        assert_eq!(
+            errors[5].hint_when_reading().unwrap(),
+            "Rename or move a.txt."
+        );
     }
 
     #[test]

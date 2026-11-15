@@ -190,7 +190,7 @@ pub fn examples(command: &str) -> &'static [(&'static str, &'static str)] {
                 "Take the other line's version of a file",
             ),
             (
-                "opalro resolve Hero.png --copy theirs --to ~/Desktop/Hero-theirs.png",
+                "opalro resolve Hero.png --copy theirs --to Hero-theirs.png",
                 "Look at the other line's version first",
             ),
         ],

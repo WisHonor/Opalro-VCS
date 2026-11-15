@@ -22,7 +22,7 @@ use crate::names::Given;
 use crate::pack::PackSet;
 use crate::repo::{ChangeLock, RepoError, Repository};
 use crate::save::{Person, Save};
-use crate::scope::within;
+use crate::scope::{Scope, within};
 use crate::snapshot::{
     LargeSave, Made, SaveError, SaveRequest, base_limits, compose, keep_file_cache, notes_against,
     read_and_build, save_before, shown_elsewhere, store_listing,
@@ -63,8 +63,9 @@ impl From<Side> for Pick {
 }
 
 pub struct ResolveRequest<'a> {
-    /// Places named, a folder standing for every place below it; `None` records every fixed one.
-    pub paths: Option<&'a [String]>,
+    /// Places named, a folder standing for every place below it, and patterns, each standing for
+    /// every place it matches; `None` records every fixed one.
+    pub paths: Option<&'a [Given]>,
     /// The side kept whole at each place named; refused without paths.
     pub keep: Option<Side>,
     pub who: &'a Person,
@@ -133,6 +134,11 @@ pub enum ResolveError {
     KeepNeedsPlaces,
     #[error("{} isn't in conflict, so nothing was recorded.", escape(path, false))]
     NotInConflict { path: String },
+    #[error(
+        "Nothing in conflict matches {}, so nothing was recorded.",
+        escape(pattern, false)
+    )]
+    NothingMatches { pattern: String },
     #[error("{}", still_yours(paths))]
     StillYours { paths: Vec<String> },
     #[error("{} still has {}, so nothing was recorded.", escape(path, false), marked(*left))]
@@ -195,7 +201,7 @@ impl ResolveError {
             ResolveError::KeepNeedsPlaces => {
                 "Name them: opalro resolve <path> --keep mine (or theirs).".into()
             }
-            ResolveError::NotInConflict { .. } => {
+            ResolveError::NotInConflict { .. } | ResolveError::NothingMatches { .. } => {
                 "opalro status lists the places in conflict.".into()
             }
             ResolveError::StillYours { .. } => {
@@ -212,7 +218,7 @@ impl ResolveError {
             ResolveError::CantPickSide { copying: true, .. } => {
                 "It names more than two versions; opalro status lists it.".into()
             }
-            ResolveError::Save(e) => return e.hint(),
+            ResolveError::Save(e) => return e.hint_when_resolving(),
             ResolveError::Switch(e) => return e.hint(),
             ResolveError::Repo(e) => return e.hint(),
             _ => return None,
@@ -420,7 +426,8 @@ fn resolve_locked(
 }
 
 /// The places to record, as stored, in path order. With paths, every place at or below each,
-/// matched as the drive matches names; without, every place the folder shows fixed. Without
+/// matched as the drive matches names, and every place a pattern matches (only those the folder
+/// shows fixed, without `keep`); without, every place the folder shows fixed. Without
 /// `keep`, a place is recorded only where the folder shows a decision: a version still standing
 /// as yours, as the combine left it, is refused, and markers left are asked about.
 fn choose<'c>(
@@ -440,14 +447,37 @@ fn choose<'c>(
                 .map(|c| fold_path(&c.path, drive))
                 .collect();
             let mut named = BTreeSet::new();
-            for path in paths {
-                let top = fold_path(path, drive);
-                let below: Vec<usize> = (0..conflicts.len())
-                    .filter(|&i| within(&folded[i], &top))
-                    .collect();
-                if below.is_empty() {
-                    return Err(ResolveError::NotInConflict { path: path.clone() });
-                }
+            for given in paths {
+                let below: Vec<usize> = match given {
+                    Given::Path(path) => {
+                        let top = fold_path(path, drive);
+                        let below: Vec<usize> = (0..conflicts.len())
+                            .filter(|&i| within(&folded[i], &top))
+                            .collect();
+                        if below.is_empty() {
+                            return Err(ResolveError::NotInConflict { path: path.clone() });
+                        }
+                        below
+                    }
+                    Given::Pattern { .. } => {
+                        let scope = Scope::new(std::slice::from_ref(given), drive);
+                        let matched: Vec<usize> = (0..conflicts.len())
+                            .filter(|&i| scope.holds(&conflicts[i].path))
+                            .collect();
+                        if matched.is_empty() {
+                            return Err(ResolveError::NothingMatches {
+                                pattern: given.shown(),
+                            });
+                        }
+                        // A pattern takes what is fixed among what it matches, as no paths do.
+                        matched
+                            .into_iter()
+                            .filter(|&i| {
+                                req.keep.is_some() || conflicts[i].seen == Some(Seen::Fixed)
+                            })
+                            .collect()
+                    }
+                };
                 named.extend(below);
             }
             named.into_iter().map(|i| &conflicts[i]).collect()

@@ -62,13 +62,20 @@ pub fn shown(done: &ResolveOutcome, keep: Option<Side>, at: &str) -> String {
         s.paint(Role::Ok, "Recorded"),
         at_save(short, Some(save))
     );
+    let one = recorded.len() == 1;
+    let them = if one { "it" } else { "them" };
     let mut details = vec![if replaced.is_some() {
-        "The combined save now holds them; its ID stays the same.".to_owned()
+        format!("The combined save now holds {them}; its ID stays the same.")
     } else if shown_by.is_empty() {
-        "Your newest save isn't a combined save, so the fixes are a save of their own.".to_owned()
+        let own = if one {
+            "the fix is a save of its own"
+        } else {
+            "the fixes are a save of their own"
+        };
+        format!("Your newest save isn't a combined save, so {own}.")
     } else {
         format!(
-            "The combined save couldn't take them: {} it too.",
+            "The combined save couldn't take {them}: {} it too.",
             who_shows(shown_by)
         )
     }];
@@ -159,15 +166,15 @@ pub fn document(done: &ResolveOutcome, warnings: &[Warning]) -> Value {
 /// `--copy`'s outcome line: `path`'s version `pick` written to `to`, as typed.
 pub fn copied(path: &str, pick: Pick, to: &str) -> String {
     let s = style::out();
-    let version = match pick {
-        Pick::Mine => "your version",
-        Pick::Theirs => "the other line's version",
-        Pick::Before => "the version where the lines parted",
+    let path = s.paint(Role::Path, &escape(path, false));
+    let what = match pick {
+        Pick::Mine => format!("your version of {path}"),
+        Pick::Theirs => format!("the other line's version of {path}"),
+        Pick::Before => format!("{path} as it was where the lines parted"),
     };
     format!(
-        "{} {version} of {} to {}.\n",
+        "{} {what} to {}.\n",
         s.paint(Role::Ok, "Wrote"),
-        s.paint(Role::Path, &escape(path, false)),
         s.paint(Role::Path, &escape(to, false))
     )
 }
@@ -184,7 +191,11 @@ pub fn copied_document(
         "opalro_json": OPALRO_JSON,
         "result": "copied",
         "path": path,
-        "version": pick.to_string(),
+        "version": match pick {
+            Pick::Mine => "mine",
+            Pick::Theirs => "theirs",
+            Pick::Before => "before",
+        },
         "to": to,
         "size": copied.size,
         "warnings": output::warnings_json(warnings),

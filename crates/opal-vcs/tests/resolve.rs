@@ -120,7 +120,7 @@ fn the_usual_path_is_short() {
         shown,
         format!(
             "Recorded 1 fix in save {id} \"Combine side into main\" on main.\n\n    The combined \
-             save now holds them; its ID stays the same.\n"
+             save now holds it; its ID stays the same.\n"
         )
     );
     assert_eq!(said, "");
@@ -157,7 +157,7 @@ fn a_tag_on_the_combined_save_makes_the_fix_a_save_of_its_own() {
         shown,
         format!(
             "Recorded 1 fix in a new save {id} \"Fixed conflicts in a.txt\" on main.\n\n    The \
-             combined save couldn't take them: tag v1.0 shows it too.\n"
+             combined save couldn't take it: tag v1.0 shows it too.\n"
         )
     );
     let (repo, state) = env.state();
@@ -178,7 +178,7 @@ fn a_save_after_the_combine_makes_the_fix_a_save_of_its_own() {
         shown,
         format!(
             "Recorded 1 fix in a new save {id} \"Fixed conflicts in a.txt\" on main.\n\n    Your \
-             newest save isn't a combined save, so the fixes are a save of their own.\n"
+             newest save isn't a combined save, so the fix is a save of its own.\n"
         )
     );
 }
@@ -368,6 +368,203 @@ fn resolve_asks_on_a_terminal_and_stops_without_one() {
     assert!(!status.contains("In conflict"), "{status}");
 }
 
+#[cfg(feature = "fault-injection")]
+#[test]
+fn yes_on_a_terminal_records_without_asking() {
+    let env = project();
+    one_conflict(&env);
+    let (code, shown, said) = asked(&env, &["resolve", "a.txt", "--yes"], "");
+    assert_eq!(code, Some(0), "{said}");
+    assert!(!said.contains("Record it"), "{said}");
+    assert!(shown.starts_with("Recorded 1 fix in save "), "{shown}");
+}
+
+/// A project whose rules ask before a save adds over 1 KiB, with `a.txt` in conflict.
+fn asks_over_a_kib() -> Env {
+    let env = project();
+    env.overwrite("opalro.toml", "ask-before-saving-over = \"1 KiB\"\n");
+    run(&env, &["save", "Rules"], 0);
+    three_conflicts(&env);
+    // A new file of bytes that don't compress, where your line removed it: over 1 KiB.
+    support::write(&env, "gone.txt", support::noise(7, 4096));
+    env
+}
+
+const LARGE_HINT: &str = "Nothing was recorded. To record them, run opalro resolve again with \
+                          --yes; to leave some out, list them in .opalroignore.";
+
+#[test]
+fn a_large_fix_without_a_terminal_stops_with_resolves_hint() {
+    let env = asks_over_a_kib();
+    let before = env.standing();
+    let (shown, said) = run(&env, &["resolve", "gone.txt"], 1);
+    assert_eq!(shown, "");
+    assert!(
+        said.ends_with(&format!("\n\nhint: {LARGE_HINT}\n")),
+        "{said}"
+    );
+    assert_eq!(env.standing(), before);
+    let doc = json(&env, &["resolve", "gone.txt"], 1);
+    assert_eq!(doc["error"]["hint"], LARGE_HINT, "{doc}");
+    let (shown, _) = run(&env, &["resolve", "gone.txt", "--yes"], 0);
+    assert!(shown.starts_with("Recorded 1 fix in save "), "{shown}");
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn a_large_fix_asks_on_a_terminal() {
+    let env = asks_over_a_kib();
+    let before = env.standing();
+    let (code, _, said) = asked(&env, &["resolve", "gone.txt"], "n\n");
+    assert_eq!(code, Some(1), "{said}");
+    assert!(said.contains(" Save them? [y/N] "), "{said}");
+    // Wrapped at the terminal's 80 columns.
+    assert!(
+        said.contains("hint: Nothing was recorded. To record them, run opalro resolve again"),
+        "{said}"
+    );
+    assert_eq!(env.standing(), before);
+    let (code, shown, said) = asked(&env, &["resolve", "gone.txt"], "y\n");
+    assert_eq!(code, Some(0), "{said}");
+    assert!(shown.starts_with("Recorded 1 fix in save "), "{shown}");
+}
+
+/// `main` and `side` changed `art/b.png` and `art/c.png` apart, combined: both stand as yours.
+fn pictures_in_art(env: &Env) {
+    for name in ["art/b.png", "art/c.png"] {
+        support::write(env, name, PIC_START);
+    }
+    run(env, &["save", "Art"], 0);
+    run(env, &["line", "new", "side"], 0);
+    for name in ["art/b.png", "art/c.png"] {
+        support::write(env, name, PIC_SIDE);
+    }
+    run(env, &["save", "On side"], 0);
+    run(env, &["goto", "main"], 0);
+    for name in ["art/b.png", "art/c.png"] {
+        support::write(env, name, PIC_MAIN);
+    }
+    run(env, &["save", "On main"], 0);
+    run(env, &["combine", "side"], 0);
+}
+
+#[test]
+fn a_pattern_with_keep_takes_every_place_it_matches() {
+    let env = project();
+    three_conflicts(&env);
+    let (shown, _) = run(&env, &["resolve", "*.txt", "--keep", "theirs"], 0);
+    assert!(shown.starts_with("Recorded 2 fixes in save "), "{shown}");
+    assert!(
+        shown.contains("\n    Took theirs for 2 places.\n    1 place is still in conflict:\n"),
+        "{shown}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(env.root().join("a.txt")).unwrap(),
+        "1\nside\n3\n4\n5\n6\n7\n8\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(env.root().join("gone.txt")).unwrap(),
+        "changed\n"
+    );
+    support::assert_folder_is_goto_of(&env, tip(&env, "main"));
+}
+
+#[test]
+fn a_pattern_without_keep_records_the_fixed_places_it_matches() {
+    let env = project();
+    three_conflicts(&env);
+    env.overwrite("a.txt", FIXED);
+    let (shown, _) = run(&env, &["resolve", "*.txt"], 0);
+    let rows: String = status_rows(&env)
+        .iter()
+        .map(|r| format!("    {r}"))
+        .collect();
+    let (id, _) = newest(&env);
+    assert_eq!(
+        shown,
+        format!(
+            "Recorded 1 fix in save {id} \"Combine side into main\" on main.\n\n    The \
+             combined save now holds it; its ID stays the same.\n    2 places are still in \
+             conflict:\n{rows}"
+        )
+    );
+    assert!(
+        rows.contains("gone.txt") && rows.contains("pic.png"),
+        "{rows}"
+    );
+}
+
+#[test]
+fn a_pattern_that_matches_nothing_is_refused() {
+    let env = project();
+    three_conflicts(&env);
+    refused(
+        &env,
+        &["resolve", "*.md", "--keep", "theirs"],
+        "Nothing in conflict matches *.md, so nothing was recorded.",
+        "opalro status lists the places in conflict.",
+    );
+    refused(
+        &env,
+        &["resolve", "*.md"],
+        "Nothing in conflict matches *.md, so nothing was recorded.",
+        "opalro status lists the places in conflict.",
+    );
+}
+
+#[test]
+fn paths_and_patterns_are_read_from_the_folder_you_are_in() {
+    let env = project();
+    pictures_in_art(&env);
+    let art = env.root().join("art");
+    // From the top, `*.png` names nothing: the pictures are in art.
+    refused(
+        &env,
+        &["resolve", "*.png", "--keep", "theirs"],
+        "Nothing in conflict matches *.png, so nothing was recorded.",
+        "opalro status lists the places in conflict.",
+    );
+    let (shown, _) = run_in(&env, &art, &["resolve", "b.png", "--keep", "theirs"], 0);
+    assert!(shown.starts_with("Recorded 1 fix in save "), "{shown}");
+    assert!(shown.contains("        art/c.png  "), "{shown}");
+    assert_eq!(std::fs::read(art.join("b.png")).unwrap(), PIC_SIDE);
+    let (shown, _) = run_in(&env, &art, &["resolve", "*.png", "--keep", "theirs"], 0);
+    assert!(shown.starts_with("Recorded 1 fix in save "), "{shown}");
+    assert!(!shown.contains("still in conflict"), "{shown}");
+    assert_eq!(std::fs::read(art.join("c.png")).unwrap(), PIC_SIDE);
+    support::assert_folder_is_goto_of(&env, tip(&env, "main"));
+}
+
+#[test]
+fn a_path_outside_the_project_is_refused() {
+    let env = project();
+    three_conflicts(&env);
+    refused(
+        &env,
+        &["resolve", "../elsewhere.txt"],
+        "../elsewhere.txt is outside the project.",
+        "Name files and folders inside the project, from the folder you are in.",
+    );
+}
+
+#[test]
+fn a_path_in_another_letter_case_is_matched_as_the_drive_matches_names() {
+    let env = project();
+    three_conflicts(&env);
+    if support::corpus::ignores_case(env.root()) {
+        let doc = json(&env, &["resolve", "PIC.PNG", "--keep", "theirs"], 0);
+        assert_eq!(doc["recorded"], serde_json::json!(["pic.png"]), "{doc}");
+    } else {
+        // This drive tells the names apart, so `PIC.PNG` is another file.
+        refused(
+            &env,
+            &["resolve", "PIC.PNG", "--keep", "theirs"],
+            "PIC.PNG isn't in conflict, so nothing was recorded.",
+            "opalro status lists the places in conflict.",
+        );
+    }
+}
+
 #[test]
 fn resolve_keep_requires_paths() {
     let env = project();
@@ -412,16 +609,46 @@ fn copy_takes_one_path_and_a_to() {
     let art = env.root().join("art");
     std::fs::create_dir(&art).unwrap();
     for (pick, words, bytes) in [
-        ("theirs", "the other line's version", PIC_SIDE),
-        ("mine", "your version", PIC_MAIN),
-        ("before", "the version where the lines parted", PIC_START),
+        (
+            "theirs",
+            "Wrote the other line's version of pic.png to theirs.png.\n",
+            PIC_SIDE,
+        ),
+        (
+            "mine",
+            "Wrote your version of pic.png to mine.png.\n",
+            PIC_MAIN,
+        ),
+        (
+            "before",
+            "Wrote pic.png as it was where the lines parted to before.png.\n",
+            PIC_START,
+        ),
     ] {
         let to = format!("{pick}.png");
         let args = ["resolve", "../pic.png", "--copy", pick, "--to", &to];
         let (shown, said) = run_in(&env, &art, &args, 0);
-        assert_eq!(shown, format!("Wrote {words} of pic.png to {to}.\n"));
+        assert_eq!(shown, words);
         assert_eq!(said, "");
         assert_eq!(std::fs::read(art.join(&to)).unwrap(), bytes);
+    }
+    // Each version as --json names it.
+    for pick in ["mine", "theirs", "before"] {
+        let to = format!("{pick}.json.png");
+        let args = [
+            "resolve",
+            "../pic.png",
+            "--copy",
+            pick,
+            "--to",
+            &to,
+            "--json",
+        ];
+        let (shown, _) = run_in(&env, &art, &args, 0);
+        let doc: serde_json::Value = serde_json::from_str(&shown).unwrap();
+        assert_eq!(doc["version"], pick, "{doc}");
+        assert_eq!(doc["path"], "pic.png", "{doc}");
+        assert_eq!(doc["to"], to.as_str(), "{doc}");
     }
     let (_, said) = run_in(
         &env,
@@ -481,11 +708,32 @@ fn undo_says_what_a_resolve_took_back() {
     let (shown, _) = run(&env, &["undo"], 0);
     assert_eq!(shown, format!("Undid resolve: main is back at {id}.\n"));
     assert_eq!(tip(&env, "main"), combined);
-    // A fix made by hand stays in the folder.
+    // A fix made by hand stays in the folder, and the conflict is open again.
     assert_eq!(
         std::fs::read_to_string(env.root().join("a.txt")).unwrap(),
         FIXED
     );
+    let rows = status_rows(&env);
+    assert_eq!(rows, ["    a.txt  fixed, not yet recorded\n"]);
+}
+
+#[test]
+fn undo_after_keep_puts_the_folder_back() {
+    let env = project();
+    three_conflicts(&env);
+    let combined = tip(&env, "main");
+    let folder = support::files(env.root());
+    let rows = status_rows(&env);
+    run(
+        &env,
+        &["resolve", "pic.png", "gone.txt", "--keep", "theirs"],
+        0,
+    );
+    run(&env, &["undo"], 0);
+    assert_eq!(tip(&env, "main"), combined);
+    assert_eq!(support::files(env.root()), folder);
+    assert_eq!(status_rows(&env), rows);
+    support::assert_folder_is_goto_of(&env, combined);
 }
 
 /// Imports a Git history where `main` and `side` both changed `name`, from one commit, and brings
@@ -546,7 +794,12 @@ fn a_hostile_path_is_escaped_in_the_default_messages_outcome() {
     let env = imported_apart(name);
     run(&env, &["combine", "side"], 0);
     run(&env, &["tag", "v1.0"], 0);
-    let (shown, said) = run(&env, &["resolve", name, "--keep", "theirs"], 0);
+    // Typed, the name's `[` makes it a pattern, as for save; a class holding `[` names it.
+    let (shown, said) = run(
+        &env,
+        &["resolve", "x\u{1b}[[]31m\u{202e}.txt", "--keep", "theirs"],
+        0,
+    );
     let (id, message) = newest(&env);
     assert_eq!(message, format!("Fixed conflicts in {name}"));
     assert!(

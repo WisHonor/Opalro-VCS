@@ -811,12 +811,12 @@ opalro resolve
 ```text
 Recorded 1 fix in save vtnq "Combine menu into main" on main.
 
-    The combined save now holds them; its ID stays the same.
+    The combined save now holds it; its ID stays the same.
 
 Changed your mind? opalro undo
 ```
 
-The fix goes into the combined save itself, which keeps its change ID, so `opalro history` still shows one combined save. When a tag or another line already shows that save, or you saved after the combine, the fixes are a save of their own instead (`Fixed conflicts in menu.txt`). Places you haven't fixed yet are listed after it, as `opalro status` lists them, and stay in conflict.
+The fix goes into the combined save itself, which keeps its change ID, so `opalro history` still shows one combined save. When a tag or another line already shows that save, or you saved after the combine, the fix is a save of its own instead (`Fixed conflicts in menu.txt`). Places you haven't fixed yet are listed after it, as `opalro status` lists them, and stay in conflict.
 
 Without paths, `opalro resolve` records every file the folder shows fixed: a marked file with no marker lines left, or one you deleted. A file still holding marker lines is recorded only when you name it, and Opalro asks first (`Record it as fixed anyway? [y/N]`; `--yes` answers for you). A picture or anything else that can't be marked is left as your line has it; pick a side for it, whole:
 
@@ -827,10 +827,10 @@ opalro resolve art/hero.png --keep theirs
 `--keep mine` keeps your line's version. To look at the other line's version before you choose, write it somewhere else; this records nothing and never writes over a file:
 
 ```text
-opalro resolve art/hero.png --copy theirs --to ~/Desktop/hero-theirs.png
+opalro resolve art/hero.png --copy theirs --to hero-theirs.png
 ```
 
-`--copy before` writes the version where the two lines parted. `opalro undo` takes a resolve back, as any step; a fix you made by hand stays in your folder.
+`--copy before` writes the version where the two lines parted. Paths and patterns are read as `opalro save` reads them: `opalro resolve "*.png" --keep theirs` takes the other line's version of every picture in conflict in the folder you are in. `opalro undo` takes a resolve back, as any step; a fix you made by hand stays in your folder.
 
 ### `opalro shelf` and `opalro unshelf`
 
