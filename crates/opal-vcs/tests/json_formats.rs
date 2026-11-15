@@ -219,6 +219,23 @@ fn every_document() -> Vec<(&'static str, usize, Value)> {
     let changes = document(&conflicted, &root, &["changes"], 0);
     assert_eq!(changes["changes"][0]["in_conflict"], true, "{changes}");
     docs.push(("`opalro changes --json`", 0, changes));
+
+    // A combine that keeps a conflict.
+    let kept = Env::empty();
+    let root = kept.root().to_owned();
+    let run = |args: &[&str], code| document(&kept, &root, args, code);
+    run(start, 0);
+    kept.overwrite("k.txt", "base\n");
+    run(&["save", "Base"], 0);
+    run(&["line", "new", "side"], 0);
+    kept.overwrite("k.txt", "side\n");
+    run(&["save", "Side"], 0);
+    run(&["goto", "main"], 0);
+    kept.overwrite("k.txt", "main\n");
+    run(&["save", "Main"], 0);
+    let combined = run(&["combine", "side"], 0);
+    assert_eq!(combined["conflict_count"], 1, "{combined}");
+    docs.push(("`opalro combine --json`", 0, combined));
     docs
 }
 

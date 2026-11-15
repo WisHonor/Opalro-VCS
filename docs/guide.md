@@ -768,7 +768,21 @@ The target is anything `opalro goto` takes: a line, a server line, a tag, or a s
 - **The line only moves forward.** If `main` had nothing `wall-run` lacks (no save since `wall-run` started), `wall-run`'s newest save already holds everything, so `main` moves forward to it and no save is made: `Moved main forward to wall-run: save …`.
 - **Nothing to combine.** If `main` already has everything `wall-run` has, Opalro says so and changes nothing.
 
-When both lines changed a file, Opalro merges the two versions line by line, and says how many files it merged. Where both changed the same lines, or a file that isn't text, Opalro can't keep both yet: it stops, names each file and what happened to it on the two lines, and changes nothing. Make the two lines agree on those files, save, and combine again.
+When both lines changed a file, Opalro merges the two versions line by line, and says how many files it merged. Where both changed the same lines, or a file that isn't text, the combine still goes through: the combined save keeps a **conflict** there, with every version, and Opalro names each place, what happened to it on the two lines and how it stands in your folder:
+
+```text
+Combined wall-run into main: save qnvx "Combine wall-run into main", with 2 places in conflict:
+  art/hero.png: changed on both lines, and isn't text, so it can't be merged line by line; your version is in the folder
+  todo.txt: changed on both lines, in the same place; marked in the file (1 place)
+
+    1 file written.
+
+Next: fix the marked files and pick a version for the rest, then run opalro resolve. opalro status lists what is left.
+
+Changed your mind? opalro undo
+```
+
+A text file is marked: both versions are in it, between marker lines, for you to fix in your editor. Anything else is left as your line has it, or as nothing where your line removed it. `opalro status` lists the places in conflict until you fix them, and `opalro undo` takes the whole combine back. In a script that must not go on with a conflict, use `opalro combine wall-run --only-if-clean`: where a conflict would be kept, it stops, names each place and changes nothing, ending with exit code 1. A project made by Opalro 0.1 can't keep conflicts until `opalro setup --upgrade` turns them on; until then a combine stops there too.
 
 Your unsaved changes come along, as with `opalro goto`; where the combine would change a file you have unsaved work in, it stops and changes nothing. `opalro undo` takes a combine back: the line goes back to where it was, and your files with it. See [Lines](#8-lines) for combining and then deleting a line.
 
@@ -993,7 +1007,7 @@ They are ordinary files: they go into your saves like any other file, so a copy 
 
 **Custom** writes no file. A project with no `opalro.toml` uses Opalro's own values. That includes an imported project, unless its Git history held an `opalro.toml` of its own.
 
-"Lockable" is only recorded: locking a file arrives with syncing. "Conflict markers" already decides one thing: `opalro combine` never merges a file line by line when its rule says `false`, so the Game preset's Unity scenes, prefabs and `.meta` files stop a combine when both lines changed them differently; the markers themselves arrive when a combine can keep a conflict. The presets write both now so a project has them from its first save.
+"Lockable" is only recorded: locking a file arrives with syncing. "Conflict markers" decides two things: `opalro combine` never merges a file line by line when its rule says `false`, and never marks it, so where both lines changed the Game preset's Unity scenes, prefabs and `.meta` files differently, the combine keeps a conflict with your version left whole in the folder. The presets write both now so a project has them from its first save.
 
 ### `opalro.toml`, key by key
 
@@ -1023,7 +1037,7 @@ ask-before-saving-files-over = 10000
 Each `[[rule]]` has `files`, a list of one or more patterns written as in `.opalroignore`, and either or both of these, each `true` or `false`:
 
 - `lockable` (`false` when no rule says): the file can be locked, once locking arrives.
-- `conflict-markers` (`true` when no rule says): whether `opalro combine` may merge the file line by line when both lines changed it; with `false`, it never does, and different changes on both lines stop the combine. Once a combine can keep a conflict, it also says whether the conflict is shown with markers inside the file. Scene files that an engine must read whole are better off without them. Where several rules match a file and give this key, the last one decides; a rule's patterns ignore the letter case of A to Z on every system, so `*.unity` also covers `Main.UNITY`.
+- `conflict-markers` (`true` when no rule says): whether `opalro combine` may merge the file line by line when both lines changed it; with `false`, it never does, and different changes on both lines are a conflict that stands as your version, never shown with markers inside the file. Scene files that an engine must read whole are better off without them. Where several rules match a file and give this key, the last one decides; a rule's patterns ignore the letter case of A to Z on every system, so `*.unity` also covers `Main.UNITY`.
 
 ```toml
 [[rule]]
@@ -1217,7 +1231,7 @@ Moved main forward to climbing: save qwnt "Climb walls".
 Changed your mind? opalro undo
 ```
 
-Here `main` had no save of its own since `climbing` started, so it only moved forward. Had it moved on too, `opalro combine` would have made a combined save, as in [`opalro combine`](#opalro-combine). `opalro history` on `main` follows the first save before each save, so after a combined save it lists that save, not the other line's saves one by one; its row ends with `[combined <id>]`, and `opalro history <id>` lists the other line's saves from there, even once that line is deleted.
+Here `main` had no save of its own since `climbing` started, so it only moved forward. Had it moved on too, `opalro combine` would have made a combined save, as in [`opalro combine`](#opalro-combine). `opalro history` on `main` follows the first save before each save, so after a combined save it lists that save, not the other line's saves one by one; its row ends with `[combined <id>]`, and `opalro history <id>` lists the other line's saves from there, even once that line is deleted. Where both lines changed the same place, the combined save keeps a conflict there, as in [`opalro combine`](#opalro-combine); the conflict holds the other line's version too, so deleting that line loses nothing you still need to fix it.
 
 ## 9. Coming from Git
 

@@ -88,7 +88,8 @@ pub enum Held {
     Both,
 }
 
-/// Why conflicts weren't kept.
+/// Why conflicts weren't kept: asked not to, the project can't keep them, or rules that can't be
+/// read whole would decide a place (then `rules_not_whole` says whose).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NotKept {
     OnlyIfClean,
@@ -433,9 +434,17 @@ impl CombineError {
                 "The other side's opalro.toml has a mistake in it. Go there, fix or remove it \
                  (opalro setup says what is wrong) and save; then run opalro combine again."
             }
-            CombineError::Conflicts { .. } => {
-                "For each of these files, make the two lines agree and save; then run opalro \
+            CombineError::Conflicts {
+                why: NotKept::NoFeature,
+                ..
+            } => {
+                "opalro setup --upgrade lets this project keep conflicts (Opalro 0.1 can't open it \
+                 afterwards). Or make the two lines agree on these files, save, and run opalro \
                  combine again."
+            }
+            CombineError::Conflicts { .. } => {
+                "Run it again without --only-if-clean to keep the conflicts and fix them one at a \
+                 time."
             }
             CombineError::HeldConflict { on: Held::Both, .. } => {
                 "Fix it on both lines first (opalro resolve on each), then run opalro combine again."
@@ -487,33 +496,32 @@ fn conflicts_words(
     why: NotKept,
 ) -> String {
     let count = conflicts.len() as u64 + more;
-    let mut text = if why == NotKept::RulesNotWhole {
-        let places = if count == 1 {
-            "1 place".to_owned()
-        } else {
-            format!("{} places", thousands(count))
-        };
-        let which = if rules_not_whole == Some(Side::Theirs) {
-            format!("the opalro.toml on {}", names.target)
-        } else {
-            "it".to_owned()
-        };
-        format!(
-            "Combining {} into {} would have to merge {places} that opalro.toml decides, and \
-             {which} can't be read whole, so nothing was changed:",
-            names.target, names.line
-        )
+    let places = if count == 1 {
+        "1 place".to_owned()
     } else {
-        let files = if count == 1 {
-            "1 file".to_owned()
-        } else {
-            format!("{} files", thousands(count))
-        };
-        format!(
-            "Combining {} into {} would leave {files} in conflict, which Opalro can't keep yet, \
-             so nothing was changed:",
-            names.target, names.line
-        )
+        format!("{} places", thousands(count))
+    };
+    let (target, line) = (&names.target, &names.line);
+    let mut text = match why {
+        NotKept::RulesNotWhole => {
+            let which = if rules_not_whole == Some(Side::Theirs) {
+                format!("the opalro.toml on {target}")
+            } else {
+                "it".to_owned()
+            };
+            format!(
+                "Combining {target} into {line} would have to merge {places} that opalro.toml \
+                 decides, and {which} can't be read whole, so nothing was changed:"
+            )
+        }
+        NotKept::OnlyIfClean => format!(
+            "Combining {target} into {line} would leave {places} in conflict, so nothing was \
+             changed (--only-if-clean):"
+        ),
+        NotKept::NoFeature => format!(
+            "Combining {target} into {line} would leave {places} in conflict, which this project \
+             can't keep yet, so nothing was changed:"
+        ),
     };
     for c in conflicts {
         text += "\n  ";

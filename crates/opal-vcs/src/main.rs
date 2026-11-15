@@ -165,6 +165,9 @@ enum Command {
         target: String,
         /// The combined save's message; Opalro writes one if you leave it out.
         message: Option<String>,
+        /// Stop and change nothing if the combine would leave a conflict.
+        #[arg(long)]
+        only_if_clean: bool,
     },
     /// Throw away your unsaved changes: in these files and folders, or everywhere. A safety copy
     /// of each changed or new file is kept.
@@ -2233,6 +2236,7 @@ fn combine_command(
     json: bool,
     text: &str,
     message: Option<String>,
+    keep: combine::Keep,
     opened: &mut Option<Repository>,
 ) -> Result<(), Failure> {
     let message = given_message(message);
@@ -2253,8 +2257,7 @@ fn combine_command(
             message.as_deref(),
             &who,
             git_excludes.as_deref(),
-            // Conflicts aren't kept from the command line yet.
-            combine::Keep::OnlyIfClean,
+            keep,
             &mut waiting,
         )
     }?;
@@ -2270,19 +2273,29 @@ fn combine_command(
     };
     warnings.extend(repo.store().warnings());
     let text = if json {
-        let (result, starts, merged_files) = match &done.result {
-            Combined::Nothing => ("nothing", vec![], vec![]),
-            Combined::Forward => ("forward", vec![], vec![]),
+        let none: &[combine::Conflict] = &[];
+        let (result, starts, merged_files, conflicts, more, count) = match &done.result {
+            Combined::Nothing => ("nothing", vec![], vec![], none, 0, None),
+            Combined::Forward => ("forward", vec![], vec![], none, 0, None),
             Combined::Made {
                 starts,
                 merged_files,
-                ..
+                conflicts,
+                more,
+                conflict_count,
             } => (
                 "combined",
                 starts.iter().map(Id::to_hex).collect(),
                 merged_files.clone(),
+                &conflicts[..],
+                *more,
+                Some(*conflict_count),
             ),
         };
+        let conflicts: Vec<serde_json::Value> = conflicts
+            .iter()
+            .map(combine_output::conflict_json)
+            .collect();
         let document = json!({
             "opalro_json": OPALRO_JSON,
             "result": result,
@@ -2291,6 +2304,9 @@ fn combine_command(
             "with": done.with.to_hex(),
             "starts": starts,
             "merged_files": merged_files,
+            "conflicts": conflicts,
+            "more_conflicts": more,
+            "conflict_count": count,
             "written": done.applied.written,
             "removed": done.applied.removed,
             "not_written": done.applied.not_written,
@@ -2304,6 +2320,19 @@ fn combine_command(
         combine_output::combined(&done, &named.shown, by_id, &short, save.as_ref(), given)
     };
     output::print_done(&text, &warnings)?;
+    if let Combined::Made {
+        conflict_count: 1..,
+        ..
+    } = done.result
+    {
+        let e = style::err();
+        style::next(&format!(
+            "fix the marked files and pick a version for the rest, then run {}. {} lists what is \
+             left.",
+            e.command("opalro resolve"),
+            e.command("opalro status")
+        ));
+    }
     if !json && done.result != Combined::Nothing {
         style::changed_your_mind();
     }
@@ -3182,8 +3211,17 @@ fn main() -> ExitCode {
         Command::History { from } => history(cli.json, from.as_deref(), &mut opened),
         Command::Show { save } => show(cli.json, save.as_deref(), &mut opened),
         Command::Goto { target } => goto_command(cli.json, &target, &mut opened),
-        Command::Combine { target, message } => {
-            combine_command(cli.json, &target, message, &mut opened)
+        Command::Combine {
+            target,
+            message,
+            only_if_clean,
+        } => {
+            let keep = if only_if_clean {
+                combine::Keep::OnlyIfClean
+            } else {
+                combine::Keep::Conflicts
+            };
+            combine_command(cli.json, &target, message, keep, &mut opened)
         }
         Command::Discard { paths } => discard_command(cli.json, &paths, &mut opened),
         Command::Undo {

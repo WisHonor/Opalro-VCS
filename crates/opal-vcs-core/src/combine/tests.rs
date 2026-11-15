@@ -4136,14 +4136,10 @@ fn a_conflict_stops_and_stores_nothing() {
     assert!(matches!(err, CombineError::Conflicts { .. }), "{err:?}");
     assert_eq!(
         err.to_string(),
-        "Combining side into main would leave 1 file in conflict, which Opalro can't keep yet, \
-         so nothing was changed:\n  a.txt: changed on both lines, in the same place"
+        "Combining side into main would leave 1 place in conflict, so nothing was \
+         changed (--only-if-clean):\n  a.txt: changed on both lines, in the same place"
     );
-    assert_eq!(
-        err.hint().unwrap(),
-        "For each of these files, make the two lines agree and save; then run opalro combine \
-         again."
-    );
+    assert_eq!(err.hint().unwrap(), CONFLICTS_HINT);
     assert_untouched(&h, &before);
 }
 
@@ -4212,8 +4208,8 @@ fn many_conflicts_are_counted_after_the_first_100() {
     };
     assert_eq!(
         err.to_string(),
-        "Combining side into main would leave 1,236 files in conflict, which Opalro can't keep \
-         yet, so nothing was changed:\n  a: added on both lines, differently\n  b: added on both \
+        "Combining side into main would leave 1,236 places in conflict, so nothing was \
+         changed (--only-if-clean):\n  a: added on both lines, differently\n  b: added on both \
          lines, differently\n  … and 1,234 more"
     );
 }
@@ -5019,8 +5015,8 @@ fn while_the_rules_are_not_read_whole_no_file_is_merged_line_by_line() {
         assert_eq!(conflicts, &[want], "{text}");
         assert_eq!(
             err.to_string(),
-            "Combining side into main would leave 1 file in conflict, which Opalro can't keep \
-             yet, so nothing was changed:\n  a.txt: changed on both lines, and opalro.toml can't \
+            "Combining side into main would leave 1 place in conflict, so nothing was \
+         changed (--only-if-clean):\n  a.txt: changed on both lines, and opalro.toml can't \
              be read whole, so no file is merged line by line"
         );
         assert_eq!(err.hint().unwrap(), RULES_HINT);
@@ -5103,11 +5099,7 @@ fn a_file_that_clashes_for_a_reason_of_its_own_keeps_it_while_the_rules_are_not_
             &Clash::BothChanged(NotMerged::Binary)
         ]
     );
-    assert_eq!(
-        err.hint().unwrap(),
-        "For each of these files, make the two lines agree and save; then run opalro combine \
-         again."
-    );
+    assert_eq!(err.hint().unwrap(), CONFLICTS_HINT);
 }
 
 #[test]
@@ -5190,8 +5182,8 @@ const THEIRS_HINT: &str = "The other side's opalro.toml has a mistake in it. Go 
                            remove it (opalro setup says what is wrong) and save; then run opalro \
                            combine again.";
 
-const CONFLICTS_HINT: &str = "For each of these files, make the two lines agree and save; then \
-                              run opalro combine again.";
+const CONFLICTS_HINT: &str =
+    "Run it again without --only-if-clean to keep the conflicts and fix them one at a time.";
 
 /// `Main.unity` edited near its end on `art`, which also saves `art_rules` as its `opalro.toml`,
 /// and near its start on `main`, which saves `main_rules`; the project is on `main`. Gives the
@@ -5246,8 +5238,8 @@ fn a_rule_only_the_line_combined_in_has_stops_the_combine_and_names_that_line() 
     assert_eq!(not_whole, None);
     assert_eq!(
         err.to_string(),
-        "Combining art into main would leave 1 file in conflict, which Opalro can't keep yet, so \
-         nothing was changed:\n  Main.unity: changed on both lines, and opalro.toml on art says \
+        "Combining art into main would leave 1 place in conflict, so nothing was \
+         changed (--only-if-clean):\n  Main.unity: changed on both lines, and opalro.toml on art says \
          conflict-markers = false for it"
     );
     assert_eq!(err.hint().unwrap(), CONFLICTS_HINT);
@@ -5262,8 +5254,8 @@ fn a_rule_only_the_line_combined_in_has_stops_the_combine_and_names_that_line() 
     );
     assert_eq!(
         err.to_string(),
-        "Combining main into art would leave 1 file in conflict, which Opalro can't keep yet, so \
-         nothing was changed:\n  Main.unity: changed on both lines, and opalro.toml says \
+        "Combining main into art would leave 1 place in conflict, so nothing was \
+         changed (--only-if-clean):\n  Main.unity: changed on both lines, and opalro.toml says \
          conflict-markers = false for it"
     );
 }
@@ -5322,8 +5314,8 @@ fn while_the_other_sides_rules_are_not_read_whole_no_file_is_merged_and_that_sid
         assert_eq!(not_whole, Some(Side::Theirs), "{case}");
         assert_eq!(
             err.to_string(),
-            "Combining side into main would leave 1 file in conflict, which Opalro can't keep \
-             yet, so nothing was changed:\n  a.txt: changed on both lines, and opalro.toml on \
+            "Combining side into main would leave 1 place in conflict, so nothing was \
+         changed (--only-if-clean):\n  a.txt: changed on both lines, and opalro.toml on \
              side can't be read whole, so no file is merged line by line",
             "{case}"
         );
@@ -5396,8 +5388,8 @@ fn when_both_rules_files_are_broken_the_folders_is_named() {
     assert_eq!(not_whole, Some(Side::Ours));
     assert_eq!(
         err.to_string(),
-        "Combining side into main would leave 1 file in conflict, which Opalro can't keep yet, \
-         so nothing was changed:\n  a.txt: changed on both lines, and opalro.toml can't be read \
+        "Combining side into main would leave 1 place in conflict, so nothing was \
+         changed (--only-if-clean):\n  a.txt: changed on both lines, and opalro.toml can't be read \
          whole, so no file is merged line by line"
     );
     assert_eq!(err.hint().unwrap(), RULES_HINT);
@@ -6887,8 +6879,8 @@ fn without_the_feature_a_conflict_still_stops_the_combine_and_stores_no_record()
     assert!(no_feature, "{err:?}");
     assert_eq!(
         err.to_string(),
-        "Combining side into main would leave 1 file in conflict, which Opalro can't keep yet, \
-         so nothing was changed:\n  a.txt: changed on both lines, in the same place"
+        "Combining side into main would leave 1 place in conflict, which this project \
+         can't keep yet, so nothing was changed:\n  a.txt: changed on both lines, in the same place"
     );
     // No pack, so no record, was stored, and nothing is left in `tmp`.
     assert_untouched(&h, &before);
@@ -7026,8 +7018,8 @@ fn without_the_feature_a_conflict_entry_on_a_line_is_milestone_8s_clash() {
     let err = combine_in(&mut h, "side").unwrap_err();
     assert_eq!(
         err.to_string(),
-        "Combining side into main would leave 1 file in conflict, which Opalro can't keep yet, \
-         so nothing was changed:\n  x.txt: changed on both lines, and only files are merged \
+        "Combining side into main would leave 1 place in conflict, which this project \
+         can't keep yet, so nothing was changed:\n  x.txt: changed on both lines, and only files are merged \
          line by line"
     );
     assert_untouched(&h, &before);

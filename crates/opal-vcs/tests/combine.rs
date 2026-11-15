@@ -131,8 +131,11 @@ fn combining_twice_says_nothing_to_combine() {
     assert_eq!(env.standing(), before);
 }
 
+const ONLY_IF_CLEAN_HINT: &str =
+    "Run it again without --only-if-clean to keep the conflicts and fix them one at a time.";
+
 #[test]
-fn a_conflict_stops_names_the_files_and_changes_nothing() {
+fn only_if_clean_stops_and_changes_nothing() {
     let env = project();
     apart(
         &env,
@@ -142,26 +145,335 @@ fn a_conflict_stops_names_the_files_and_changes_nothing() {
     let status = run(&env, &["status"], 0).0;
     let history = run(&env, &["history"], 0).0;
     let before = env.standing();
-    let (shown, said) = run(&env, &["combine", "side"], 1);
+    let (shown, said) = run(&env, &["combine", "side", "--only-if-clean"], 1);
     assert_eq!(shown, "");
-    assert!(said.contains("would leave 1 file in conflict"), "{said}");
-    assert!(
-        said.contains("\n  a.txt: changed on both lines, in the same place"),
-        "{said}"
-    );
-    assert!(
-        said.contains("hint: For each of these files, make the two lines agree and save"),
-        "{said}"
+    assert_eq!(
+        said,
+        format!(
+            "error: Combining side into main would leave 1 place in conflict, so nothing was \
+             changed (--only-if-clean):\n  a.txt: changed on both lines, in the same place\n\n\
+             hint: {ONLY_IF_CLEAN_HINT}\n"
+        )
     );
     assert_eq!(env.standing(), before);
     assert_eq!(run(&env, &["status"], 0).0, status);
     assert_eq!(run(&env, &["history"], 0).0, history);
-    let doc = json(&env, &["combine", "side"], 1);
+    let doc = json(&env, &["combine", "side", "--only-if-clean"], 1);
     let message = doc["error"]["message"].as_str().unwrap();
     assert!(
-        message.contains("\n  a.txt: changed on both lines"),
+        message.ends_with("(--only-if-clean):\n  a.txt: changed on both lines, in the same place"),
         "{doc}"
     );
+    assert_eq!(doc["error"]["hint"], ONLY_IF_CLEAN_HINT);
+    assert_eq!(env.standing(), before);
+}
+
+/// `main` and `side` apart from one save holding `a.txt`, `pic.png` and `gone.txt`: both change
+/// `a.txt`'s second line and the picture, `side` changes `gone.txt` and `main` removes it.
+fn three_conflicts(env: &Env) {
+    support::write(env, "pic.png", b"\x89PNG\r\n\x1a\n\0start");
+    env.overwrite("gone.txt", "gone\n");
+    run(env, &["save", "More"], 0);
+    run(env, &["line", "new", "side"], 0);
+    env.overwrite("a.txt", "1\nside\n3\n4\n5\n6\n7\n8\n");
+    support::write(env, "pic.png", b"\x89PNG\r\n\x1a\n\0side");
+    env.overwrite("gone.txt", "changed\n");
+    run(env, &["save", "On side"], 0);
+    run(env, &["goto", "main"], 0);
+    env.overwrite("a.txt", "1\nmain\n3\n4\n5\n6\n7\n8\n");
+    support::write(env, "pic.png", b"\x89PNG\r\n\x1a\n\0main");
+    std::fs::remove_file(env.root().join("gone.txt")).unwrap();
+    run(env, &["save", "On main"], 0);
+}
+
+const THREE_ROWS: &str = "  a.txt: changed on both lines, in the same place; marked in the file \
+                          (1 place)\n  gone.txt: changed on side, removed on main; nothing is in \
+                          your folder\n  pic.png: changed on both lines, and isn't text, so it \
+                          can't be merged line by line; your version is in the folder\n";
+
+/// How `opalro status --json` says each place in conflict stands.
+fn standing(env: &Env) -> Vec<(String, String)> {
+    let doc = json(env, &["status"], 0);
+    let conflicts = doc["conflicts"].as_array().unwrap();
+    conflicts
+        .iter()
+        .map(|c| {
+            let path = c["path"].as_str().unwrap().to_owned();
+            (path, c["standing"].as_str().unwrap().to_owned())
+        })
+        .collect()
+}
+
+#[test]
+fn combine_keeps_conflicts_and_says_where() {
+    let env = project();
+    three_conflicts(&env);
+    let (shown, said) = run(&env, &["combine", "side"], 0);
+    assert!(
+        shown.starts_with("Combined side into main: save "),
+        "{shown}"
+    );
+    assert!(
+        shown.contains(&format!(
+            " \"Combine side into main\", with 3 places in conflict:\n{THREE_ROWS}\n    1 file \
+             written.\n"
+        )),
+        "{shown}"
+    );
+    assert!(!shown.contains("held"), "{shown}");
+    assert_eq!(said, "");
+    let main = tip(&env, "main");
+    let (repo, _) = env.state();
+    assert_eq!(repo.store().save(&main, false).unwrap().parents.len(), 2);
+    drop(repo);
+    let marked = std::fs::read_to_string(env.root().join("a.txt")).unwrap();
+    assert!(marked.starts_with("1\n<<<<<<< "), "{marked}");
+    assert!(
+        marked.contains("\nmain\n") && marked.contains("\nside\n"),
+        "{marked}"
+    );
+    assert_eq!(
+        std::fs::read(env.root().join("pic.png")).unwrap(),
+        b"\x89PNG\r\n\x1a\n\0main"
+    );
+    assert!(!env.root().join("gone.txt").exists());
+    support::assert_folder_is_goto_of(&env, main);
+    let want = [
+        ("a.txt", "markers"),
+        ("gone.txt", "nothing"),
+        ("pic.png", "yours"),
+    ]
+    .map(|(p, s)| (p.to_owned(), s.to_owned()));
+    assert_eq!(standing(&env), want);
+    let (status, _) = run(&env, &["status"], 0);
+    assert!(status.contains("In conflict (3 places):"), "{status}");
+    let (_, entry) = support::head(&env);
+    assert_eq!(entry.command, "combine");
+}
+
+#[test]
+fn a_combine_with_conflicts_is_one_step_undo_takes_back() {
+    let env = project();
+    three_conflicts(&env);
+    let main = tip(&env, "main");
+    let status = run(&env, &["status"], 0).0;
+    let folder = support::files(env.root());
+    run(&env, &["combine", "side"], 0);
+    let (shown, _) = run(&env, &["undo"], 0);
+    assert!(
+        shown.starts_with("Undid combine: main is back at "),
+        "{shown}"
+    );
+    assert_eq!(tip(&env, "main"), main);
+    assert_eq!(support::files(env.root()), folder);
+    assert_eq!(run(&env, &["status"], 0).0, status);
+    assert_eq!(standing(&env), []);
+}
+
+#[test]
+fn without_the_feature_the_combine_stops_and_names_setup_upgrade() {
+    let env = project();
+    three_conflicts(&env);
+    support::without_conflicts_feature(env.root());
+    let before = env.standing();
+    let folder = support::files(env.root());
+    let (shown, said) = run(&env, &["combine", "side"], 1);
+    assert_eq!(shown, "");
+    let rows = THREE_ROWS
+        .lines()
+        .map(|row| row.split("; ").next().unwrap())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let hint = "opalro setup --upgrade lets this project keep conflicts (Opalro 0.1 can't open it \
+                afterwards). Or make the two lines agree on these files, save, and run opalro \
+                combine again.";
+    assert_eq!(
+        said,
+        format!(
+            "error: Combining side into main would leave 3 places in conflict, which this project \
+             can't keep yet, so nothing was changed:\n{rows}\n\nhint: {hint}\n"
+        )
+    );
+    assert_eq!(env.standing(), before);
+    assert_eq!(support::files(env.root()), folder);
+    assert_eq!(
+        std::fs::read_to_string(env.root().join(".opalro/format")).unwrap(),
+        support::V01_FORMAT
+    );
+    let doc = json(&env, &["combine", "side"], 1);
+    assert_eq!(doc["error"]["hint"], hint);
+    assert_eq!(env.standing(), before);
+}
+
+#[test]
+fn combining_a_line_that_holds_a_conflict_both_changed_is_refused() {
+    let env = project();
+    apart(
+        &env,
+        "1\nside\n3\n4\n5\n6\n7\n8\n",
+        "1\nmain\n3\n4\n5\n6\n7\n8\n",
+    );
+    run(&env, &["combine", "side"], 0);
+    run(&env, &["goto", "side"], 0);
+    env.overwrite("a.txt", "1\nside again\n3\n4\n5\n6\n7\n8\n");
+    run(&env, &["save", "Side again"], 0);
+    run(&env, &["goto", "main"], 0);
+    let before = env.standing();
+    let (shown, said) = run(&env, &["combine", "side"], 1);
+    assert_eq!(shown, "");
+    assert_eq!(
+        said,
+        "error: a.txt is in conflict on main, and side changed it too, so nothing was changed.\n\n\
+         hint: Fix it on the line that holds it first (opalro resolve there), then run opalro \
+         combine again.\n"
+    );
+    assert_eq!(env.standing(), before);
+}
+
+#[test]
+fn combine_json_lists_conflicts() {
+    let env = project();
+    three_conflicts(&env);
+    let doc = json(&env, &["combine", "side"], 0);
+    assert_eq!(doc["result"], "combined");
+    insta::assert_json_snapshot!("kept", support::masked(doc));
+    run(&env, &["undo"], 0);
+    let doc = json(&env, &["combine", "side", "--only-if-clean"], 1);
+    assert!(
+        doc["error"]["message"]
+            .as_str()
+            .unwrap()
+            .starts_with("Combining side into main would leave 3 places in conflict"),
+        "{doc}"
+    );
+}
+
+#[test]
+fn the_count_is_every_place_and_the_rows_the_made_ones() {
+    let env = project();
+    env.overwrite("b.txt", "b\n");
+    run(&env, &["save", "B"], 0);
+    run(&env, &["line", "new", "other"], 0);
+    env.overwrite("b.txt", "other\n");
+    run(&env, &["save", "On other"], 0);
+    run(&env, &["goto", "main"], 0);
+    apart(
+        &env,
+        "1\nside\n3\n4\n5\n6\n7\n8\n",
+        "1\nmain\n3\n4\n5\n6\n7\n8\n",
+    );
+    run(&env, &["combine", "side"], 0);
+    env.overwrite("b.txt", "main\n");
+    run(&env, &["save", "B on main"], 0);
+    let (shown, _) = run(&env, &["combine", "other"], 0);
+    assert!(
+        shown.contains(
+            " \"Combine other into main\", with 2 places in conflict:\n  b.txt: changed on both \
+             lines, in the same place; marked in the file (1 place)\n\n    The two lines held 1 \
+             more place in conflict already; the save keeps them.\n"
+        ),
+        "{shown}"
+    );
+    assert!(!shown.contains("  a.txt"), "{shown}");
+    let paths: Vec<String> = standing(&env).into_iter().map(|(p, _)| p).collect();
+    assert_eq!(paths, ["a.txt", "b.txt"]);
+    run(&env, &["undo"], 0);
+    let doc = json(&env, &["combine", "other"], 0);
+    assert_eq!(doc["conflict_count"], 2, "{doc}");
+    assert_eq!(doc["more_conflicts"], 0, "{doc}");
+    let conflicts = doc["conflicts"].as_array().unwrap();
+    assert_eq!(conflicts.len(), 1, "{doc}");
+    assert_eq!(conflicts[0]["path"], "b.txt");
+}
+
+#[test]
+fn a_combine_with_conflicts_keeps_unsaved_work_in_the_way_as_before() {
+    let env = project();
+    apart(
+        &env,
+        "1\nside\n3\n4\n5\n6\n7\n8\n",
+        "1\nmain\n3\n4\n5\n6\n7\n8\n",
+    );
+    env.overwrite("a.txt", "mine\n");
+    let (head, main) = (support::head(&env).0, tip(&env, "main"));
+    let (shown, said) = run(&env, &["combine", "side"], 1);
+    assert_eq!(shown, "");
+    assert!(
+        said.starts_with(
+            "error: Your unsaved changes, or files Opalro ignores, are in the way of the combine, \
+             so nothing was changed:\n  a.txt\n"
+        ),
+        "{said}"
+    );
+    // As before, the combined save may be stored, but no step is taken and the line stays.
+    assert_eq!((support::head(&env).0, tip(&env, "main")), (head, main));
+    assert_eq!(
+        std::fs::read_to_string(env.root().join("a.txt")).unwrap(),
+        "mine\n"
+    );
+    // Work out of the way comes along, beside the conflict.
+    run(&env, &["discard"], 0);
+    env.overwrite("notes.txt", "notes\n");
+    let (shown, _) = run(&env, &["combine", "side"], 0);
+    assert!(
+        shown.contains("with 1 place in conflict:\n  a.txt: changed on both lines"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("Your unsaved changes in 1 file came along."),
+        "{shown}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(env.root().join("notes.txt")).unwrap(),
+        "notes\n"
+    );
+}
+
+/// `main` and `side` crossed: each holds a save combining the two saves where they parted, which
+/// added `u.txt` differently, and each then holds `u.txt` its own way.
+fn crossed_at_u(env: &Env) {
+    run(env, &["line", "new", "side"], 0);
+    env.overwrite("u.txt", "2\n");
+    run(env, &["save", "Two"], 0);
+    let two = tip(env, "side");
+    run(env, &["goto", "main"], 0);
+    env.overwrite("u.txt", "1\n");
+    run(env, &["save", "One"], 0);
+    let one = tip(env, "main");
+    env.overwrite("u.txt", "mine\n");
+    run(env, &["save", "Mine"], 0);
+    support::plant_combined(env.root(), "Combined two", &[two]);
+    // Planting goes onto `main`, so `side` takes its name for a moment.
+    run(env, &["goto", "side"], 0);
+    run(env, &["line", "rename", "main", "away"], 0);
+    run(env, &["line", "rename", "main"], 0);
+    env.overwrite("u.txt", "theirs\n");
+    run(env, &["save", "Theirs"], 0);
+    support::plant_combined(env.root(), "Combined one", &[one]);
+    run(env, &["line", "rename", "side"], 0);
+    run(env, &["line", "rename", "away", "main"], 0);
+    run(env, &["goto", "main"], 0);
+}
+
+#[test]
+fn a_combine_whose_starting_points_disagree_says_it_cant_tell() {
+    let env = project();
+    crossed_at_u(&env);
+    let (shown, _) = run(&env, &["combine", "side"], 0);
+    assert!(
+        shown.contains(
+            "with 1 place in conflict:\n  u.txt: changed on both lines, and Opalro can't tell \
+             what it held where they parted; marked in the file (1 place)\n"
+        ),
+        "{shown}"
+    );
+    let marked = std::fs::read_to_string(env.root().join("u.txt")).unwrap();
+    assert!(
+        marked.contains("\n||||||| where the lines parted, which Opalro can't tell here\n"),
+        "{marked}"
+    );
+    assert_eq!(standing(&env), [("u.txt".to_owned(), "markers".to_owned())]);
+    support::assert_folder_is_goto_of(&env, tip(&env, "main"));
 }
 
 #[test]
@@ -332,17 +644,27 @@ fn imported_apart(name: &str) -> Env {
 }
 
 #[test]
-fn a_hostile_path_in_a_conflict_is_escaped() {
+fn a_hostile_path_in_a_kept_conflict_is_escaped() {
     let env = imported_apart("x\u{1b}[31m\u{202e}.txt");
-    let (shown, said) = run(&env, &["combine", "side"], 1);
+    let (shown, said) = run(&env, &["combine", "side", "--only-if-clean"], 1);
     assert_eq!(shown, "");
     assert!(
         said.contains("x\\x1b[31m\\u{202e}.txt: changed on both lines"),
         "{said}"
     );
-    support::assert_escaped(&said, "combine");
-    let doc = json(&env, &["combine", "side"], 1);
+    support::assert_escaped(&said, "combine --only-if-clean");
+    let doc = json(&env, &["combine", "side", "--only-if-clean"], 1);
     support::assert_escaped(doc["error"]["message"].as_str().unwrap(), "--json");
+    let (shown, said) = run(&env, &["combine", "side"], 0);
+    assert!(
+        shown.contains(
+            "\n  x\\x1b[31m\\u{202e}.txt: changed on both lines, in the same place; marked in the \
+             file (1 place)\n"
+        ),
+        "{shown}"
+    );
+    support::assert_escaped(&shown, "combine");
+    support::assert_escaped(&said, "combine");
 }
 
 #[test]
@@ -431,6 +753,61 @@ fn a_combine_of_many_large_text_files_stays_within_memory() {
             merged == file(n, &[(10, "main"), (LINES - 10, "side")]),
             "{name}"
         );
+    }
+}
+
+/// Twelve text files of 30 MiB, each changed in the same place on the two lines: each is kept
+/// with markers, written as it is made, never all twelve held at once.
+#[cfg(target_os = "linux")]
+#[test]
+fn a_combine_of_many_large_conflicted_texts_stays_within_memory() {
+    const LINES: usize = (30 << 20) / 40;
+    let env = Env::empty();
+    run(&env, &["start", "--preset", "custom"], 0);
+    let file = |n: usize, edit: Option<&str>| {
+        let mut seed = n as u64 * 0x9e37_79b9 + 1;
+        let mut text = String::with_capacity(LINES * 40);
+        for at in 0..LINES {
+            seed = seed.wrapping_mul(6_364_136_223_846_793_005).wrapping_add(1);
+            match edit {
+                Some(edit) if at == LINES / 2 => text += &format!("{edit:<39}\n"),
+                _ => text += &format!("{:039x}\n", u128::from(seed)),
+            }
+        }
+        text
+    };
+    let names: Vec<String> = (0..12).map(|n| format!("big{n}.txt")).collect();
+    let write = |edit: Option<&str>| {
+        for (n, name) in names.iter().enumerate() {
+            env.overwrite(name, &file(n, edit));
+        }
+    };
+    write(None);
+    run(&env, &["save", "--yes", "Base"], 0);
+    run(&env, &["line", "new", "side"], 0);
+    write(Some("side"));
+    run(&env, &["save", "--yes", "Side"], 0);
+    run(&env, &["goto", "main"], 0);
+    write(Some("main"));
+    run(&env, &["save", "--yes", "Main"], 0);
+    let mut cmd = env.opal_process_in(env.root());
+    cmd.args(["combine", "side"]);
+    let ended = support::run_limited(cmd, 600);
+    assert_eq!(ended.code, Some(0), "{ended:?}");
+    assert!(
+        ended.peak_mb < 300,
+        "a combine keeping 12 conflicts in files of 30 MiB peaked at {} MB",
+        ended.peak_mb
+    );
+    let doc = json(&env, &["status"], 0);
+    let conflicts = doc["conflicts"].as_array().unwrap();
+    assert_eq!(conflicts.len(), 12, "{doc}");
+    for c in conflicts {
+        assert_eq!(c["standing"], "markers", "{c}");
+    }
+    for name in &names {
+        let marked = std::fs::read_to_string(env.root().join(name)).unwrap();
+        assert!(marked.contains("\n<<<<<<< "), "{name}");
     }
 }
 
@@ -617,12 +994,14 @@ fn while_opalro_toml_cant_be_read_whole_a_combine_merges_no_file_line_by_line() 
     let (shown, said) = run(&env, &["combine", "side"], 1);
     assert_eq!(shown, "");
     assert!(
-        said.contains(
-            "\n  a.txt: changed on both lines, and opalro.toml can't be read whole, so no file is \
-             merged line by line\n"
+        said.starts_with(
+            "error: Combining side into main would have to merge 1 place that opalro.toml \
+             decides, and it can't be read whole, so nothing was changed:\n  a.txt: changed on \
+             both lines, and opalro.toml can't be read whole, so no file is merged line by line\n"
         ),
         "{said}"
     );
+    assert!(!said.contains("keep yet"), "{said}");
     assert!(
         said.contains(
             "hint: opalro setup says what is wrong with opalro.toml. Fix or remove it and save; \
@@ -746,9 +1125,6 @@ fn scene_ruled_on_art(env: &Env) {
     run(env, &["save", "On main"], 0);
 }
 
-const AGREE_HINT: &str = "For each of these files, make the two lines agree and save; then run \
-                          opalro combine again.";
-
 #[test]
 fn a_rule_only_the_line_combined_in_has_stops_the_combine_and_names_that_line() {
     let env = project();
@@ -756,16 +1132,27 @@ fn a_rule_only_the_line_combined_in_has_stops_the_combine_and_names_that_line() 
     let row = "\n  Main.unity: changed on both lines, and opalro.toml on art says conflict-markers = \
                false for it";
     let before = env.standing();
-    let (shown, said) = run(&env, &["combine", "art"], 1);
+    let (shown, said) = run(&env, &["combine", "art", "--only-if-clean"], 1);
     assert_eq!(shown, "");
     assert!(said.contains(&format!("{row}\n")), "{said}");
-    assert!(said.contains(&format!("hint: {AGREE_HINT}")), "{said}");
+    assert!(
+        said.contains(&format!("hint: {ONLY_IF_CLEAN_HINT}")),
+        "{said}"
+    );
     assert_eq!(env.standing(), before);
-    let doc = json(&env, &["combine", "art"], 1);
+    let doc = json(&env, &["combine", "art", "--only-if-clean"], 1);
     let message = doc["error"]["message"].as_str().unwrap();
     assert!(message.ends_with(row), "{doc}");
-    assert_eq!(doc["error"]["hint"], AGREE_HINT);
+    assert_eq!(doc["error"]["hint"], ONLY_IF_CLEAN_HINT);
     assert_eq!(env.standing(), before);
+    // Kept, the scene stays whole, as main has it.
+    let (shown, _) = run(&env, &["combine", "art"], 0);
+    assert!(
+        shown.contains(&format!("{row}; your version is in the folder\n")),
+        "{shown}"
+    );
+    let doc = json(&env, &["status"], 0);
+    assert_eq!(doc["conflicts"][0]["standing"], "yours", "{doc}");
 }
 
 #[test]
@@ -775,12 +1162,12 @@ fn the_same_two_lines_combined_the_other_way_round_clash_in_the_folders_words() 
     run(&env, &["goto", "art"], 0);
     let row = "\n  Main.unity: changed on both lines, and opalro.toml says conflict-markers = false \
                for it";
-    let (_, said) = run(&env, &["combine", "main"], 1);
+    let (_, said) = run(&env, &["combine", "main", "--only-if-clean"], 1);
     assert!(said.contains(&format!("{row}\n")), "{said}");
-    let doc = json(&env, &["combine", "main"], 1);
+    let doc = json(&env, &["combine", "main", "--only-if-clean"], 1);
     let message = doc["error"]["message"].as_str().unwrap();
     assert!(message.ends_with(row), "{doc}");
-    assert_eq!(doc["error"]["hint"], AGREE_HINT);
+    assert_eq!(doc["error"]["hint"], ONLY_IF_CLEAN_HINT);
 }
 
 #[test]

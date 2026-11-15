@@ -2900,7 +2900,7 @@ const COMMANDS: [(&str, &[&str]); 19] = [
     ("redo", &["--shelve"]),
     ("line", &[]),
     ("tag", &["--save", "--delete", "--yes"]),
-    ("combine", &[]),
+    ("combine", &["--only-if-clean"]),
     ("shelf", &["--list"]),
     ("unshelf", &[]),
     ("discard", &[]),
@@ -3096,6 +3096,17 @@ fn help_lists_only_options_the_command_takes() {
             assert!(!help.contains(invented), "{invented} in {command}:\n{help}");
         }
     }
+}
+
+#[test]
+fn combine_help_says_what_only_if_clean_does() {
+    let help = help_of("combine");
+    let options = section(&help, "Options");
+    assert!(
+        options.iter().any(|l| l.trim_start()
+            == "--only-if-clean  Stop and change nothing if the combine would leave a conflict"),
+        "{help}"
+    );
 }
 
 /// `help` is no command of Opalro's to have a page: asking for its help shows the overview.

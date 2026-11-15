@@ -2279,6 +2279,34 @@ fn combine_paints_its_outcome_and_shows_progress() {
     );
 }
 
+/// A combine that kept a conflict says what to do next, then offers the undo; a log sees neither.
+#[cfg(feature = "fault-injection")]
+#[test]
+fn a_combine_that_kept_conflicts_says_what_to_do_next() {
+    let env = started();
+    put(&env, "a.txt", "a\n");
+    run_at(&env, None, &["save", "First"]);
+    run_at(&env, None, &["line", "new", "side"]);
+    put(&env, "a.txt", "side\n");
+    run_at(&env, None, &["save", "On side"]);
+    run_at(&env, None, &["goto", "main"]);
+    put(&env, "a.txt", "main\n");
+    run_at(&env, None, &["save", "On main"]);
+    let (shown, said) = run_at(&env, Some(200), &["combine", "side"]);
+    assert!(
+        shown.contains(", with 1 place in conflict:\n  a.txt: "),
+        "{shown}"
+    );
+    assert_eq!(
+        said.replace("\n      ", " "),
+        "\nNext: fix the marked files and pick a version for the rest, then run opalro resolve. \
+         opalro status lists what is left.\n\nChanged your mind? opalro undo\n"
+    );
+    run_at(&env, None, &["undo"]);
+    let (_, said) = run_at(&env, None, &["combine", "side"]);
+    assert_eq!(said, "");
+}
+
 /// A long line name or target on a narrow terminal: as with `goto`, the outcome line is kept
 /// whole and the details wrap within the width, saying what a log says.
 #[cfg(feature = "fault-injection")]

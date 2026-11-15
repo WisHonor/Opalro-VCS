@@ -707,7 +707,11 @@ fn combine_matches_git_merge() {
             );
 
             let before = (env.standing(), files(env.root()), folders(env.root()));
-            let ours = env.opalro().args(["combine", "side"]).output().unwrap();
+            let ours = env
+                .opalro()
+                .args(["combine", "side", "--only-if-clean"])
+                .output()
+                .unwrap();
             let ours_code = ours.status.code().unwrap();
             let said = text(&ours.stderr);
             prop_assert!(ours_code <= 1, "{said}\n{fast_import}");
@@ -923,7 +927,7 @@ fn a_file_moved_and_changed_and_removed_on_the_other_line_is_kept_where_git_asks
         &["clone", "-q", ".", clone.path().to_str().unwrap()],
     );
 
-    opalro(&env, &["combine", "side"], 0);
+    opalro(&env, &["combine", "side", "--only-if-clean"], 0);
     assert_eq!(
         files(env.root()),
         support::holding(&[("b.txt", "one\n2\n3\n")])
@@ -969,14 +973,14 @@ fn a_move_saved_by_itself_is_followed_and_one_saved_with_an_edit_is_not() {
         env.overwrite("b.txt", "one\n2\n3\n");
         opalro(&env, &["save", "Main edits b.txt"], 0);
         if apart {
-            let said = opalro(&env, &["combine", "side"], 1);
+            let said = opalro(&env, &["combine", "side", "--only-if-clean"], 1);
             assert!(
                 said.contains("\n  b.txt: moved here from a.txt on main, removed on side"),
                 "{said}"
             );
         } else {
             let (main, side) = (main_tip(&env), env.state().1.lines["side"]);
-            opalro(&env, &["combine", "side"], 0);
+            opalro(&env, &["combine", "side", "--only-if-clean"], 0);
             let repo = Repository::open(env.root()).unwrap();
             let combined = repo.store().save(&main_tip(&env), false).unwrap();
             assert_eq!(combined.parents, [main, side]);
