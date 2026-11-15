@@ -10,6 +10,8 @@ use super::tree::{MAX_HELD_TEXT, Made, Merged, merge_trees};
 use super::*;
 use crate::ancestry::only_in;
 use crate::changes::DEADLINE;
+use crate::conflict::markers::{Labels, Parted, Sides, scan};
+use crate::conflict::{Record, Term, stands_as};
 use crate::diary::{Action, DiaryEntry, Position, State};
 use crate::id::{ChangeId, Flavor, Id, hash_record};
 use crate::kept::overlay;
@@ -24,7 +26,7 @@ use crate::pack::{ObjectKind, PackSet};
 use crate::presets::{Engine, Found, Preset, opal_toml};
 use crate::repo::{ChangeLock, Repository};
 use crate::rules::{RuleMatcher, RulesRead};
-use crate::save::{MoveNote, Person, Save};
+use crate::save::{EXTRA_LINE, MoveNote, Person, Save};
 use crate::snapshot::{SaveOutcome, SaveRequest, save_folder, store_listing};
 use crate::store::{Store, counted};
 
@@ -37,6 +39,8 @@ enum V {
     Folder,
     /// A Git submodule's link to a commit of 20 bytes all `n`.
     Project(u8),
+    /// A place in conflict, its record's ID.
+    Conflict(Id),
 }
 
 fn project_link(n: u8) -> ProjectLink {
@@ -196,6 +200,7 @@ fn put(store: &Store, empty: Id, t: &Tree, packs: &mut PackSet) -> Id {
                 let id = packs.add_record(ObjectKind::ProjectLink, &encoded).unwrap();
                 (EntryKind::ProjectLink, id, 0)
             }
+            V::Conflict(id) => (EntryKind::Conflict, *id, 0),
         };
         changes.insert(path.clone(), Some(put));
     }
@@ -219,33 +224,36 @@ fn read_tree(store: &Store, root: Id, made: &HashMap<Id, Listing>) -> Tree {
             } else {
                 format!("{path}/{}", e.name)
             };
-            let mut bytes = Vec::new();
-            let v = match e.kind {
-                EntryKind::Folder => {
-                    todo.push((p.clone(), e.id));
-                    V::Folder
-                }
-                EntryKind::Symlink => {
-                    store.copy_content(&e.id, &mut bytes).unwrap();
-                    V::Link(String::from_utf8(bytes).unwrap())
-                }
-                EntryKind::ProjectLink => {
-                    let n = (0..=u8::MAX)
-                        .find(|&n| {
-                            hash_record(Flavor::ProjectLink, &project_link(n).encode()) == e.id
-                        })
-                        .unwrap();
-                    V::Project(n)
-                }
-                kind => {
-                    store.copy_content(&e.id, &mut bytes).unwrap();
-                    V::File(bytes, kind == EntryKind::Executable)
-                }
-            };
-            out.insert(p, v);
+            if e.kind == EntryKind::Folder {
+                todo.push((p.clone(), e.id));
+            }
+            out.insert(p, leaf(store, e.kind, e.id));
         }
     }
     out
+}
+
+/// What `read_tree` gives for one entry: a folder as `Folder`, a conflict as its record's ID.
+fn leaf(store: &Store, kind: EntryKind, id: Id) -> V {
+    let mut bytes = Vec::new();
+    match kind {
+        EntryKind::Folder => V::Folder,
+        EntryKind::Conflict => V::Conflict(id),
+        EntryKind::Symlink => {
+            store.copy_content(&id, &mut bytes).unwrap();
+            V::Link(String::from_utf8(bytes).unwrap())
+        }
+        EntryKind::ProjectLink => {
+            let n = (0..=u8::MAX)
+                .find(|&n| hash_record(Flavor::ProjectLink, &project_link(n).encode()) == id)
+                .unwrap();
+            V::Project(n)
+        }
+        kind => {
+            store.copy_content(&id, &mut bytes).unwrap();
+            V::File(bytes, kind == EntryKind::Executable)
+        }
+    }
 }
 
 /// A tree's paths as `read` gives them: every folder above a path too.
@@ -1106,6 +1114,7 @@ fn every_clash_has_its_words() {
     let c = |clash| Conflict {
         path: path.to_owned(),
         clash,
+        stands: None,
     };
     let both = |why| Clash::BothChanged(why);
     let to = |p: &str| p.to_owned();
@@ -1211,6 +1220,11 @@ fn every_clash_has_its_words() {
             },
             format!("moved to x on {t}, where {o} has something else"),
         ),
+        (
+            Clash::StartUnknown,
+            "changed on both lines, and Opalro can't tell what it held where they parted"
+                .to_owned(),
+        ),
     ];
     for (clash, words) in cases {
         assert_eq!(
@@ -1257,6 +1271,88 @@ struct Model {
     files: Tree,
     conflicts: BTreeSet<String>,
     clash: bool,
+    /// Where conflicts are kept, the four label lines: yours, where the lines parted, where they
+    /// parted with nothing there, theirs.
+    marks: Option<[String; 4]>,
+    /// What each kept conflict must hold, by path.
+    kept: BTreeMap<String, Want>,
+}
+
+/// A kept conflict as the model sees it: the three versions (yours, where the lines parted,
+/// theirs), and how it stands.
+#[derive(Debug, PartialEq, Eq)]
+struct Want {
+    terms: [Node; 3],
+    shown: Shown,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum Shown {
+    Marked(V),
+    Yours,
+    Nothing,
+}
+
+/// What the model puts at a kept conflict's place.
+const KEPT: V = V::Conflict(Id([0; 32]));
+
+/// A clash at `path`, named; where conflicts are kept, held with all three versions, shown with
+/// markers when two text files clash, else as yours, or nothing where yours is gone. Whether the
+/// result has something there.
+fn clash(path: &str, s: &Node, o: &Node, t: &Node, m: &mut Model) -> bool {
+    m.conflicts.insert(path.to_owned());
+    let Some([ours, parted, nothing, theirs]) = m.marks.clone() else {
+        return false;
+    };
+    let marked = |o: &[u8], middle: &str, s: &[u8], t: &[u8], exec: bool| {
+        let mut text = format!(
+            "<<<<<<< {ours}
+"
+        )
+        .into_bytes();
+        text.extend(o);
+        text.extend(
+            format!(
+                "||||||| {middle}
+"
+            )
+            .bytes(),
+        );
+        text.extend(s);
+        text.extend(
+            b"=======
+",
+        );
+        text.extend(t);
+        text.extend(
+            format!(
+                ">>>>>>> {theirs}
+"
+            )
+            .bytes(),
+        );
+        V::File(text, exec)
+    };
+    let shown = match (s, o, t) {
+        (Node::Leaf(V::File(sc, sx)), Node::Leaf(V::File(oc, ox)), Node::Leaf(V::File(tc, tx))) => {
+            let exec = if ox == tx || ox == sx { *tx } else { *ox };
+            Shown::Marked(marked(oc, &parted, sc, tc, exec))
+        }
+        (Node::Missing, Node::Leaf(V::File(oc, ox)), Node::Leaf(V::File(tc, _))) if oc != tc => {
+            Shown::Marked(marked(oc, &nothing, b"", tc, *ox))
+        }
+        (_, Node::Missing, _) => Shown::Nothing,
+        _ => Shown::Yours,
+    };
+    m.files.insert(path.to_owned(), KEPT);
+    // A folder is held whole: every folder below it too.
+    let whole = |n: &Node| match n {
+        Node::Folder(below) => Node::Folder(with_folders(below)),
+        n => n.clone(),
+    };
+    let terms = [whole(o), whole(s), whole(t)];
+    m.kept.insert(path.to_owned(), Want { terms, shown });
+    true
 }
 
 /// Merges the folder at `path` (`""` the top) whose contents are `s`, `o` and `t`, and adds to
@@ -1351,20 +1447,22 @@ fn model_entry(path: &str, s: &Node, o: &Node, t: &Node, m: &mut Model) -> bool 
             } else if let (Text::Merged(both), _) = merge_text(sc, oc, tc, DEADLINE, None) {
                 both
             } else {
-                m.conflicts.insert(path.to_owned());
-                return false;
+                return clash(path, s, o, t, m);
             };
             m.files.insert(path.to_owned(), V::File(contents, mark));
             return true;
         }
         _ => {}
     }
-    m.conflicts.insert(path.to_owned());
-    false
+    clash(path, s, o, t, m)
 }
 
-fn model(s: &Tree, o: &Tree, t: &Tree) -> Model {
-    let mut m = Model::default();
+/// The model's merge; with `marks`, keeping conflicts.
+fn model(s: &Tree, o: &Tree, t: &Tree, marks: Option<[String; 4]>) -> Model {
+    let mut m = Model {
+        marks,
+        ..Model::default()
+    };
     if o == t || o == s {
         m.files = with_folders(t);
     } else if t == s {
@@ -1430,7 +1528,7 @@ fn tree_merge_agrees_with_a_path_by_path_model() {
     let mut runner = TestRunner::new(Config::with_cases(256));
     runner
         .run(&three_trees(), |[s, o, t]| {
-            let want = model(&s, &o, &t);
+            let want = model(&s, &o, &t, None);
             let mut fx = fx.borrow_mut();
             let [s_id, o_id, t_id] = fx.three(&s, &o, &t);
             // Read back from what it made, never stored: no text is merged here.
@@ -1467,6 +1565,106 @@ fn tree_merge_agrees_with_a_path_by_path_model() {
             Ok(())
         })
         .unwrap();
+    // Keeping conflicts: each place the model calls a clash holds a record of exactly the model's
+    // three versions, standing as it says; every other place holds the model's merge.
+    let one = ChangeId([3; 16]);
+    let [labels, nothing] =
+        [Parted::One(one), Parted::Nothing(Some(one))].map(|p| sides().labels(p));
+    let marks = [labels.ours, labels.base, nothing.base, labels.theirs];
+    let seen: std::cell::RefCell<BTreeMap<&str, usize>> = Default::default();
+    let mut runner = TestRunner::new_with_rng(
+        Config::with_cases(256),
+        TestRng::deterministic_rng(RngAlgorithm::ChaCha),
+    );
+    runner
+        .run(&three_trees(), |[s, o, t]| {
+            let want = model(&s, &o, &t, Some(marks.clone()));
+            let mut fx = fx.borrow_mut();
+            let ids = fx.three(&s, &o, &t);
+            let mut made = Made {
+                keep: Some(sides()),
+                ..Made::default()
+            };
+            let m = match fx.merge_with(ids, &no_rules(), false, &mut made) {
+                Err(CombineError::NamesClash { .. }) => {
+                    prop_assert!(want.clash, "{want:?}");
+                    return Ok(());
+                }
+                Err(e) => return Err(TestCaseError::fail(format!("{e:?}"))),
+                Ok(m) => m,
+            };
+            prop_assert!(!want.clash, "{want:?}");
+            let got: BTreeSet<String> = m.conflicts.iter().map(|c| c.path.clone()).collect();
+            prop_assert_eq!(&got, &want.conflicts);
+            let mut seen = seen.borrow_mut();
+            for c in &m.conflicts {
+                let kind = match c.clash {
+                    Clash::BothChanged(_) => "both changed",
+                    Clash::ChangedRemoved { .. } => "changed and removed",
+                    Clash::BothAdded => "both added",
+                    Clash::FileAndFolder { .. } => "file and folder",
+                    _ => "other",
+                };
+                *seen.entry(kind).or_default() += 1;
+                let stands = match c.stands {
+                    Some(Stands::Markers { .. }) => "markers",
+                    Some(Stands::Yours) => "yours",
+                    Some(Stands::Nothing) => "nothing",
+                    None => "not kept",
+                };
+                *seen.entry(stands).or_default() += 1;
+            }
+            let store = fx.repo.store();
+            let mut tree = read_tree(store, m.root, &made.listings);
+            for (path, kept) in &want.kept {
+                let Some(V::Conflict(id)) = tree.insert(path.clone(), KEPT) else {
+                    return Err(TestCaseError::fail(format!("no conflict at {path}")));
+                };
+                let r = store.conflict(&id).unwrap();
+                let terms: Vec<Node> = r.terms.iter().map(|t| term_node(store, *t)).collect();
+                prop_assert_eq!(&terms, &kept.terms, "{}", path);
+                let own = r
+                    .own
+                    .map(|own| (own.marker, own.version.map(|v| leaf(store, v.kind, v.id))));
+                let shown = match own {
+                    Some((7, Some(v))) => Shown::Marked(v),
+                    None if r.mine().is_some() => Shown::Yours,
+                    None => Shown::Nothing,
+                    other => return Err(TestCaseError::fail(format!("{path}: {other:?}"))),
+                };
+                prop_assert_eq!(&shown, &kept.shown, "{}", path);
+            }
+            prop_assert_eq!(tree, want.files);
+            Ok(())
+        })
+        .unwrap();
+    let seen = seen.into_inner();
+    for kind in [
+        "both changed",
+        "changed and removed",
+        "both added",
+        "file and folder",
+        "markers",
+        "yours",
+        "nothing",
+    ] {
+        assert!(seen.get(kind).is_some_and(|&n| n >= 3), "{seen:?}");
+    }
+    assert!(
+        !seen.contains_key("not kept") && !seen.contains_key("other"),
+        "{seen:?}"
+    );
+}
+
+/// What a record's term holds, as the model sees a path: a folder with everything below it.
+fn term_node(store: &Store, t: Option<Term>) -> Node {
+    match t {
+        None => Node::Missing,
+        Some(t) if t.kind == EntryKind::Folder => {
+            Node::Folder(read_tree(store, t.id, &HashMap::new()))
+        }
+        Some(t) => Node::Leaf(leaf(store, t.kind, t.id)),
+    }
 }
 
 fn ada() -> Person {
@@ -1484,6 +1682,8 @@ struct Hist {
     repo: Repository,
     /// The project's first save, which holds nothing.
     first: Id,
+    /// What its combines keep.
+    keep: Keep,
 }
 
 impl Hist {
@@ -1491,7 +1691,12 @@ impl Hist {
         let dir = tempfile::tempdir().unwrap();
         let repo = Repository::init(dir.path(), &ada()).unwrap();
         let first = repo.current().unwrap().1.state.lines["main"];
-        Hist { dir, repo, first }
+        Hist {
+            dir,
+            repo,
+            first,
+            keep: Keep::Conflicts,
+        }
     }
 
     /// Commits a step whose state is the current one as `change` leaves it.
@@ -3186,7 +3391,7 @@ fn moves_case(
             }
         }
     }
-    let mut want = model(&was[0], &was[1], &was[2]);
+    let mut want = model(&was[0], &was[1], &was[2], None);
     want.conflicts.extend(clashes.keys().cloned());
     let lock = h.repo.lock_for_change("test", &mut |_| {}).unwrap();
     let mut packs = h.repo.new_packs().unwrap();
@@ -3244,6 +3449,7 @@ fn combine_by(
         message,
         who: &who,
         git_excludes: None,
+        keep: h.keep,
     };
     combine_with(&mut h.repo, &asked, &mut |_| {}, bounds)
 }
@@ -3411,6 +3617,9 @@ fn a_combined_save_has_both_parents_and_says_what_it_combined() {
         Combined::Made {
             starts: vec![base],
             merged_files: vec![],
+            conflicts: vec![],
+            more: 0,
+            conflict_count: 0,
         }
     );
     assert_eq!(done.with, side);
@@ -3640,6 +3849,8 @@ fn in_conflict(h: &mut Hist) {
 #[test]
 fn a_conflict_stops_and_stores_nothing() {
     let mut h = Hist::new();
+    // Milestone 8's combine, which stops at a conflict.
+    h.keep = Keep::OnlyIfClean;
     in_conflict(&mut h);
     let before = h.untouched();
     let err = combine_in(&mut h, "side").unwrap_err();
@@ -3660,6 +3871,8 @@ fn a_conflict_stops_and_stores_nothing() {
 #[test]
 fn a_refused_combine_leaves_nothing_in_tmp() {
     let mut h = Hist::new();
+    // Milestone 8's combine, which stops at a conflict.
+    h.keep = Keep::OnlyIfClean;
     in_conflict(&mut h);
     assert!(combine_in(&mut h, "side").is_err());
     assert_eq!(h.tmp_files(), Vec::<std::ffi::OsString>::new());
@@ -3709,12 +3922,14 @@ fn many_conflicts_are_counted_after_the_first_100() {
     let conflict = |path: &str| Conflict {
         path: path.into(),
         clash: Clash::BothAdded,
+        stands: None,
     };
     let err = CombineError::Conflicts {
         names,
         conflicts: vec![conflict("a"), conflict("b")],
         more: 1_234,
         rules_not_whole: None,
+        why: NotKept::OnlyIfClean,
     };
     assert_eq!(
         err.to_string(),
@@ -4010,6 +4225,8 @@ fn a_result_past_the_limits_is_refused() {
 #[test]
 fn the_folders_rules_decide() {
     let mut h = Hist::new();
+    // Milestone 8's combine, which stops at a conflict.
+    h.keep = Keep::OnlyIfClean;
     let first = h.first;
     let lines: String = (0..20).map(|i| format!("line {i}\n")).collect();
     let unity = |from: &str, to: &str| tree(&[("Main.unity", f(&lines.replace(from, to)))]);
@@ -4025,6 +4242,7 @@ fn the_folders_rules_decide() {
     let want = Conflict {
         path: "Main.unity".into(),
         clash: Clash::BothChanged(NotMerged::NoMarkers { theirs: false }),
+        stands: None,
     };
     assert_eq!(conflicts, &[want]);
     // Without the rule, the same file merges.
@@ -4067,6 +4285,8 @@ fn changed_apart(h: &mut Hist) {
 fn while_the_rules_are_not_read_whole_no_file_is_merged_line_by_line() {
     for text in NOT_WHOLE {
         let mut h = Hist::new();
+        // Milestone 8's combine, which stops at a conflict.
+        h.keep = Keep::OnlyIfClean;
         changed_apart(&mut h);
         rules_file(&h, text);
         let before = h.untouched();
@@ -4083,6 +4303,7 @@ fn while_the_rules_are_not_read_whole_no_file_is_merged_line_by_line() {
         let want = Conflict {
             path: "a.txt".into(),
             clash: Clash::BothChanged(NotMerged::RulesNotWhole { theirs: false }),
+            stands: None,
         };
         assert_eq!(conflicts, &[want], "{text}");
         assert_eq!(
@@ -4113,6 +4334,8 @@ fn a_rule_that_can_match_no_file_stops_line_merging_until_it_is_fixed() {
     ];
     for text in rules {
         let mut h = Hist::new();
+        // Milestone 8's combine, which stops at a conflict.
+        h.keep = Keep::OnlyIfClean;
         changed_apart(&mut h);
         rules_file(&h, text);
         let err = combine_in(&mut h, "side").unwrap_err();
@@ -4130,6 +4353,8 @@ fn a_rule_that_can_match_no_file_stops_line_merging_until_it_is_fixed() {
 #[test]
 fn a_file_that_clashes_for_a_reason_of_its_own_keeps_it_while_the_rules_are_not_read_whole() {
     let mut h = Hist::new();
+    // Milestone 8's combine, which stops at a conflict.
+    h.keep = Keep::OnlyIfClean;
     let first = h.first;
     let bin = |b: u8| V::File(vec![0, b], false);
     let base = h.save(
@@ -4178,6 +4403,8 @@ fn a_file_that_clashes_for_a_reason_of_its_own_keeps_it_while_the_rules_are_not_
 fn the_hint_names_the_rules_file_when_only_a_counted_conflict_is_there_for_it() {
     // 100 files that overlap come first; `z.txt` would merge, and is only counted.
     let mut h = Hist::new();
+    // Milestone 8's combine, which stops at a conflict.
+    h.keep = Keep::OnlyIfClean;
     let first = h.first;
     let make = |side: Option<&str>, z: V| {
         let mut t: Tree = (0..100)
@@ -4295,6 +4522,8 @@ fn only_conflict(err: &CombineError) -> (&Conflict, Option<Side>) {
 #[test]
 fn a_rule_only_the_line_combined_in_has_stops_the_combine_and_names_that_line() {
     let mut h = Hist::new();
+    // Milestone 8's combine, which stops at a conflict.
+    h.keep = Keep::OnlyIfClean;
     let (art, _) = scene_apart(&mut h, Some(SCENE_RULE), None);
     let before = h.untouched();
     let err = combine_in(&mut h, "art").unwrap_err();
@@ -4331,6 +4560,8 @@ fn a_rule_only_the_line_combined_in_has_stops_the_combine_and_names_that_line() 
 #[test]
 fn a_rule_on_both_lines_is_the_folders() {
     let mut h = Hist::new();
+    // Milestone 8's combine, which stops at a conflict.
+    h.keep = Keep::OnlyIfClean;
     scene_apart(&mut h, Some(SCENE_RULE), Some(SCENE_RULE));
     let err = combine_in(&mut h, "art").unwrap_err();
     assert_eq!(
@@ -4366,6 +4597,8 @@ fn while_the_other_sides_rules_are_not_read_whole_no_file_is_merged_and_that_sid
     ];
     for (case, rules) in cases {
         let mut h = Hist::new();
+        // Milestone 8's combine, which stops at a conflict.
+        h.keep = Keep::OnlyIfClean;
         theirs_rules_apart(&mut h, &rules);
         let before = h.untouched();
         let err = combine_in(&mut h, "side").unwrap_err();
@@ -4429,6 +4662,7 @@ fn the_other_sides_rules_file_listed_over_1_mib_is_passed_over_unread() {
             &Conflict {
                 path: "a.txt".into(),
                 clash: Clash::BothChanged(NotMerged::RulesNotWhole { theirs: true }),
+                stands: None,
             },
             Some(Side::Theirs)
         )
@@ -4438,6 +4672,8 @@ fn the_other_sides_rules_file_listed_over_1_mib_is_passed_over_unread() {
 #[test]
 fn when_both_rules_files_are_broken_the_folders_is_named() {
     let mut h = Hist::new();
+    // Milestone 8's combine, which stops at a conflict.
+    h.keep = Keep::OnlyIfClean;
     theirs_rules_apart(&mut h, &[("opalro.toml", f(NOT_WHOLE[0]))]);
     rules_file(&h, NOT_WHOLE[2]);
     let err = combine_in(&mut h, "side").unwrap_err();
@@ -4470,6 +4706,8 @@ fn with_no_rules_file_on_either_side_a_file_merges_as_before() {
 #[test]
 fn a_moved_file_whose_old_name_only_the_other_sides_rules_protect_is_not_merged() {
     let mut h = Hist::new();
+    // Milestone 8's combine, which stops at a conflict.
+    h.keep = Keep::OnlyIfClean;
     let first = h.first;
     let s = h.save("main", first, &tree(&[("Main.unity", f(BODY))]));
     let o = h.save("main", s, &tree(&[("Main.txt", f(BODY))]));
@@ -4488,6 +4726,7 @@ fn a_moved_file_whose_old_name_only_the_other_sides_rules_protect_is_not_merged(
             &Conflict {
                 path: "Main.txt".into(),
                 clash: Clash::BothChanged(NotMerged::NoMarkers { theirs: true }),
+                stands: None,
             },
             None
         )
@@ -4614,10 +4853,20 @@ fn undo_takes_a_combine_back_and_redo_brings_it_again() {
 /// `h` opened again, as the next command would open it.
 #[cfg(feature = "fault-injection")]
 fn reopened(h: Hist) -> Hist {
-    let Hist { dir, repo, first } = h;
+    let Hist {
+        dir,
+        repo,
+        first,
+        keep,
+    } = h;
     drop(repo);
     let repo = Repository::open(dir.path()).unwrap();
-    Hist { dir, repo, first }
+    Hist {
+        dir,
+        repo,
+        first,
+        keep,
+    }
 }
 
 #[cfg(feature = "fault-injection")]
@@ -4805,6 +5054,7 @@ fn undo_after_tidy_still_takes_a_combine_back() {
         message: None,
         who: &who,
         git_excludes: None,
+        keep: Keep::Conflicts,
     };
     let done = combine_with(&mut h.repo, &asked, &mut |_| {}, bounds()).unwrap();
     // Two days on, inside a 30-day window, and past the day a new pack is left alone.
@@ -5113,4 +5363,852 @@ fn a_side_past_the_limits_is_named_though_following_moves_meets_it_first() {
     let newest = "Line main's newest save is past Opalro's limits for a save (";
     assert!(words.starts_with(newest), "{words}");
     assert_untouched(&h, &before);
+}
+
+// Kept conflicts.
+
+fn sides() -> Sides {
+    Sides {
+        ours: "main".into(),
+        ours_save: ChangeId([1; 16]),
+        theirs: "side".into(),
+        theirs_save: ChangeId([2; 16]),
+        parted: Parted::One(ChangeId([3; 16])),
+    }
+}
+
+fn no_rules() -> RuleMatcher {
+    RuleMatcher::new(&RulesRead::default(), &RulesRead::default())
+}
+
+/// A text marked as the merge marks one clash, between `before` and `after`.
+fn marked(labels: &Labels, [before, ours, base, theirs, after]: [&str; 5]) -> Vec<u8> {
+    format!(
+        "{before}<<<<<<< {}\n{ours}||||||| {}\n{base}=======\n{theirs}>>>>>>> {}\n{after}",
+        labels.ours, labels.base, labels.theirs
+    )
+    .into_bytes()
+}
+
+impl Fixture {
+    /// The merge of three stored roots keeping conflicts, with `rules`; what it built is stored.
+    fn keeping(&mut self, ids: [Id; 3], rules: &RuleMatcher) -> (Merged, Made) {
+        let mut made = Made {
+            keep: Some(sides()),
+            ..Made::default()
+        };
+        let m = self.merge_with(ids, rules, false, &mut made).unwrap();
+        (m, made)
+    }
+
+    fn kept(&mut self, s: &Tree, o: &Tree, t: &Tree) -> (Merged, Made) {
+        let ids = self.three(s, o, t);
+        self.keeping(ids, &no_rules())
+    }
+
+    /// The record of the conflict at `path` of the stored tree `root`.
+    fn record(&self, root: Id, path: &str) -> Record {
+        let V::Conflict(id) = self.read(root)[path] else {
+            panic!("no conflict at {path}");
+        };
+        self.repo.store().conflict(&id).unwrap()
+    }
+
+    /// What each term of a record holds.
+    fn terms(&self, r: &Record) -> Vec<Option<V>> {
+        let store = self.repo.store();
+        r.terms
+            .iter()
+            .map(|t| t.map(|t| leaf(store, t.kind, t.id)))
+            .collect()
+    }
+}
+
+/// The one conflict a merge made: at `path`, `clash`, standing as `stands`.
+fn one_kept(m: &Merged, path: &str, clash: Clash, stands: Stands) {
+    let want = Conflict {
+        path: path.into(),
+        clash,
+        stands: Some(stands),
+    };
+    assert_eq!(m.conflicts, [want]);
+    assert_eq!(m.more, 0);
+}
+
+#[test]
+fn both_changed_text_is_kept_with_markers() {
+    let mut fx = Fixture::new();
+    let (s, o, t) = (f(BODY), edit(2, "main"), edit(2, "side"));
+    let one = |v: &V| tree(&[("a.txt", v.clone())]);
+    let (m, made) = fx.kept(&one(&s), &one(&o), &one(&t));
+    let overlap = NotMerged::Overlap {
+        endings_only: false,
+    };
+    one_kept(
+        &m,
+        "a.txt",
+        Clash::BothChanged(overlap),
+        Stands::Markers { places: 1 },
+    );
+    assert!(m.merged_files.is_empty());
+    let top = fx.repo.store().listing(&m.root).unwrap();
+    assert_eq!(top.get("a.txt").unwrap().kind, EntryKind::Conflict);
+    let r = fx.record(m.root, "a.txt");
+    // Yours, where the lines parted, theirs.
+    assert_eq!(fx.terms(&r), [Some(o), Some(s), Some(t)]);
+    let own = r.own.unwrap();
+    assert_eq!(own.marker, 7);
+    let labels = sides().labels(Parted::One(ChangeId([3; 16])));
+    let want = marked(
+        &labels,
+        ["one\ntwo\n", "main\n", "three\n", "side\n", "four\nfive\n"],
+    );
+    let version = own.version.unwrap();
+    assert_eq!(version.size, want.len() as u64);
+    // Stored as the merge gave it, and it reads back with one marked place.
+    let store = fx.repo.store();
+    assert_eq!(
+        leaf(store, version.kind, version.id),
+        V::File(want.clone(), false)
+    );
+    let left = scan(&mut &want[..], own.marker).unwrap();
+    assert_eq!((left.opening, left.closing), (1, 1));
+    assert_eq!(made.records.values().collect::<Vec<_>>(), [&r]);
+}
+
+/// Three roots each holding `a.txt` as listed: `(contents, size)`.
+fn listed(fx: &mut Fixture, three: [(&[u8], u64); 3]) -> [Id; 3] {
+    let mut packs = fx.repo.new_packs().unwrap();
+    let ids = three.map(|(bytes, size)| {
+        let entry = Entry {
+            name: "a.txt".into(),
+            kind: EntryKind::File,
+            id: packs.add_content(bytes).unwrap(),
+            size,
+        };
+        let listing = Listing::new(vec![entry]).unwrap();
+        store_listing(fx.repo.store(), &mut packs, &listing).unwrap()
+    });
+    fx.repo.store_packs(&fx.lock, packs).unwrap();
+    ids
+}
+
+#[test]
+fn both_changed_binary_stands_as_yours() {
+    let mut fx = Fixture::new();
+    let lines = "\n".repeat(1_000_001);
+    let cases = [
+        (["a\0\n", "b\0\n", "c\0\n"].map(f), NotMerged::Binary),
+        (
+            [lines.clone(), format!("{lines}o\n"), format!("{lines}t\n")].map(|t| f(&t)),
+            NotMerged::TooManyLines,
+        ),
+        (
+            ["x\n", "y\r\n", "y\n"].map(f),
+            NotMerged::Overlap { endings_only: true },
+        ),
+    ];
+    for ([s, o, t], why) in cases {
+        let one = |v: &V| tree(&[("a.txt", v.clone())]);
+        let (m, _) = fx.kept(&one(&s), &one(&o), &one(&t));
+        one_kept(&m, "a.txt", Clash::BothChanged(why), Stands::Yours);
+        let r = fx.record(m.root, "a.txt");
+        assert_eq!(r.own, None, "{why:?}");
+        assert_eq!(fx.terms(&r), [Some(o), Some(s), Some(t)]);
+    }
+    // Too big: listed past 64 MiB, so nothing is read.
+    let big = crate::changes::MAX_LINES_SIZE + 1;
+    let ids = listed(&mut fx, [(b"s\n", big), (b"o\n", big), (b"t\n", big)]);
+    let (m, _) = fx.keeping(ids, &no_rules());
+    one_kept(
+        &m,
+        "a.txt",
+        Clash::BothChanged(NotMerged::TooBig),
+        Stands::Yours,
+    );
+    assert_eq!(fx.record(m.root, "a.txt").own, None);
+}
+
+/// The rules `text` gives, read whole.
+fn rules_of(text: &str) -> RulesRead {
+    let (rules, _) = crate::rules::parse(text.as_bytes()).unwrap();
+    RulesRead {
+        rules,
+        ..RulesRead::default()
+    }
+}
+
+#[test]
+fn a_rule_on_either_line_saying_no_markers_keeps_it_as_yours() {
+    let mut fx = Fixture::new();
+    let scene = rules_of(SCENE_RULE);
+    let none = RulesRead::default();
+    let one = |v: V| tree(&[("Main.unity", v)]);
+    let ids = fx.three(&one(f(BODY)), &one(edit(2, "main")), &one(edit(2, "side")));
+    for (rules, theirs) in [
+        (RuleMatcher::new(&scene, &none), false),
+        (RuleMatcher::new(&none, &scene), true),
+    ] {
+        let (m, _) = fx.keeping(ids, &rules);
+        let why = NotMerged::NoMarkers { theirs };
+        one_kept(&m, "Main.unity", Clash::BothChanged(why), Stands::Yours);
+        assert_eq!(fx.record(m.root, "Main.unity").own, None);
+    }
+}
+
+impl Hist {
+    /// The merge of three saves keeping conflicts, with `rules`; what it built is stored.
+    fn kept(&mut self, s: Id, o: Id, t: Id, rules: &RuleMatcher) -> Merged {
+        let [s, o, t] = [s, o, t].map(|id| self.version(id));
+        let lock = self.repo.lock_for_change("test", &mut |_| {}).unwrap();
+        let mut packs = self.repo.new_packs().unwrap();
+        let mut made = Made {
+            keep: Some(sides()),
+            ..Made::default()
+        };
+        let m = merge_three(&self.repo, &mut packs, &mut made, false, &s, &o, &t, rules).unwrap();
+        self.repo.store_packs(&lock, packs).unwrap();
+        m
+    }
+}
+
+#[test]
+fn a_moved_file_is_marked_only_when_both_its_names_allow_it() {
+    let mut h = Hist::new();
+    let first = h.first;
+    let s = h.save("main", first, &tree(&[("Main.unity", f(BODY))]));
+    let o = h.save("main", s, &tree(&[("Main.txt", f(BODY))]));
+    let o = h.save("main", o, &tree(&[("Main.txt", edit(0, "ONE"))]));
+    let t = h.save("side", s, &tree(&[("Main.unity", edit(0, "UNO"))]));
+    let overlap = Clash::BothChanged(NotMerged::Overlap {
+        endings_only: false,
+    });
+    let m = h.kept(s, o, t, &no_rules());
+    one_kept(&m, "Main.txt", overlap, Stands::Markers { places: 1 });
+    // Its old name is a scene's, which no line merges: no markers.
+    let no = NotMerged::NoMarkers { theirs: false };
+    let m = h.kept(s, o, t, &scene_rule());
+    one_kept(&m, "Main.txt", Clash::BothChanged(no), Stands::Yours);
+}
+
+#[test]
+fn changed_and_removed_stands_as_your_version_or_nothing() {
+    let mut fx = Fixture::new();
+    let s = tree(&[("a.txt", f(BODY))]);
+    let changed = tree(&[("a.txt", edit(0, "changed"))]);
+    let gone = Tree::new();
+    let removed_on = |side| Clash::ChangedRemoved { removed_on: side };
+    let (m, _) = fx.kept(&s, &changed, &gone);
+    one_kept(&m, "a.txt", removed_on(Side::Theirs), Stands::Yours);
+    let r = fx.record(m.root, "a.txt");
+    assert_eq!(r.own, None);
+    assert_eq!(
+        fx.terms(&r),
+        [Some(edit(0, "changed")), Some(f(BODY)), None]
+    );
+    let (m, _) = fx.kept(&s, &gone, &changed);
+    one_kept(&m, "a.txt", removed_on(Side::Ours), Stands::Nothing);
+    let r = fx.record(m.root, "a.txt");
+    assert_eq!(r.own, None);
+    assert_eq!(
+        fx.terms(&r),
+        [None, Some(f(BODY)), Some(edit(0, "changed"))]
+    );
+    assert_eq!(stands_as(&r), None);
+}
+
+#[test]
+fn both_added_text_gets_markers_with_an_empty_middle() {
+    let mut fx = Fixture::new();
+    let (m, _) = fx.kept(
+        &Tree::new(),
+        &tree(&[("a.txt", x("a\n"))]),
+        &tree(&[("a.txt", f("b\n"))]),
+    );
+    one_kept(&m, "a.txt", Clash::BothAdded, Stands::Markers { places: 1 });
+    let r = fx.record(m.root, "a.txt");
+    assert_eq!(fx.terms(&r), [Some(x("a\n")), None, Some(f("b\n"))]);
+    let labels = sides().labels(Parted::Nothing(Some(ChangeId([3; 16]))));
+    assert!(labels.base.ends_with(", which held nothing here"));
+    let want = marked(&labels, ["", "a\n", "", "b\n", ""]);
+    // The marked text is ours' kind.
+    let version = r.own.unwrap().version.unwrap();
+    let store = fx.repo.store();
+    assert_eq!(leaf(store, version.kind, version.id), V::File(want, true));
+}
+
+#[test]
+fn both_added_binary_stands_as_yours() {
+    let mut fx = Fixture::new();
+    // Not text, and the same text but for the executable mark.
+    for (o, t) in [(f("a\0"), f("b\0")), (x("a\n"), f("a\n"))] {
+        let (m, _) = fx.kept(
+            &Tree::new(),
+            &tree(&[("a.bin", o.clone())]),
+            &tree(&[("a.bin", t.clone())]),
+        );
+        one_kept(&m, "a.bin", Clash::BothAdded, Stands::Yours);
+        let r = fx.record(m.root, "a.bin");
+        assert_eq!(r.own, None);
+        assert_eq!(fx.terms(&r), [Some(o), None, Some(t)]);
+    }
+}
+
+#[test]
+fn a_file_against_a_folder_holds_the_folder_whole() {
+    let mut fx = Fixture::new();
+    let folder = tree(&[("ui/a.txt", f("a\n")), ("ui/deep/b.txt", f("b\n"))]);
+    let file = tree(&[("ui", f("ui\n"))]);
+    for (o, t, folder_on) in [(&folder, &file, Side::Ours), (&file, &folder, Side::Theirs)] {
+        let ids = fx.three(&Tree::new(), o, t);
+        let (m, _) = fx.keeping(ids, &no_rules());
+        one_kept(&m, "ui", Clash::FileAndFolder { folder_on }, Stands::Yours);
+        // Nothing below the place is a conflict of its own.
+        let result = fx.read(m.root);
+        assert_eq!(result.keys().collect::<Vec<_>>(), ["ui"]);
+        let r = fx.record(m.root, "ui");
+        let (at, side) = if folder_on == Side::Ours {
+            (0, ids[1])
+        } else {
+            (2, ids[2])
+        };
+        let held = fx
+            .repo
+            .store()
+            .listing(&side)
+            .unwrap()
+            .get("ui")
+            .unwrap()
+            .id;
+        let term = r.terms[at].unwrap();
+        assert_eq!(
+            (term.kind, term.id, term.size),
+            (EntryKind::Folder, held, 0)
+        );
+        assert_eq!(r.terms[1], None);
+        assert_eq!(r.own, None);
+    }
+}
+
+#[test]
+fn two_links_that_differ_are_kept_standing_as_yours() {
+    let mut fx = Fixture::new();
+    for [s, o, t] in [
+        [link("x"), link("y"), link("z")],
+        [V::Project(1), V::Project(2), V::Project(3)],
+    ] {
+        let one = |v: &V| tree(&[("l", v.clone())]);
+        let (m, _) = fx.kept(&one(&s), &one(&o), &one(&t));
+        let not_files = Clash::BothChanged(NotMerged::NotFiles);
+        one_kept(&m, "l", not_files, Stands::Yours);
+        let r = fx.record(m.root, "l");
+        assert_eq!(fx.terms(&r), [Some(o), Some(s), Some(t)]);
+        assert_eq!(r.own, None);
+    }
+}
+
+#[test]
+fn the_marked_text_has_the_executable_mark_the_merge_gives() {
+    let mut fx = Fixture::new();
+    let marked_as = |v: V, mark: bool| match v {
+        V::File(bytes, _) => V::File(bytes, mark),
+        v => v,
+    };
+    // Ours made it executable; then theirs took the mark away.
+    for (marks, want) in [([false, true, false], true), ([true, true, false], false)] {
+        let three = [f(BODY), edit(2, "main"), edit(2, "side")];
+        let [s, o, t] = [0, 1, 2].map(|i| marked_as(three[i].clone(), marks[i]));
+        let one = |v: &V| tree(&[("a.txt", v.clone())]);
+        let (m, _) = fx.kept(&one(&s), &one(&o), &one(&t));
+        let r = fx.record(m.root, "a.txt");
+        let version = r.own.unwrap().version.unwrap();
+        let kind = if want {
+            EntryKind::Executable
+        } else {
+            EntryKind::File
+        };
+        assert_eq!(version.kind, kind, "{marks:?}");
+    }
+}
+
+const BROKEN: &str = "[[rule]\n";
+
+/// `a.txt` changed on both lines: on `side` at line `side_at` (0, far from `main`'s change; 4,
+/// where it is), `side` holding `side_rules` too; the project is on `main`.
+fn text_both_changed(h: &mut Hist, side_at: usize, side_rules: &[(&str, V)]) {
+    let first = h.first;
+    let base = h.save("main", first, &tree(&[("a.txt", f(BODY))]));
+    let side = with(&tree(&[("a.txt", edit(side_at, "side"))]), side_rules);
+    let side = h.plant(&[base], &side, Some(&[]));
+    h.set(|s| {
+        s.lines.insert("side".into(), side);
+    });
+    h.save("main", base, &tree(&[("a.txt", edit(4, "main"))]));
+}
+
+/// The places a combine stopped at because rules can't be read whole, and whose rules.
+fn undecided(err: &CombineError) -> (Vec<&str>, Side) {
+    let CombineError::Conflicts {
+        conflicts,
+        more: 0,
+        rules_not_whole: Some(side),
+        why: NotKept::RulesNotWhole,
+        ..
+    } = err
+    else {
+        panic!("{err:?}");
+    };
+    (conflicts.iter().map(|c| c.path.as_str()).collect(), *side)
+}
+
+#[test]
+fn while_the_rules_are_not_read_whole_a_text_both_changed_stops_the_combine() {
+    // Changes that would merge, and changes that overlap.
+    for side_at in [0, 4] {
+        let mut h = Hist::new();
+        text_both_changed(&mut h, side_at, &[]);
+        rules_file(&h, BROKEN);
+        let before = h.untouched();
+        let err = combine_in(&mut h, "side").unwrap_err();
+        assert_eq!(undecided(&err), (vec!["a.txt"], Side::Ours));
+        assert_eq!(
+            err.to_string(),
+            "Combining side into main would have to merge 1 place that opalro.toml decides, and \
+             it can't be read whole, so nothing was changed:\n  a.txt: changed on both lines, \
+             and opalro.toml can't be read whole, so no file is merged line by line"
+        );
+        assert_eq!(err.hint().unwrap(), RULES_HINT);
+        assert_untouched(&h, &before);
+        // The target's file.
+        let mut h = Hist::new();
+        text_both_changed(&mut h, side_at, &[("opalro.toml", f(BROKEN))]);
+        let before = h.untouched();
+        let err = combine_in(&mut h, "side").unwrap_err();
+        assert_eq!(undecided(&err), (vec!["a.txt"], Side::Theirs));
+        assert_eq!(
+            err.to_string(),
+            "Combining side into main would have to merge 1 place that opalro.toml decides, and \
+             the opalro.toml on side can't be read whole, so nothing was changed:\n  a.txt: \
+             changed on both lines, and opalro.toml on side can't be read whole, so no file is \
+             merged line by line"
+        );
+        assert_eq!(err.hint().unwrap(), THEIRS_HINT);
+        assert_untouched(&h, &before);
+    }
+}
+
+#[test]
+fn while_the_rules_are_not_read_whole_a_picture_is_still_kept_as_yours() {
+    let mut h = Hist::new();
+    let first = h.first;
+    let base = h.save("main", first, &tree(&[("pic.png", f("base\0"))]));
+    h.save("side", base, &tree(&[("pic.png", f("side\0"))]));
+    h.save("main", base, &tree(&[("pic.png", f("main\0"))]));
+    rules_file(&h, BROKEN);
+    let (_, made, count) = kept_combine(&mut h);
+    let want = Conflict {
+        path: "pic.png".into(),
+        clash: Clash::BothChanged(NotMerged::Binary),
+        stands: Some(Stands::Yours),
+    };
+    assert_eq!((made, count), (vec![want], 1));
+    assert_eq!(h.folder()["pic.png"], f("main\0"));
+}
+
+#[test]
+fn the_stop_names_only_the_places_the_rules_would_decide() {
+    let mut h = Hist::new();
+    let first = h.first;
+    let three = |a: V, b: V, pic: &str| tree(&[("a.txt", a), ("b.txt", b), ("pic.png", f(pic))]);
+    let base = h.save("main", first, &three(f(BODY), f(BODY), "base\0"));
+    let side = three(edit(4, "side"), edit(0, "side"), "side\0");
+    h.save("side", base, &side);
+    let main = three(edit(4, "main"), edit(4, "main"), "main\0");
+    h.save("main", base, &main);
+    rules_file(&h, BROKEN);
+    let before = h.untouched();
+    let err = combine_in(&mut h, "side").unwrap_err();
+    // One overlaps, one would merge; the picture is no rule's to decide.
+    assert_eq!(undecided(&err), (vec!["a.txt", "b.txt"], Side::Ours));
+    let words = err.to_string();
+    let first_line = "Combining side into main would have to merge 2 places that opalro.toml";
+    assert!(words.starts_with(first_line), "{words}");
+    assert!(!words.contains("pic.png"), "{words}");
+    assert_untouched(&h, &before);
+}
+
+/// Stores a conflict record of three files holding these bytes, and the files; gives its ID.
+fn plant_record(h: &mut Hist, versions: [&[u8]; 3]) -> Id {
+    let lock = h.repo.lock_for_change("test", &mut |_| {}).unwrap();
+    let mut packs = h.repo.new_packs().unwrap();
+    let terms = versions
+        .iter()
+        .map(|bytes| {
+            Some(Term {
+                kind: EntryKind::File,
+                id: packs.add_content(bytes).unwrap(),
+                size: bytes.len() as u64,
+            })
+        })
+        .collect();
+    let record = Record { terms, own: None };
+    let id = packs
+        .add_record(ObjectKind::Conflict, &record.encode())
+        .unwrap();
+    h.repo.store_packs(&lock, packs).unwrap();
+    id
+}
+
+/// `t` as the folder holds it: each conflict as what it stands as.
+fn standing(h: &Hist, t: &Tree) -> Tree {
+    let store = h.repo.store();
+    let mut out = Tree::new();
+    for (path, v) in t {
+        let v = match v {
+            V::Conflict(id) => match stands_as(&store.conflict(id).unwrap()) {
+                Some(term) => leaf(store, term.kind, term.id),
+                None => continue,
+            },
+            v => v.clone(),
+        };
+        out.insert(path.clone(), v);
+    }
+    out
+}
+
+/// Plants `base`, then `main` and `side` after it, and puts the project on `main`.
+fn planted_lines(h: &mut Hist, base: &Tree, main: &Tree, side: &Tree) {
+    let first = h.first;
+    let b = h.plant(&[first], base, Some(&[]));
+    let o = h.plant(&[b], main, Some(&[]));
+    let t = h.plant(&[b], side, Some(&[]));
+    h.set(|s| {
+        s.lines.insert("side".into(), t);
+        s.lines.insert("main".into(), o);
+    });
+    let folder = standing(h, main);
+    h.on("main", &folder);
+}
+
+/// Combines `side` into `main`, keeping conflicts: the combined save's tree, the conflicts the
+/// combine made, and the count of all it holds.
+fn kept_combine(h: &mut Hist) -> (Tree, Vec<Conflict>, u64) {
+    let done = combine_in(h, "side").unwrap();
+    let Combined::Made {
+        conflicts,
+        more: 0,
+        conflict_count,
+        ..
+    } = done.result
+    else {
+        panic!("{:?}", done.result);
+    };
+    let saved = read_tree(h.repo.store(), h.save_of(done.save).root, &HashMap::new());
+    (saved, conflicts, conflict_count)
+}
+
+#[test]
+fn a_conflict_both_lines_hold_alike_is_carried() {
+    let mut h = Hist::new();
+    let c = plant_record(&mut h, [b"mine\n", b"was\n", b"theirs\n"]);
+    let held = ("x.txt", V::Conflict(c));
+    let base = tree(&[held.clone(), ("a.txt", f(BODY))]);
+    let main = tree(&[held.clone(), ("a.txt", edit(4, "main"))]);
+    let side = tree(&[held, ("a.txt", edit(0, "side"))]);
+    planted_lines(&mut h, &base, &main, &side);
+    let (saved, made, count) = kept_combine(&mut h);
+    assert_eq!(saved["x.txt"], V::Conflict(c));
+    assert_eq!((made, count), (vec![], 1));
+    assert_eq!(h.folder()["x.txt"], f("mine\n"));
+}
+
+#[test]
+fn a_conflict_one_line_fixed_is_taken_fixed() {
+    let mut h = Hist::new();
+    let c = plant_record(&mut h, [b"mine\n", b"was\n", b"theirs\n"]);
+    let base = tree(&[("x.txt", V::Conflict(c)), ("a.txt", f(BODY))]);
+    let main = tree(&[("x.txt", f("fixed\n")), ("a.txt", edit(4, "main"))]);
+    let side = tree(&[("x.txt", V::Conflict(c)), ("a.txt", edit(0, "side"))]);
+    planted_lines(&mut h, &base, &main, &side);
+    let (saved, made, count) = kept_combine(&mut h);
+    assert_eq!(saved["x.txt"], f("fixed\n"));
+    assert_eq!((made, count), (vec![], 0));
+}
+
+#[test]
+fn a_conflict_made_on_one_line_only_is_carried() {
+    let mut h = Hist::new();
+    let c = plant_record(&mut h, [b"mine\n", b"was\n", b"theirs\n"]);
+    let base = tree(&[("x.txt", f("was\n")), ("a.txt", f(BODY))]);
+    let main = tree(&[("x.txt", f("was\n")), ("a.txt", edit(4, "main"))]);
+    let side = tree(&[("x.txt", V::Conflict(c)), ("a.txt", edit(0, "side"))]);
+    planted_lines(&mut h, &base, &main, &side);
+    let (saved, made, count) = kept_combine(&mut h);
+    assert_eq!(saved["x.txt"], V::Conflict(c));
+    assert_eq!((made, count), (vec![], 1));
+    assert_eq!(h.folder()["x.txt"], f("mine\n"));
+}
+
+const HELD_HINT: &str =
+    "Fix it on the line that holds it first (opalro resolve there), then run opalro combine again.";
+
+#[test]
+fn both_lines_changed_a_place_one_holds_in_conflict_stops_naming_it() {
+    let one = "x.txt is in conflict on main, and side changed it too, so nothing was changed.";
+    let other = "x.txt is in conflict on side, and main changed it too, so nothing was changed.";
+    let both = "x.txt is in conflict on both main and side, so nothing was changed.";
+    let both_hint =
+        "Fix it on both lines first (opalro resolve on each), then run opalro combine again.";
+    for case in 0..3 {
+        let mut h = Hist::new();
+        let c = plant_record(&mut h, [b"mine\n", b"was\n", b"theirs\n"]);
+        let d = plant_record(&mut h, [b"ours\n", b"was\n", b"other\n"]);
+        let (main_x, side_x, on, words, hint) = match case {
+            0 => (V::Conflict(c), f("side\n"), Held::Ours, one, HELD_HINT),
+            1 => (f("main\n"), V::Conflict(c), Held::Theirs, other, HELD_HINT),
+            _ => (V::Conflict(c), V::Conflict(d), Held::Both, both, both_hint),
+        };
+        let base = tree(&[("x.txt", f("was\n"))]);
+        let (main, side) = (tree(&[("x.txt", main_x)]), tree(&[("x.txt", side_x)]));
+        planted_lines(&mut h, &base, &main, &side);
+        let before = h.untouched();
+        let err = combine_in(&mut h, "side").unwrap_err();
+        let CombineError::HeldConflict {
+            path, at, on: by, ..
+        } = &err
+        else {
+            panic!("{err:?}");
+        };
+        assert_eq!((path.as_str(), at.as_str(), *by), ("x.txt", "x.txt", on));
+        assert_eq!(err.to_string(), words);
+        assert_eq!(err.hint().unwrap(), hint);
+        assert_untouched(&h, &before);
+    }
+}
+
+#[test]
+fn a_folder_holding_a_conflict_below_stops_the_combine_too() {
+    for ours_holds in [true, false] {
+        let mut h = Hist::new();
+        let c = plant_record(&mut h, [b"mine\n", b"was\n", b"theirs\n"]);
+        let base = tree(&[("ui/a.txt", f("was\n"))]);
+        let held = tree(&[("ui/a.txt", V::Conflict(c))]);
+        let file = tree(&[("ui", f("a file now\n"))]);
+        let (main, side, on, words) = if ours_holds {
+            let words = "ui/a.txt, inside ui, is in conflict on main, and side changed ui too, \
+                         so nothing was changed.";
+            (&held, &file, Held::Ours, words)
+        } else {
+            let words = "ui/a.txt, inside ui, is in conflict on side, and main changed ui too, \
+                         so nothing was changed.";
+            (&file, &held, Held::Theirs, words)
+        };
+        planted_lines(&mut h, &base, main, side);
+        let before = h.untouched();
+        let err = combine_in(&mut h, "side").unwrap_err();
+        let CombineError::HeldConflict {
+            path, at, on: by, ..
+        } = &err
+        else {
+            panic!("{err:?}");
+        };
+        assert_eq!((path.as_str(), at.as_str(), *by), ("ui", "ui/a.txt", on));
+        assert_eq!(err.to_string(), words);
+        assert_eq!(err.hint().unwrap(), HELD_HINT);
+        assert_untouched(&h, &before);
+    }
+}
+
+#[test]
+fn a_folder_with_no_conflict_below_is_kept_whole() {
+    let mut fx = Fixture::new();
+    let o = tree(&[
+        ("ui/a.txt", f("a\n")),
+        ("ui/deep/b.txt", f("b\n")),
+        ("z/c.txt", f("c\n")),
+    ]);
+    let t = tree(&[("ui", f("ui\n")), ("z/c.txt", f("c\n"))]);
+    let ids = fx.three(&Tree::new(), &o, &t);
+    let read = |fx: &mut Fixture, keep| {
+        let mut made = Made {
+            keep,
+            ..Made::default()
+        };
+        let before = counted::listings();
+        let m = fx.merge_with(ids, &no_rules(), false, &mut made).unwrap();
+        (m, counted::listings() - before)
+    };
+    let (_, clean) = read(&mut fx, None);
+    let (m, kept) = read(&mut fx, Some(sides()));
+    let clash = Clash::FileAndFolder {
+        folder_on: Side::Ours,
+    };
+    one_kept(&m, "ui", clash, Stands::Yours);
+    // `ui` and `ui/deep`, and nothing outside the folder.
+    assert_eq!(kept - clean, 2);
+}
+
+#[test]
+fn the_start_holding_a_conflict_both_lines_changed_is_unknown() {
+    let mut fx = Fixture::new();
+    // Its record is never read.
+    let start = tree(&[("x.txt", V::Conflict(Id([9; 32])))]);
+    let one = |v: V| tree(&[("x.txt", v)]);
+    let (m, _) = fx.kept(&start, &one(f("main\n")), &one(f("side\n")));
+    one_kept(
+        &m,
+        "x.txt",
+        Clash::StartUnknown,
+        Stands::Markers { places: 1 },
+    );
+    let r = fx.record(m.root, "x.txt");
+    assert_eq!(fx.terms(&r), [Some(f("main\n")), None, Some(f("side\n"))]);
+    let labels = sides().labels(Parted::Unknown);
+    assert!(labels.base.ends_with(", which Opalro can't tell here"));
+    let version = r.own.unwrap().version.unwrap();
+    let want = marked(&labels, ["", "main\n", "", "side\n", ""]);
+    let store = fx.repo.store();
+    assert_eq!(leaf(store, version.kind, version.id), V::File(want, false));
+    assert_eq!(
+        m.conflicts[0].describe("main", "side"),
+        "x.txt: changed on both lines, and Opalro can't tell what it held where they parted"
+    );
+    // Not text: as yours.
+    let (m, _) = fx.kept(&start, &one(f("main\0")), &one(f("side\0")));
+    one_kept(&m, "x.txt", Clash::StartUnknown, Stands::Yours);
+    // Alike on both lines: that is the result.
+    let same = one(f("same\n"));
+    let (m, _) = fx.kept(&start, &same, &same);
+    assert!(m.conflicts.is_empty());
+    assert_eq!(fx.read(m.root), same);
+}
+
+#[test]
+fn the_count_is_every_kind_6_entry_in_the_result() {
+    let mut h = Hist::new();
+    let c = plant_record(&mut h, [b"mine\n", b"was\n", b"theirs\n"]);
+    let held = ("x.txt", V::Conflict(c));
+    let base = tree(&[held.clone(), ("a.txt", f(BODY))]);
+    let main = tree(&[held.clone(), ("a.txt", edit(2, "main"))]);
+    let side = tree(&[held, ("a.txt", edit(2, "side"))]);
+    planted_lines(&mut h, &base, &main, &side);
+    let done = combine_in(&mut h, "side").unwrap();
+    let Combined::Made {
+        conflicts,
+        conflict_count,
+        ..
+    } = &done.result
+    else {
+        panic!("{:?}", done.result);
+    };
+    let paths: Vec<&str> = conflicts.iter().map(|c| c.path.as_str()).collect();
+    // One made, one carried.
+    assert_eq!((paths, *conflict_count), (vec!["a.txt"], 2));
+    // No count goes into the save.
+    let save = h.save_of(done.save);
+    assert_eq!(save.extra.keys().collect::<Vec<_>>(), [EXTRA_LINE]);
+}
+
+#[test]
+fn labels_name_the_line_and_target_and_their_saves() {
+    let mut h = Hist::new();
+    in_conflict(&mut h);
+    let lines = h.entry().1.state.lines;
+    let (main, side) = (lines["main"], lines["side"]);
+    let base = h.save_of(main).parents[0];
+    let letters = |id: Id| h.save_of(id).change_id.to_letters()[..8].to_owned();
+    let (main_l, base_l, side_l) = (letters(main), letters(base), letters(side));
+    let (saved, _, _) = kept_combine(&mut h);
+    let V::Conflict(id) = saved["a.txt"] else {
+        panic!("{saved:?}");
+    };
+    let store = h.repo.store();
+    let version = store.conflict(&id).unwrap().own.unwrap().version.unwrap();
+    let V::File(text, _) = leaf(store, version.kind, version.id) else {
+        panic!("not a file");
+    };
+    let text = String::from_utf8(text).unwrap();
+    for line in [
+        format!("<<<<<<< main ({main_l})\n"),
+        format!("||||||| where the lines parted ({base_l})\n"),
+        format!(">>>>>>> side ({side_l})\n"),
+    ] {
+        assert!(text.contains(&line), "{text}");
+    }
+    // The folder holds the marked text.
+    assert_eq!(h.folder()["a.txt"], f(&text));
+    h.assert_as_goto_gives();
+}
+
+#[test]
+fn without_the_feature_a_conflict_still_stops_the_combine_and_stores_no_record() {
+    let dir = tempfile::tempdir().unwrap();
+    Repository::init(dir.path(), &ada()).unwrap();
+    let repo = crate::test_support::without_conflicts_feature(dir.path());
+    let first = repo.current().unwrap().1.state.lines["main"];
+    let mut h = Hist {
+        dir,
+        repo,
+        first,
+        keep: Keep::Conflicts,
+    };
+    in_conflict(&mut h);
+    let before = h.untouched();
+    let err = combine_in(&mut h, "side").unwrap_err();
+    let no_feature = matches!(
+        err,
+        CombineError::Conflicts {
+            why: NotKept::NoFeature,
+            ..
+        }
+    );
+    assert!(no_feature, "{err:?}");
+    assert_eq!(
+        err.to_string(),
+        "Combining side into main would leave 1 file in conflict, which Opalro can't keep yet, \
+         so nothing was changed:\n  a.txt: changed on both lines, in the same place"
+    );
+    // No pack, so no record, was stored, and nothing is left in `tmp`.
+    assert_untouched(&h, &before);
+}
+
+#[test]
+fn every_kept_record_reads_back_and_names_stored_versions() {
+    let mut h = Hist::new();
+    let first = h.first;
+    let all = |a: V, pic: &str, gone: Option<&str>, ui: V| {
+        let mut t = tree(&[("a.txt", a), ("pic.png", f(pic)), ("ui/x.txt", f("x\n"))]);
+        if let Some(g) = gone {
+            t.insert("gone.txt".into(), f(g));
+        }
+        if let V::File(..) = ui {
+            t.remove("ui/x.txt");
+            t.insert("ui".into(), ui);
+        }
+        t
+    };
+    let base = h.save("main", first, &all(f(BODY), "b\0", Some("g\n"), V::Folder));
+    let side = all(edit(2, "side"), "s\0", None, f("ui\n"));
+    h.save("side", base, &side);
+    let mut main = all(edit(2, "main"), "m\0", Some("g, changed\n"), V::Folder);
+    main.insert("ui/x.txt".into(), f("x, changed\n"));
+    h.save("main", base, &main);
+    let (saved, made, count) = kept_combine(&mut h);
+    assert_eq!((made.len(), count), (4, 4), "{made:?}");
+    let store = h.repo.store();
+    for (path, v) in &saved {
+        let V::Conflict(id) = v else { continue };
+        let r = store.conflict(id).unwrap();
+        let own = r.own.and_then(|own| own.version);
+        for term in r.terms.iter().flatten().chain(&own) {
+            if term.kind == EntryKind::Folder {
+                store.listing(&term.id).unwrap();
+            } else {
+                let mut bytes = Vec::new();
+                store.copy_content(&term.id, &mut bytes).unwrap();
+                assert_eq!(bytes.len() as u64, term.size, "{path}");
+            }
+        }
+    }
+    h.assert_as_goto_gives();
 }

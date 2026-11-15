@@ -2253,6 +2253,8 @@ fn combine_command(
             message.as_deref(),
             &who,
             git_excludes.as_deref(),
+            // Conflicts aren't kept from the command line yet.
+            combine::Keep::OnlyIfClean,
             &mut waiting,
         )
     }?;
@@ -2274,6 +2276,7 @@ fn combine_command(
             Combined::Made {
                 starts,
                 merged_files,
+                ..
             } => (
                 "combined",
                 starts.iter().map(Id::to_hex).collect(),

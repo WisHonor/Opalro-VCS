@@ -17,7 +17,8 @@ use std::time::Duration;
 
 use crate::ancestry::{Starts, common_starts, only_in};
 use crate::changes::deadline;
-use crate::conflict::Listings;
+use crate::conflict::markers::{Parted, Sides};
+use crate::conflict::{Listings, stands_as, unreadable};
 use crate::diary::{Position, State};
 use crate::history::tip_of;
 use crate::id::{ChangeId, Id};
@@ -54,7 +55,43 @@ pub enum Combined {
     Made {
         starts: Vec<Id>,
         merged_files: Vec<String>,
+        /// The places this combine made, the first 100 in path order, and how many more.
+        conflicts: Vec<Conflict>,
+        more: u64,
+        /// Every kind-6 entry the combined save holds, counted where its result is measured.
+        conflict_count: u64,
     },
+}
+
+/// Whether a combine keeps the conflicts it meets, or stops as milestone 8's did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Keep {
+    Conflicts,
+    OnlyIfClean,
+}
+
+/// How a kept conflict stands in the folder.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Stands {
+    Markers { places: u64 },
+    Yours,
+    Nothing,
+}
+
+/// Which line holds a conflict where both lines changed a place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Held {
+    Ours,
+    Theirs,
+    Both,
+}
+
+/// Why conflicts weren't kept.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotKept {
+    OnlyIfClean,
+    NoFeature,
+    RulesNotWhole,
 }
 
 /// What `combine` did.
@@ -114,12 +151,27 @@ pub enum Side {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Clash {
     BothChanged(NotMerged),
-    ChangedRemoved { removed_on: Side },
+    ChangedRemoved {
+        removed_on: Side,
+    },
     BothAdded,
-    FileAndFolder { folder_on: Side },
-    MovedApart { ours_to: String, theirs_to: String },
-    MovedRemoved { moved_on: Side, to: String },
-    MovedOnto { moved_on: Side, to: String },
+    FileAndFolder {
+        folder_on: Side,
+    },
+    MovedApart {
+        ours_to: String,
+        theirs_to: String,
+    },
+    MovedRemoved {
+        moved_on: Side,
+        to: String,
+    },
+    MovedOnto {
+        moved_on: Side,
+        to: String,
+    },
+    /// Both lines changed it, and where they parted it was in conflict.
+    StartUnknown,
 }
 
 /// A path the two sides changed in ways that can't both be kept.
@@ -127,6 +179,8 @@ pub enum Clash {
 pub struct Conflict {
     pub path: String,
     pub clash: Clash,
+    /// `None` when not kept.
+    pub stands: Option<Stands>,
 }
 
 impl Conflict {
@@ -208,6 +262,9 @@ impl Conflict {
                     escape(to, false)
                 )
             }
+            Clash::StartUnknown => {
+                format!("{both}, and Opalro can't tell what it held where they parted")
+            }
         };
         format!("{}: {what}", escape(&self.path, false))
     }
@@ -251,12 +308,24 @@ pub enum CombineError {
     Tangled { names: Names },
     /// The first 100 conflicts in path order, and how many more there were; `rules_not_whole`
     /// says whose `opalro.toml`, if any, wasn't read whole and left one, named or counted, there.
-    #[error("{}", conflicts_words(names, conflicts, *more))]
+    #[error("{}", conflicts_words(names, conflicts, *more, *rules_not_whole, *why))]
     Conflicts {
         names: Names,
         conflicts: Vec<Conflict>,
         more: u64,
         rules_not_whole: Option<Side>,
+        /// Why conflicts weren't kept: asked not to, the project can't keep them, or rules that
+        /// can't be read whole would decide a place (then `rules_not_whole` says whose).
+        why: NotKept,
+    },
+    /// Both lines changed `path`, and `on` holds it in conflict (`at == path`) or holds the
+    /// conflict `at` below it.
+    #[error("{}", held_words(names, path, at, *on))]
+    HeldConflict {
+        names: Names,
+        path: String,
+        at: String,
+        on: Held,
     },
     #[error(
         "Combining {} into {} needs their common starting points combined first, and those \
@@ -356,6 +425,13 @@ impl CombineError {
                 "For each of these files, make the two lines agree and save; then run opalro \
                  combine again."
             }
+            CombineError::HeldConflict { on: Held::Both, .. } => {
+                "Fix it on both lines first (opalro resolve on each), then run opalro combine again."
+            }
+            CombineError::HeldConflict { .. } => {
+                "Fix it on the line that holds it first (opalro resolve there), then run opalro \
+                 combine again."
+            }
             CombineError::NamesClash { .. } => {
                 "Rename one of them on its line and save; then run opalro combine again."
             }
@@ -381,6 +457,7 @@ impl CombineError {
             CombineError::Unrelated { names }
             | CombineError::Tangled { names }
             | CombineError::Conflicts { names, .. }
+            | CombineError::HeldConflict { names, .. }
             | CombineError::StartsConflict { names, .. }
             | CombineError::NamesClash { names, .. }
             | CombineError::Past { names, .. }
@@ -391,18 +468,42 @@ impl CombineError {
     }
 }
 
-fn conflicts_words(names: &Names, conflicts: &[Conflict], more: u64) -> String {
+fn conflicts_words(
+    names: &Names,
+    conflicts: &[Conflict],
+    more: u64,
+    rules_not_whole: Option<Side>,
+    why: NotKept,
+) -> String {
     let count = conflicts.len() as u64 + more;
-    let files = if count == 1 {
-        "1 file".to_owned()
+    let mut text = if why == NotKept::RulesNotWhole {
+        let places = if count == 1 {
+            "1 place".to_owned()
+        } else {
+            format!("{} places", thousands(count))
+        };
+        let which = if rules_not_whole == Some(Side::Theirs) {
+            format!("the opalro.toml on {}", names.target)
+        } else {
+            "it".to_owned()
+        };
+        format!(
+            "Combining {} into {} would have to merge {places} that opalro.toml decides, and \
+             {which} can't be read whole, so nothing was changed:",
+            names.target, names.line
+        )
     } else {
-        format!("{} files", thousands(count))
+        let files = if count == 1 {
+            "1 file".to_owned()
+        } else {
+            format!("{} files", thousands(count))
+        };
+        format!(
+            "Combining {} into {} would leave {files} in conflict, which Opalro can't keep yet, \
+             so nothing was changed:",
+            names.target, names.line
+        )
     };
-    let mut text = format!(
-        "Combining {} into {} would leave {files} in conflict, which Opalro can't keep yet, so \
-         nothing was changed:",
-        names.target, names.line
-    );
     for c in conflicts {
         text += "\n  ";
         text += &c.describe(&names.line, &names.target);
@@ -411,6 +512,32 @@ fn conflicts_words(names: &Names, conflicts: &[Conflict], more: u64) -> String {
         text += &format!("\n  … and {} more", thousands(more));
     }
     text
+}
+
+fn held_words(names: &Names, path: &str, at: &str, on: Held) -> String {
+    let (line, target) = (&names.line, &names.target);
+    let (holds, other) = if on == Held::Theirs {
+        (target, line)
+    } else {
+        (line, target)
+    };
+    let path = escape(path, false);
+    if on == Held::Both {
+        return format!(
+            "{path} is in conflict on both {line} and {target}, so nothing was changed."
+        );
+    }
+    let at = escape(at, false);
+    if at == path {
+        format!(
+            "{path} is in conflict on {holds}, and {other} changed it too, so nothing was changed."
+        )
+    } else {
+        format!(
+            "{at}, inside {path}, is in conflict on {holds}, and {other} changed {path} too, so \
+             nothing was changed."
+        )
+    }
 }
 
 fn past_what(names: &Names, which: Which) -> String {
@@ -593,6 +720,7 @@ pub(crate) fn merge_three(
         .collect();
     merged.notes_unbelieved = went.iter().any(|w| w.notes_unbelieved);
     if !clashes.is_empty() {
+        merged.unkept = true;
         // Each names a path the tree merge found nothing at, so the two are named together.
         let mut all = std::mem::take(&mut merged.conflicts);
         all.extend(clashes);
@@ -622,6 +750,7 @@ fn clash_at(
     clashes.push(Conflict {
         path: path.to_owned(),
         clash,
+        stands: None,
     });
     Ok(())
 }
@@ -677,12 +806,14 @@ struct Asked<'a> {
     message: Option<&'a str>,
     who: &'a Person,
     git_excludes: Option<&'a Path>,
+    keep: Keep,
 }
 
 /// Combines `target` into the line the project is on: nothing to do, the line moved forward to
 /// it, or a combined save, which the folder is then switched to as `goto` switches. One diary
 /// step, which `undo` takes back. A combine that stops stores nothing, unless unsaved work is in
 /// the way of the switch.
+#[allow(clippy::too_many_arguments)]
 pub fn combine(
     repo: &mut Repository,
     target: &Target,
@@ -690,6 +821,7 @@ pub fn combine(
     message: Option<&str>,
     who: &Person,
     git_excludes: Option<&Path>,
+    keep: Keep,
     on_wait: &mut dyn FnMut(&str),
 ) -> Result<CombineOutcome, CombineError> {
     let asked = Asked {
@@ -698,6 +830,7 @@ pub fn combine(
         message,
         who,
         git_excludes,
+        keep,
     };
     let bounds = Bounds {
         max_inner: MAX_INNER,
@@ -807,6 +940,9 @@ fn combine_locked(
     let result = Combined::Made {
         starts: made.starts,
         merged_files: made.merged_files,
+        conflicts: made.conflicts,
+        more: made.more,
+        conflict_count: made.conflict_count,
     };
     Ok(outcome(result, made.save, done))
 }
@@ -866,6 +1002,10 @@ struct MadeSave {
     starts_unfollowed: bool,
     /// Whether the move notes were past what one combine checks.
     notes_unbelieved: bool,
+    /// The conflicts it made, named and counted, and every one it holds.
+    conflicts: Vec<Conflict>,
+    more: u64,
+    conflict_count: u64,
 }
 
 /// Merges `with` into `from` and stores the combined save, made on `line`. Everything is built in
@@ -910,25 +1050,59 @@ fn make_save(
     };
     let start = inner.start_from(&starts)?;
     let starts_unfollowed = inner.unfollowed;
+    let keeps = repo.keeps_conflicts();
+    if asked.keep == Keep::Conflicts && keeps {
+        made.keep = Some(sides(repo, asked, line, from, with, &starts)?);
+    }
     let merged = merge_three(
         repo, &mut packs, &mut made, false, &start, &ours, &theirs, &rules,
     )?;
-    if !merged.conflicts.is_empty() {
-        return Err(CombineError::Conflicts {
-            names: Names::default(),
-            conflicts: merged.conflicts,
-            more: merged.more,
-            rules_not_whole: merged.rules_not_whole,
-        });
+    let stopped = |conflicts, more, why| CombineError::Conflicts {
+        names: Names::default(),
+        conflicts,
+        more,
+        rules_not_whole: merged.rules_not_whole,
+        why,
+    };
+    if made.keep.is_none() && !merged.conflicts.is_empty() {
+        let why = match asked.keep {
+            Keep::OnlyIfClean => NotKept::OnlyIfClean,
+            Keep::Conflicts => NotKept::NoFeature,
+        };
+        return Err(stopped(merged.conflicts, merged.more, why));
+    }
+    if made.keep.is_some() && merged.rules_not_whole.is_some() {
+        let (stops, more) = (merged.undecided, merged.undecided_more);
+        return Err(stopped(stops, more, NotKept::RulesNotWhole));
+    }
+    if merged.unkept {
+        // Clashes of moved files aren't kept as conflicts yet.
+        return Err(stopped(merged.conflicts, merged.more, NotKept::OnlyIfClean));
     }
     let store = repo.store();
     let read = |id: &Id| match made.listings.get(id) {
         Some(l) => Ok(l.clone()),
         None => store.listing(id),
     };
-    if let Err(detail) = bounds.limits.add_all(merged.root, 0, 0, read)? {
-        return Err(CombineError::TooBig { detail });
-    }
+    let measured = if keeps {
+        // A conflict counts as what it stands as; the records this combine made aren't stored yet.
+        let stand = |id: &Id| match made.records.get(id) {
+            Some(r) => Ok(stands_as(r)),
+            None => store
+                .met_conflict(id)
+                .map(|r| stands_as(&r))
+                .map_err(|e| unreadable("in the combined save", id, e)),
+        };
+        bounds
+            .limits
+            .add_all_standing(merged.root, 0, 0, read, stand)?
+    } else {
+        bounds.limits.add_all(merged.root, 0, 0, read)?.map(|()| 0)
+    };
+    let conflict_count = match measured {
+        Ok(count) => count,
+        Err(detail) => return Err(CombineError::TooBig { detail }),
+    };
     // Notes say only what is certain and never stop a combine.
     let mut move_notes = same_contents(
         store,
@@ -976,6 +1150,38 @@ fn make_save(
         starts_unfollowed,
         // Once spent, the budget stays spent for every later merge, this last one included.
         notes_unbelieved: merged.notes_unbelieved,
+        conflicts: merged.conflicts,
+        more: merged.more,
+        conflict_count,
+    })
+}
+
+/// What every label of this combine is made from: the line, the target, their saves, and where
+/// they parted (several, or a made-up starting point, is `Several`).
+fn sides(
+    repo: &Repository,
+    asked: &Asked,
+    line: &str,
+    from: Id,
+    with: Id,
+    starts: &[Id],
+) -> Result<Sides, CombineError> {
+    let change_id = |save: &Id| -> Result<ChangeId, CombineError> {
+        Ok(repo
+            .store()
+            .save(save, repo.signatures_allowed())?
+            .change_id)
+    };
+    let parted = match starts {
+        [one] => Parted::One(change_id(one)?),
+        _ => Parted::Several,
+    };
+    Ok(Sides {
+        ours: escape(line, false),
+        ours_save: change_id(&from)?,
+        theirs: asked.named.shown.clone(),
+        theirs_save: change_id(&with)?,
+        parted,
     })
 }
 

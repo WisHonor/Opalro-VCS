@@ -20,7 +20,6 @@ pub struct Labels {
 
 /// What the middle label says of where the lines parted, at one place: it can differ from place
 /// to place in one combine (a place with nothing at the start, or one the start can't tell).
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Parted {
     One(ChangeId),
@@ -31,7 +30,6 @@ pub enum Parted {
 
 /// What every label of one combine is made from: the two names and saves, and where the lines
 /// parted. Held once for the combine; the labels are made from it for each file merged.
-#[cfg_attr(not(test), allow(dead_code))]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Sides {
     /// The names as the person combined by, shown already (escaped, or `tags::shown_name`).
@@ -43,7 +41,6 @@ pub struct Sides {
     pub parted: Parted,
 }
 
-#[cfg_attr(not(test), allow(dead_code))]
 impl Sides {
     /// The labels for one file: `here` is what the middle says at that place (`self.parted`
     /// where the start holds a file, `Nothing(…)` where it holds nothing, `Unknown`).

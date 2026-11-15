@@ -164,7 +164,6 @@ impl SaveLimits {
     /// `add_all`, with each conflict entry counted as what it stands as (`stand` reads that from
     /// the record): a folder it stands as is counted with everything in it. Gives the number of
     /// kind-6 entries met, a listing again for each path it is reached by.
-    #[cfg_attr(not(test), allow(dead_code))]
     pub(crate) fn add_all_standing<E>(
         &mut self,
         id: Id,

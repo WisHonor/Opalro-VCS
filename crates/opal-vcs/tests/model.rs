@@ -2076,7 +2076,17 @@ fn combine_into(repo: &mut Repository, m: &mut Model, aim: &Aim, message: Option
         raw: raw.clone(),
         shown: raw.clone(),
     };
-    let done = combine::combine(repo, &target, &named, message, &who(), None, &mut |_| {});
+    let keep = combine::Keep::OnlyIfClean;
+    let done = combine::combine(
+        repo,
+        &target,
+        &named,
+        message,
+        &who(),
+        None,
+        keep,
+        &mut |_| {},
+    );
     let Some(line) = m.state.line.clone() else {
         assert!(matches!(done, Err(CombineError::NotOnALine)), "{done:?}");
         settle(repo, m, Vec::new());
@@ -2124,6 +2134,9 @@ fn combine_into(repo: &mut Repository, m: &mut Model, aim: &Aim, message: Option
             let want = Combined::Made {
                 starts,
                 merged_files,
+                conflicts: vec![],
+                more: 0,
+                conflict_count: 0,
             };
             assert_eq!(done.result, want);
             assert_eq!(

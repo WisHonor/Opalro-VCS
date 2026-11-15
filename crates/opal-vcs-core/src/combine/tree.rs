@@ -3,11 +3,15 @@
 
 use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::time::Duration;
 
-use super::{Clash, CombineError, Conflict, Names, NotMerged, Side, Text, Which, merge_text};
+use super::{
+    Clash, CombineError, Conflict, Held, Names, NotMerged, Side, Stands, Text, Which, merge_text,
+};
 use crate::changes::{self, stored};
+use crate::conflict::markers::{Parted, Sides};
+use crate::conflict::{Own, Record, Term};
 use crate::diff::again;
 use crate::id::Id;
 use crate::ingest::store_held;
@@ -15,7 +19,7 @@ use crate::listing::{Entry, EntryKind, Listing, MAX_ENTRIES, SaveLimits};
 use crate::names::{PortabilityProblem, folder_problems};
 use crate::pack::PackSet;
 use crate::rules::{LineMerge, RuleMatcher};
-use crate::snapshot::{ingest_failed, store_listing};
+use crate::snapshot::{ingest_failed, store_listing, store_record};
 use crate::store::{Store, StoreError};
 
 /// The most text merged by inner combines that one combine holds in memory.
@@ -44,6 +48,11 @@ pub(crate) struct Made {
     /// tests lower it), and whether a save's notes were past it, so no more notes count.
     pub notes_left: usize,
     pub notes_spent: bool,
+    /// The records this combine made, by ID, for measuring its result.
+    pub records: HashMap<Id, Record>,
+    /// Whether conflicts are kept (the project keeps them, and `Keep::Conflicts`), with what
+    /// every label of this combine is made from; each file's labels come from it.
+    pub keep: Option<Sides>,
 }
 
 impl Default for Made {
@@ -57,6 +66,8 @@ impl Default for Made {
             deadline: changes::deadline(),
             notes_left: crate::moves::MAX_CHECKED_NOTES,
             notes_spent: false,
+            records: HashMap::new(),
+            keep: None,
         }
     }
 }
@@ -73,6 +84,12 @@ pub(crate) struct Merged {
     /// Whose `opalro.toml`, if any, wasn't read whole and left a file, named or counted, in
     /// conflict only for that.
     pub rules_not_whole: Option<Side>,
+    /// Where conflicts are kept, the places those rules would decide, which stop the combine:
+    /// the first 100 in path order, and how many more.
+    pub undecided: Vec<Conflict>,
+    pub undecided_more: u64,
+    /// Whether a clash was named without being kept as a conflict, where conflicts are kept.
+    pub unkept: bool,
     /// Files whose comparison ran past its deadline.
     pub timed_out: Vec<String>,
     /// Sides where too many files left for moves to be followed by their contents.
@@ -107,6 +124,9 @@ pub(crate) fn merge_trees(
         conflicts: Vec::new(),
         more: 0,
         rules_not_whole: None,
+        undecided: Vec::new(),
+        undecided_more: 0,
+        unkept: false,
         timed_out: Vec::new(),
         unfollowed: Vec::new(),
         notes_unbelieved: false,
@@ -332,13 +352,50 @@ impl Walk<'_> {
         })
     }
 
-    /// The merged entry for a name both sides changed, unless it is a conflict.
+    /// What labels are made from when this merge keeps conflicts; an inner merge never does.
+    fn keeping(&self) -> Option<&Sides> {
+        if self.inner {
+            None
+        } else {
+            self.made.keep.as_ref()
+        }
+    }
+
+    /// The merged entry for a name both sides changed: `None` for nothing there, or for a clash
+    /// that isn't kept.
     fn decide(
         &mut self,
         path: &str,
         name: String,
         [s, o, t]: Three<Option<Entry>>,
     ) -> Result<Option<Entry>, CombineError> {
+        let held = |e: &Option<Entry>| e.as_ref().is_some_and(|e| e.kind == EntryKind::Conflict);
+        // A conflict is never made inside another one: the line holding it fixes it first.
+        let on = match (held(&o), held(&t)) {
+            _ if self.inner => None,
+            (true, true) => Some(Held::Both),
+            (true, false) => Some(Held::Ours),
+            (false, true) => Some(Held::Theirs),
+            (false, false) => None,
+        };
+        if let Some(on) = on {
+            return Err(CombineError::HeldConflict {
+                names: Names::default(),
+                path: path.to_owned(),
+                at: path.to_owned(),
+                on,
+            });
+        }
+        if held(&s) && self.keeping().is_some() {
+            // Each line changed it its own way since: what it held where they parted is unknown.
+            return self.no_start(
+                path,
+                name,
+                Clash::StartUnknown,
+                [o, None, t],
+                Parted::Unknown,
+            );
+        }
         let clash = match (&s, &o, &t) {
             (_, Some(o), Some(t))
                 if (o.kind == EntryKind::Folder) != (t.kind == EntryKind::Folder) =>
@@ -362,8 +419,42 @@ impl Walk<'_> {
             }
             _ => Clash::BothChanged(NotMerged::NotFiles),
         };
-        self.conflict(path, clash);
-        Ok(None)
+        if let (Clash::BothAdded, Some(sides)) = (&clash, self.keeping()) {
+            let here = Parted::Nothing(match sides.parted {
+                Parted::One(save) => Some(save),
+                _ => None,
+            });
+            return self.no_start(path, name, clash, [o, None, t], here);
+        }
+        self.clashed(path, name, clash, [o, s, t])
+    }
+
+    /// A place with no starting version to merge from (added on both lines, or unknown): two
+    /// text files are marked; anything else stands as yours.
+    fn no_start(
+        &mut self,
+        path: &str,
+        name: String,
+        clash: Clash,
+        terms: Three<Option<Entry>>,
+        here: Parted,
+    ) -> Result<Option<Entry>, CombineError> {
+        let (o, t) = match &terms {
+            [Some(o), _, Some(t)] if is_file(o) && is_file(t) => (o.clone(), t.clone()),
+            _ => return self.clashed(path, name, clash, terms),
+        };
+        match self.contents(path, None, &o, &t, here)? {
+            Contents::Marked(bytes, marker, places) => {
+                let own = self.store_text(path, &name, o.kind, &bytes)?;
+                let own = Some((own, marker, places));
+                self.record_at(path, name, clash, terms, own).map(Some)
+            }
+            Contents::Not(why @ NotMerged::RulesNotWhole { .. }) => {
+                self.clashed(path, name, Clash::BothChanged(why), terms)
+            }
+            // Alike but for the executable mark, or not text: no markers.
+            _ => self.clashed(path, name, clash, terms),
+        }
     }
 
     /// Two files both sides changed, with a file at the start: the executable mark and the
@@ -380,13 +471,27 @@ impl Walk<'_> {
             Some(Some(kind)) => kind,
             _ => o.kind,
         };
+        let terms = || [Some(o.clone()), Some(s.clone()), Some(t.clone())];
         let (id, size) = match one_sides([s, o, t].map(|e| Some(e.id))) {
             Some(Some(id)) if id == o.id => (o.id, o.size),
             Some(_) => (t.id, t.size),
-            None => match self.contents(path, s, o, t)? {
-                Some(merged) => merged,
-                None => return Ok(None),
-            },
+            None => {
+                let here = self.keeping().map_or(Parted::Several, |sides| sides.parted);
+                match self.contents(path, Some(s), o, t, here)? {
+                    Contents::Merged(bytes) => self.store_merged(path, bytes)?,
+                    Contents::Marked(bytes, marker, places) => {
+                        let own = self.store_text(path, &name, kind, &bytes)?;
+                        let clash = Clash::BothChanged(NotMerged::Overlap {
+                            endings_only: false,
+                        });
+                        let own = Some((own, marker, places));
+                        return self.record_at(path, name, clash, terms(), own).map(Some);
+                    }
+                    Contents::Not(why) => {
+                        return self.clashed(path, name, Clash::BothChanged(why), terms());
+                    }
+                }
+            }
         };
         Ok(Some(Entry {
             name,
@@ -396,56 +501,67 @@ impl Walk<'_> {
         }))
     }
 
-    /// Contents both sides changed, merged line by line if they can be.
+    /// Contents both sides changed (or added, with no `base`), merged line by line if the rules
+    /// allow it; where conflicts are kept and the rules allow markers, a clash is marked.
     fn contents(
         &mut self,
         path: &str,
-        s: &Entry,
+        base: Option<&Entry>,
         o: &Entry,
         t: &Entry,
-    ) -> Result<Option<(Id, u64)>, CombineError> {
+        here: Parted,
+    ) -> Result<Contents, CombineError> {
         let rule = self
             .rules
             .line_merge(path, self.moved.get(path).map(String::as_str));
         if let LineMerge::RuleSaysNo { theirs } = rule {
-            self.conflict(path, Clash::BothChanged(NotMerged::NoMarkers { theirs }));
-            return Ok(None);
+            return Ok(Contents::Not(NotMerged::NoMarkers { theirs }));
         }
+        let labels = match rule {
+            LineMerge::Yes => self.keeping().map(|sides| sides.labels(here)),
+            _ => None,
+        };
         let (text, late) = {
             let read = |e| bytes(self.store, &self.made.texts, e);
-            match (read(s)?, read(o)?, read(t)?) {
-                (Some(s), Some(o), Some(t)) => merge_text(&s, &o, &t, self.deadline, None),
+            let base = match base {
+                Some(b) => read(b)?,
+                None => Some(Cow::Borrowed(&b""[..])),
+            };
+            match (base, read(o)?, read(t)?) {
+                (Some(s), Some(o), Some(t)) => {
+                    merge_text(&s, &o, &t, self.deadline, labels.as_ref())
+                }
                 _ => (Text::Not(NotMerged::TooBig), false),
             }
         };
         if late {
             self.merged.timed_out.push(path.to_owned());
         }
-        let bytes = match text {
-            Text::Merged(bytes) => bytes,
-            // Without labels a clash is never marked.
-            Text::Marked { .. } => {
-                let why = NotMerged::Overlap {
-                    endings_only: false,
-                };
-                self.conflict(path, Clash::BothChanged(why));
-                return Ok(None);
-            }
-            Text::Not(why) => {
-                self.conflict(path, Clash::BothChanged(why));
-                return Ok(None);
-            }
+        // Rules that can't be read whole stop a text they would decide: one that would merge,
+        // and where conflicts are kept one that overlaps too. Any other keeps its own reason.
+        let decided = match &text {
+            Text::Merged(_) => true,
+            Text::Not(NotMerged::Overlap { .. }) => self.keeping().is_some(),
+            _ => false,
         };
-        // A file that clashes for a reason of its own keeps it; one that would merge doesn't.
-        if let LineMerge::RulesNotWhole { theirs } = rule {
+        if let (LineMerge::RulesNotWhole { theirs }, true) = (rule, decided) {
             // One matcher serves the whole combine, so every such file names the same side.
             self.merged.rules_not_whole = Some(if theirs { Side::Theirs } else { Side::Ours });
-            self.conflict(
-                path,
-                Clash::BothChanged(NotMerged::RulesNotWhole { theirs }),
-            );
-            return Ok(None);
+            return Ok(Contents::Not(NotMerged::RulesNotWhole { theirs }));
         }
+        Ok(match text {
+            Text::Merged(bytes) => Contents::Merged(bytes),
+            Text::Marked {
+                bytes,
+                marker,
+                places,
+            } => Contents::Marked(bytes, marker, places),
+            Text::Not(why) => Contents::Not(why),
+        })
+    }
+
+    /// Stores a text merged line by line, held for later merges when this one is inner.
+    fn store_merged(&mut self, path: &str, bytes: Vec<u8>) -> Result<(Id, u64), CombineError> {
         let id = store_held(self.packs, self.store, &bytes).map_err(|e| ingest_failed(e, path))?;
         let size = bytes.len() as u64;
         self.merged.merged_files.push(path.to_owned());
@@ -459,18 +575,145 @@ impl Walk<'_> {
             self.made.held = held;
             self.made.texts.insert(id, bytes);
         }
-        Ok(Some((id, size)))
+        Ok((id, size))
     }
 
-    fn conflict(&mut self, path: &str, clash: Clash) {
-        if self.merged.conflicts.len() < MAX_NAMED {
-            self.merged.conflicts.push(Conflict {
+    /// Stores a marked text as it came out of the merge: its size was checked where it was made.
+    fn store_text(
+        &mut self,
+        path: &str,
+        name: &str,
+        kind: EntryKind,
+        bytes: &[u8],
+    ) -> Result<Entry, CombineError> {
+        let id = store_held(self.packs, self.store, bytes).map_err(|e| ingest_failed(e, path))?;
+        Ok(Entry {
+            name: name.to_owned(),
+            kind,
+            id,
+            size: bytes.len() as u64,
+        })
+    }
+
+    /// A clash with no version of its own: kept as a conflict standing as yours (or nothing)
+    /// where conflicts are kept, unless rules that can't be read whole would decide it; else
+    /// named only.
+    fn clashed(
+        &mut self,
+        path: &str,
+        name: String,
+        clash: Clash,
+        terms: Three<Option<Entry>>,
+    ) -> Result<Option<Entry>, CombineError> {
+        if self.keeping().is_none() {
+            self.conflict(path, clash, None);
+            return Ok(None);
+        }
+        if matches!(clash, Clash::BothChanged(NotMerged::RulesNotWhole { .. })) {
+            let undecided = Conflict {
                 path: path.to_owned(),
                 clash,
-            });
-        } else {
-            self.merged.more += 1;
+                stands: None,
+            };
+            let merged = &mut self.merged;
+            name_in(&mut merged.undecided, &mut merged.undecided_more, undecided);
+            return Ok(None);
         }
+        self.record_at(path, name, clash, terms, None).map(Some)
+    }
+
+    /// Makes the record of a conflict at `path`: `terms` in the record's order (yours, where the
+    /// lines parted, theirs), its own version if any (with its marker length and marked places),
+    /// into the pack set and `made.records`; checks first that no folder among yours and theirs
+    /// holds a conflict below it (`HeldConflict`); names the conflict with how it stands. Gives
+    /// the kind-6 entry.
+    pub(super) fn record_at(
+        &mut self,
+        path: &str,
+        name: String,
+        clash: Clash,
+        terms: Three<Option<Entry>>,
+        own: Option<(Entry, u8, u64)>,
+    ) -> Result<Entry, CombineError> {
+        for (term, v, on) in [(&terms[0], 1, Held::Ours), (&terms[2], 2, Held::Theirs)] {
+            let Some(folder) = folder_id(term.as_ref()) else {
+                continue;
+            };
+            if let Some(at) = self.conflict_below(path, folder, v)? {
+                return Err(CombineError::HeldConflict {
+                    names: Names::default(),
+                    path: path.to_owned(),
+                    at,
+                    on,
+                });
+            }
+        }
+        let term = |e: &Entry| Term {
+            kind: e.kind,
+            id: e.id,
+            size: e.size,
+        };
+        let record = Record {
+            terms: terms.iter().map(|e| e.as_ref().map(term)).collect(),
+            own: own.as_ref().map(|(e, marker, _)| Own {
+                version: Some(term(e)),
+                marker: *marker,
+            }),
+        };
+        let stands = match (&own, &terms[0]) {
+            (Some((.., places)), _) => Stands::Markers { places: *places },
+            (None, Some(_)) => Stands::Yours,
+            (None, None) => Stands::Nothing,
+        };
+        let id = store_record(self.store, self.packs, &record)?;
+        self.made.records.insert(id, record);
+        self.conflict(path, clash, Some(stands));
+        Ok(Entry {
+            name,
+            kind: EntryKind::Conflict,
+            id,
+            size: 0,
+        })
+    }
+
+    /// The first conflict found in the folder listing `id` at `path` of version `v`, or below
+    /// it: that folder alone is walked, held to a save's limits.
+    fn conflict_below(&self, path: &str, id: Id, v: usize) -> Result<Option<String>, CombineError> {
+        let mut limits = SaveLimits::default();
+        let mut seen = HashSet::new();
+        let mut todo = vec![(path.to_owned(), id, path.split('/').count())];
+        while let Some((at, id, depth)) = todo.pop() {
+            // A listing met again holds what it held the first time.
+            if !seen.insert(id) {
+                continue;
+            }
+            limits.check_depth(depth).map_err(past(v))?;
+            let here = listing(self.store, self.made, &id)?;
+            limits.add(here.entries().len()).map_err(past(v))?;
+            if let Some(e) = here
+                .entries()
+                .iter()
+                .find(|e| e.kind == EntryKind::Conflict)
+            {
+                return Ok(Some(join(&at, &e.name)));
+            }
+            let folders = here.entries().iter().rev();
+            todo.extend(
+                folders
+                    .filter(|e| e.kind == EntryKind::Folder)
+                    .map(|e| (join(&at, &e.name), e.id, depth + 1)),
+            );
+        }
+        Ok(None)
+    }
+
+    fn conflict(&mut self, path: &str, clash: Clash, stands: Option<Stands>) {
+        let conflict = Conflict {
+            path: path.to_owned(),
+            clash,
+            stands,
+        };
+        name_in(&mut self.merged.conflicts, &mut self.merged.more, conflict);
     }
 
     /// Builds and stores a merged folder's listing once all of it is worked out: its ID, and
@@ -493,6 +736,23 @@ impl Walk<'_> {
         let empty = listing.entries().is_empty();
         self.made.listings.insert(id, listing);
         Ok((id, empty))
+    }
+}
+
+/// What merging a file's contents gave.
+enum Contents {
+    Merged(Vec<u8>),
+    /// The text with markers, their length, and the places marked.
+    Marked(Vec<u8>, u8, u64),
+    Not(NotMerged),
+}
+
+/// Names `c` in `list`, the first `MAX_NAMED`, else counts it in `more`.
+fn name_in(list: &mut Vec<Conflict>, more: &mut u64, c: Conflict) {
+    if list.len() < MAX_NAMED {
+        list.push(c);
+    } else {
+        *more += 1;
     }
 }
 

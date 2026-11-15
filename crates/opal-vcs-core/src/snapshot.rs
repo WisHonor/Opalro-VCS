@@ -2067,7 +2067,11 @@ pub(crate) fn store_listing(
 }
 
 /// Stores the conflict record `record` unless a good copy is held already, and returns its ID.
-fn store_record(store: &Store, packs: &mut PackSet, record: &Record) -> Result<Id, SaveError> {
+pub(crate) fn store_record(
+    store: &Store,
+    packs: &mut PackSet,
+    record: &Record,
+) -> Result<Id, SaveError> {
     let encoded = record.encode();
     let id = record.id();
     let len = encoded.len() as u64;
