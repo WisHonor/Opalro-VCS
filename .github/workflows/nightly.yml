@@ -102,6 +102,24 @@ jobs:
           # A name that matches no test passes too, so the test must have run.
           grep -q "test result: ok. 1 passed" chunks.txt
 
+  # A save that moves 100,001 files notes the first 100,000. Too slow for every push, so it is
+  # ignored there and runs here.
+  move-notes:
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Save 100,001 moved files
+        shell: bash
+        run: |
+          cargo test --release -p opal-vcs-core --lib -- --ignored --exact snapshot::tests::a_save_moving_more_than_100000_files_notes_the_first_100000 2>&1 | tee notes.txt
+          # A name that matches no test passes too, so the test must have run.
+          grep -q "test result: ok. 1 passed" notes.txt
+
   # The model test of edits, saves, switches, shelves and undos (testing.md §3) with 1,024
   # cases, not the 64 of every push.
   model:
