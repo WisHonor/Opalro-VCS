@@ -4,6 +4,7 @@
 - **Date:** 2026-11-15
 - **Agenda topic:** none (milestone 9, its red-team session, RT21)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
+- **Refined by:** [decision 183](183-red-team-m9-session-2-rulings.md) (the second session: a folder kept by `resolve --keep` is told by its path; the memory a command holds, measured after the fix)
 - **Refines:** [decision 174](174-the-conflict-record.md) (what a command remembers of the records it reads); [decision 175](175-what-a-combine-keeps-as-a-conflict.md) and [decision 181](181-what-building-milestone-9-refined.md) (what `--only-if-clean` promises, now also when there is nothing to combine); [decision 177](177-recording-a-fix-save-and-resolve.md) (what `opalro resolve` records when it is given a folder's path; what `--copy before` says when it has nothing to copy)
 
 ## Context
@@ -82,3 +83,13 @@ The red-team session on milestone 9 (RT21, [report](../redteam/2026-11-15-milest
 - Decision 177's "a folder's path means every conflict below it" holds for `--keep`, and for which places are looked at; it no longer means every place below it is recorded as it stands.
 - The model of the command line follows: in it, a folder's path takes what a pattern takes.
 - The rulings file gains these four, and the list of things to confirm gains the third.
+
+## Corrections and additions (2026-11-15, after the whole-branch review)
+
+The fixes were built (76ba7bb), reviewed, and read again as part of the whole milestone. Four things in this record need saying more exactly, and one rule that no decision had written down is written here.
+
+- **The measure in point 2 was too round.** "About the memory the same project of files takes" is true of what a command itself keeps: a small, fixed amount per record. But the store also remembers whole records, within its own budget (decision 181), and that budget allows about 50 MB. So a project of wide records costs a command what the same project of files costs, **plus at most that budget**. Measured on Linux after the fix, by the second session ([decision 183](183-red-team-m9-session-2-rulings.md)): the red team's 20,000 records of 255 versions take 84 MB in `status` and 85 MB in `save`, where they took 306 MB, and the same project with ordinary files takes 21 MB; 250,000 take 196 MB and 182 MB, where `status` stopped at 3,075 MB, and the same project with ordinary files takes 86 MB. The store's budget stays as it is: lowering it would make an honest project read records more often, and nothing measured asks for that.
+- **What the person is told, for point 3.** A place changed in place is now recorded only when it is named by its own path, so `opalro status` and `opalro resolve` say so. Where the next step used to be one of three (record what you fixed; fix the marked places; pick a version), a place changed in place gets its own: `keep what your folder holds with: opalro resolve <path> (each by its own path), or pick a version with: …`. This refines decision 181's "one `Next:` line" and the three steps it lists.
+- **The hint for point 1's stop.** When `--only-if-clean` stops because the line's own save holds conflicts and there is nothing to combine, running the combine again without the flag would only say "Nothing to combine". The hint for that case is: `opalro status lists what is in conflict here, and opalro resolve records your fixes.`
+- **Point 1 is the second place where Opalro looks through a save for conflicts.** Decision 181 named one (a forward under `--only-if-clean` looks through the target's save). With nothing to combine, the flag looks through the line's own save. Both only with the flag, and only in a project that keeps conflicts. No other command looks through a save to find conflicts.
+- **A rule nobody had written down** (the code has it since milestone 8; the task reviews of milestone 9 noticed that no decision says it): **where one line moved a file and the other line put a folder at the file's old place, the move is no clash of its own.** The moved file is taken at its new place, and the old place keeps the conflict between the file and the folder, as any two kinds at one place do ([decision 175](175-what-a-combine-keeps-as-a-conflict.md)). Nothing is lost either way.
