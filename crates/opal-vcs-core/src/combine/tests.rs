@@ -3163,6 +3163,23 @@ fn by_contents(start: &Tree, side: &Tree) -> Vec<(String, String)> {
         .collect()
 }
 
+/// The cases `following_moves_agrees_with_a_model` draws: two lines' work, and a fifth of the time
+/// a file that arrived where one was: one line empties `s0` or `s1` and moves another file there,
+/// noted, while the other line edits the file that was there.
+fn moves_cases() -> impl Strategy<Value = (usize, Work, Work)> {
+    let arrival =
+        (2..=6usize, 0..6usize, 6..8usize, any::<bool>()).prop_map(|(n, pick, to, swap)| {
+            let arrived = worked(&[(pick, to, true)], &[]);
+            let edited = worked(&[], &[(to - 6, 0)]);
+            if swap {
+                (n, edited, arrived)
+            } else {
+                (n, arrived, edited)
+            }
+        });
+    prop_oneof![4 => (1..=6usize, work(), work()), 1 => arrival]
+}
+
 #[test]
 fn following_moves_agrees_with_a_model() {
     let h = std::cell::RefCell::new(Hist::new());
@@ -3170,9 +3187,15 @@ fn following_moves_agrees_with_a_model() {
     let rng = TestRng::deterministic_rng(RngAlgorithm::ChaCha);
     let mut runner = TestRunner::new_with_rng(Config::with_cases(128), rng);
     runner
-        .run(&(1..=6usize, work(), work()), |(n, ours, theirs)| {
-            for (_, clash) in moves_case(&mut h.borrow_mut(), n, &ours, &theirs)? {
-                *kinds.borrow_mut().entry(clash_kind(&clash)).or_default() += 1;
+        .run(&moves_cases(), |(n, ours, theirs)| {
+            let start = start_files(n);
+            for (path, clash) in moves_case(&mut h.borrow_mut(), n, &ours, &theirs)? {
+                let mut kinds = kinds.borrow_mut();
+                *kinds.entry(clash_kind(&clash)).or_default() += 1;
+                // A move onto a start file's place is a file that arrived where one was.
+                if matches!(clash, Clash::MovedOnto { .. }) && start.contains_key(&path) {
+                    *kinds.entry("arrived").or_default() += 1;
+                }
             }
             Ok(())
         })
@@ -3187,6 +3210,7 @@ fn following_moves_agrees_with_a_model() {
     ] {
         assert!(kinds.get(kind).is_some_and(|&n| n >= 5), "{kinds:?}");
     }
+    assert!(kinds.get("arrived").is_some_and(|&n| n >= 3), "{kinds:?}");
 }
 
 fn worked(moves: &[(usize, usize, bool)], changes: &[(usize, u8)]) -> Work {
@@ -6841,6 +6865,11 @@ fn a_rotation_keeps_the_file_moved_onto_a_place_moved_apart_from_whatever_the_pa
             &tree(&[(y, edit(1, "TWO")), ("t0", why.clone())]),
         );
         let t = h.save("side", s, &tree(&[(x, f(BODY)), ("t1", why.clone())]));
+        // Only `y`'s moves are followed: `x` landed where the start holds a file, which no
+        // followed move may, so nothing a move puts in the start is ever cleared.
+        let start = h.version(s);
+        assert_eq!(h.followed(start, h.version(o)), pairs(&[(y, "t0")]));
+        assert_eq!(h.followed(start, h.version(t)), pairs(&[(y, "t1")]));
         let m = h.kept(s, o, t, &no_rules());
         let apart = |moved_on, other_to: &str| Clash::MovedApart {
             from: y.into(),
@@ -7131,4 +7160,54 @@ fn nothing_a_line_saved_is_left_out() {
     ] {
         assert!(seen.get(kind).is_some_and(|&n| n >= 3), "{seen:?}");
     }
+}
+
+#[test]
+fn a_file_moved_onto_a_new_file_the_other_line_put_there_keeps_only_the_place_it_went() {
+    // Side moves `a.txt` into `d/e/b`; main leaves `a.txt` alone and puts a file of its own at
+    // `d/e/b`. Main's `a.txt` is the start's: it went with the move, so the old place is clean.
+    let mut h = Hist::new();
+    let first = h.first;
+    let s = h.save("main", first, &tree(&[("a.txt", f(BODY))]));
+    let o = h.save(
+        "main",
+        s,
+        &tree(&[("a.txt", f(BODY)), ("d/e/b", f("main\n"))]),
+    );
+    let t = h.save("side", s, &tree(&[("d/e/b", f(BODY))]));
+    assert_eq!(
+        h.conflicts(s, o, t),
+        ["d/e/b: moved here from a.txt on side, where main has something else"]
+    );
+    let m = h.kept(s, o, t, &no_rules());
+    let onto = Clash::MovedOnto {
+        moved_on: Side::Theirs,
+        from: "a.txt".into(),
+    };
+    assert_eq!(
+        m.conflicts,
+        [kept_at("d/e/b", onto, Stands::Markers { places: 1 })]
+    );
+    assert_eq!(paths_of(&h, m.root), ["d", "d/e", "d/e/b"]);
+    assert_eq!(
+        record_in(&h, m.root, "d/e/b").1,
+        [Some(f("main\n")), None, Some(f(BODY))]
+    );
+}
+
+#[test]
+fn a_file_moved_where_the_other_line_holds_the_same_file_already_combines_cleanly() {
+    // Side moves `a.txt` to `d/c`; main keeps `a.txt` as it was and holds the same contents at
+    // `d/c` too. Both lines hold alike where it went, and main never changed it where it was.
+    let mut h = Hist::new();
+    let first = h.first;
+    let s = h.save("main", first, &tree(&[("a.txt", f(BODY))]));
+    let ours = [("a.txt", f(BODY)), ("b", f("b\n")), ("d/c", f(BODY))];
+    let o = h.save("main", s, &tree(&ours));
+    let t = h.save("side", s, &tree(&[("d/c", f(BODY))]));
+    let want = with_folders(&tree(&[("b", f("b\n")), ("d/c", f(BODY))]));
+    assert_eq!(h.merged(s, o, t), want);
+    let m = h.kept(s, o, t, &no_rules());
+    assert!(m.conflicts.is_empty(), "{:?}", m.conflicts);
+    assert_eq!(read_tree(h.repo.store(), m.root, &HashMap::new()), want);
 }

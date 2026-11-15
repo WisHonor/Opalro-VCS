@@ -978,3 +978,57 @@ fn taking_ours_everywhere_agrees_with_a_model() {
         .unwrap();
     assert_seen(&seen.into_inner(), &["marked", "merged", "past 255"]);
 }
+
+fn whole(base: &str, ours: &str, theirs: &str) -> Text {
+    let (b, o, t) = (base.as_bytes(), ours.as_bytes(), theirs.as_bytes());
+    clash_whole(b, o, t, DEADLINE, Some(&labels())).0
+}
+
+#[test]
+fn a_whole_clash_is_one_place_holding_each_file_whole() {
+    // An edit of one line that would merge; and a side without a last line break.
+    let want = place(7, "x\ny\n", "a\nb\nc\n", "a\nB\nc\n");
+    assert_eq!(whole("a\nb\nc\n", "x\ny", "a\nB\nc\n"), marks(&want, 7, 1));
+    let left = markers::scan(&mut want.as_bytes(), 7).unwrap();
+    assert_eq!((left.opening, left.closing), (1, 1));
+}
+
+#[test]
+fn a_whole_clash_of_line_endings_only_is_not_marked() {
+    assert_eq!(
+        whole("a\n", "b\r\n", "b\n"),
+        Text::Not(NotMerged::Overlap { endings_only: true })
+    );
+}
+
+#[test]
+fn a_run_of_markers_in_the_start_lengthens_a_whole_clashs_markers() {
+    let want = place(9, "o\n", "<<<<<<<<\n", "t\n");
+    assert_eq!(whole("<<<<<<<<\n", "o\n", "t\n"), marks(&want, 9, 1));
+}
+
+#[test]
+fn an_empty_start_and_an_empty_side_still_make_one_whole_place() {
+    let want = place(7, "", "", "t\n");
+    assert_eq!(whole("", "", "t\n"), marks(&want, 7, 1));
+}
+
+#[test]
+fn a_whole_clash_past_the_limit_is_not_marked() {
+    let want = place(7, "o\n", "s\n", "t\n");
+    let run = |limit: usize| {
+        let labels = labels();
+        merge_within(
+            b"s\n",
+            b"o\n",
+            b"t\n",
+            DEADLINE,
+            Some(&labels),
+            limit as u64,
+            true,
+        )
+        .0
+    };
+    assert_eq!(run(want.len()), marks(&want, 7, 1));
+    assert_eq!(run(want.len() - 1), OVERLAP);
+}

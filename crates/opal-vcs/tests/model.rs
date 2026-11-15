@@ -2031,8 +2031,8 @@ enum Stopped {
     Unrelated,
     Tangled,
     StartsConflict,
-    /// The paths that conflict.
-    Conflicts(BTreeSet<String>),
+    /// The paths that conflict, and the rows some of them are named with.
+    Conflicts(Clashes),
 }
 
 impl Stopped {
@@ -2042,7 +2042,7 @@ impl Stopped {
             | (Stopped::Tangled, Err(CombineError::Tangled { .. }))
             | (Stopped::StartsConflict, Err(CombineError::StartsConflict { .. })) => {}
             (
-                Stopped::Conflicts(want),
+                Stopped::Conflicts((want, rows)),
                 Err(CombineError::Conflicts {
                     conflicts, more, ..
                 }),
@@ -2054,6 +2054,11 @@ impl Stopped {
                     (want, 0),
                     "the paths that conflict: {conflicts:?}"
                 );
+                for c in conflicts {
+                    if let Some(row) = rows.get(&c.path) {
+                        assert_eq!(&c.describe("O", "T"), row, "{c:?}");
+                    }
+                }
             }
             _ => panic!("the model's combine stops with {self:?}, the engine's with {done:?}"),
         }
@@ -2311,7 +2316,8 @@ fn noted(m: &Model, start: usize, tip: usize) -> BTreeMap<String, String> {
 /// file arriving that a file still holds at the side's end.
 struct Went {
     went: BTreeMap<String, String>,
-    replaced: BTreeSet<String>,
+    /// Each with the start path of the file that came.
+    replaced: BTreeMap<String, String>,
 }
 
 /// Whether `tree` holds nothing at `path` and no file above it.
@@ -2350,8 +2356,9 @@ fn followed(m: &Model, start: &Ver, side: &Ver) -> Went {
         }
     }
     // A place a note brought a file to counts only while a file is still there at the side's end.
-    let replaced = (noted.into_values())
-        .filter(|to| side.tree.files.contains_key(to))
+    let replaced = (noted.into_iter())
+        .filter(|(_, to)| side.tree.files.contains_key(to))
+        .map(|(from, to)| (to, from))
         .collect();
     Went { went, replaced }
 }
@@ -2363,22 +2370,33 @@ fn relocate(tree: &mut Tree, from: &str, to: &str) {
     }
 }
 
+/// The paths that conflict, and the row a combine names some of them with, its lines called `O`
+/// (ours) and `T` (theirs).
+type Clashes = (BTreeSet<String>, BTreeMap<String, String>);
+
 /// Merges `ours` and `theirs` from `start`, following moves: the merged tree and the files merged
 /// line by line, or the paths that conflict.
-fn merge(
-    m: &Model,
-    start: &Ver,
-    ours: &Ver,
-    theirs: &Ver,
-) -> Result<(Tree, Vec<String>), BTreeSet<String>> {
+fn merge(m: &Model, start: &Ver, ours: &Ver, theirs: &Ver) -> Result<(Tree, Vec<String>), Clashes> {
     let went = [followed(m, start, ours), followed(m, start, theirs)];
     let was = [&start.tree, &ours.tree, &theirs.tree];
     let mut trees = was.map(Tree::clone);
     let mut conflicts = BTreeSet::new();
-    let mut clash = |trees: &mut [Tree; 3], at: &String| {
-        conflicts.insert(at.clone());
-        for t in trees {
-            t.files.remove(at);
+    let mut rows = BTreeMap::new();
+    // The places a start file went two ways, each a conflict where the merge leaves a plain file
+    // under plain folders; one a conflict covers, or holds, is that conflict's.
+    let mut landed: Vec<(&String, String)> = Vec::new();
+    // Where a file went onto something the other line put there: the row, if those two clash.
+    let mut onto: BTreeMap<&String, String> = BTreeMap::new();
+    let line = |k: usize| if k == 1 { "O" } else { "T" };
+    let onto_row = |at: &str, from: &str, mover: usize| {
+        let other = line(3 - mover);
+        let mover = line(mover);
+        format!("{at}: moved here from {from} on {mover}, where {other} has something else")
+    };
+    // The start's own file where it left, gone from the start: it is at its places now.
+    let leave = |trees: &mut [Tree; 3], from: &String| {
+        if trees[0].files.get(from) == was[0].files.get(from) {
+            trees[0].files.remove(from);
         }
     };
     // The table of moves: a start file moved on one side or both.
@@ -2386,42 +2404,83 @@ fn merge(
     for &from in &moved {
         match (went[0].went.get(from), went[1].went.get(from)) {
             (Some(a), Some(b)) if a == b => relocate(&mut trees[0], from, a),
-            (Some(_), Some(_)) => clash(&mut trees, from),
+            (Some(a), Some(b)) => {
+                for (at, k, other_to) in [(a, 1, b), (b, 2, a)] {
+                    let (mover, other) = (line(k), line(3 - k));
+                    let row = format!(
+                        "{at}: moved here from {from} on {mover}, and to {other_to} on {other}"
+                    );
+                    landed.push((at, row));
+                    onto.entry(at).or_insert_with(|| onto_row(at, from, k));
+                }
+                leave(&mut trees, from);
+            }
             (Some(to), None) | (None, Some(to)) => {
-                let other = if went[0].went.contains_key(from) {
-                    2
-                } else {
+                let k = if went[0].went.contains_key(from) {
                     1
+                } else {
+                    2
                 };
+                let other = 3 - k;
                 // A file the other side's notes brought there isn't the start's.
-                let kept =
-                    !went[other - 1].replaced.contains(from) && was[other].files.contains_key(from);
-                if kept && room(was[other], to) {
+                let brought = went[other - 1].replaced.contains_key(from);
+                if !brought && was[other].folders.contains(from) {
+                    // A folder now: the path merge tells of that.
+                } else if brought || !was[other].files.contains_key(from) {
+                    let row = format!(
+                        "{to}: moved here from {from} on {}, removed on {}",
+                        line(k),
+                        line(other)
+                    );
+                    landed.push((to, row));
+                    onto.entry(to).or_insert_with(|| onto_row(to, from, k));
+                    leave(&mut trees, from);
+                } else if room(was[other], to) {
                     relocate(&mut trees[0], from, to);
                     relocate(&mut trees[other], from, to);
                 } else {
-                    clash(&mut trees, from);
+                    // The other side has something where it went: the path merge sets the two
+                    // against each other there, and the start's file against the other side's.
+                    onto.insert(to, onto_row(to, from, k));
                 }
             }
             (None, None) => unreachable!(),
         }
     }
     // Where a side's notes show another file arriving at a start file's place, the start's file
-    // is gone on that side, unless both sides hold the same there.
-    for at in went[0].replaced.union(&went[1].replaced) {
+    // is gone on that side, unless both sides hold the same there; against the other side's
+    // change to it, the file that came always clashes, named a move onto it.
+    let arrived: BTreeSet<&String> = went[0]
+        .replaced
+        .keys()
+        .chain(went[1].replaced.keys())
+        .collect();
+    for at in arrived {
         let Some(start_file) = was[0].files.get(at) else {
             continue;
         };
         if moved.contains(&at) || was[1].files.get(at) == was[2].files.get(at) {
             continue;
         }
-        let gone = [0, 1].map(|k| went[k].replaced.contains(at));
-        let other = if gone[0] { 2 } else { 1 };
-        match was[other].files.get(at) {
-            _ if gone == [true, true] => drop(trees[0].files.remove(at)),
+        let came = [0, 1].map(|k| went[k].replaced.get(at));
+        let (k, from) = match came {
+            [Some(from), None] => (1, from),
+            [None, Some(from)] => (2, from),
+            _ => {
+                trees[0].files.remove(at);
+                continue;
+            }
+        };
+        match was[3 - k].files.get(at) {
             None => drop(trees[0].files.remove(at)),
             Some(f) if f == start_file => {}
-            Some(_) => clash(&mut trees, at),
+            Some(_) => {
+                conflicts.insert(at.clone());
+                rows.insert(at.clone(), onto_row(at, from, k));
+                for t in &mut trees {
+                    t.files.remove(at);
+                }
+            }
         }
     }
     // A folder the moves or a conflict left empty is no version's own.
@@ -2449,8 +2508,28 @@ fn merge(
     for c in paths.children("") {
         paths.merge_at(&c);
     }
+    // Two files added where a file went, which the path merge found clashing.
+    for (at, row) in onto {
+        let added = |t: &Tree| t.files.contains_key(at);
+        let two = !s.files.contains_key(at) && !s.folders.contains(at) && added(o) && added(t);
+        if two && paths.conflicts.contains(at) {
+            rows.insert(at.clone(), row);
+        }
+    }
+    for (at, row) in landed {
+        let mut up = at.as_str();
+        let mut plain = paths.out.files.contains_key(at);
+        while let Some((above, _)) = up.rsplit_once('/') {
+            plain &= paths.out.folders.contains(above);
+            up = above;
+        }
+        if plain {
+            paths.conflicts.insert(at.clone());
+            rows.insert(at.clone(), row);
+        }
+    }
     if !paths.conflicts.is_empty() {
-        return Err(paths.conflicts);
+        return Err((paths.conflicts, rows));
     }
     paths.merged.sort();
     Ok((paths.out, paths.merged))
