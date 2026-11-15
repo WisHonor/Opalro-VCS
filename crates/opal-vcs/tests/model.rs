@@ -5058,7 +5058,7 @@ fn edits_saves_switches_shelves_and_undos_match_the_model() {
 /// The same on cases from a fixed seed, so the same commands are drawn on every run and system,
 /// none whose effect differs between systems; every kind the model is there to exercise must be
 /// met at least 3 times. Not fixed: three or more starting points are combined in an order set
-/// by change IDs, which differ from run to run, and that can change such a combine and all that
+/// by save IDs, which differ from run to run, and that can change such a combine and all that
 /// follows it in its case, so only there can a count differ between runs.
 #[test]
 fn a_fixed_pass_meets_every_kind_of_case() {

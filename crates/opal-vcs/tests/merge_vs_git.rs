@@ -986,10 +986,12 @@ fn kept_sides(env: &Env) -> Vec<(Files, BTreeMap<String, bool>)> {
 /// Whether everything either branch made is in one of Opalro's `results` (the files as the
 /// combine left them, or each side of its conflicts taken everywhere): every line a branch added
 /// to a file, as many times as it added it, in one file there; a file a branch added whole,
-/// whole with its mark; and a change of the executable mark, on the file this one became: the
-/// file at its path, unless the other branch holds a file of another origin there, or a file
-/// holding what it added and a line of its own. A version that only took lines out has nothing
-/// that can be lost.
+/// whole with its mark (or with the mark the other branch gave the start's file at that path);
+/// and a change of the executable mark, on the file this one became. That is
+/// the file at its path, unless the other branch holds a file of another origin there and this
+/// file's origin somewhere else; or any file holding all it added and a line of its own. A
+/// version that only took lines out has nothing that can be lost. Not seen: both branches making
+/// the same change of mark on their own copies, one of which loses it (testing.md says more).
 fn nothing_lost(
     made: &Generated,
     results: &[(Files, BTreeMap<String, bool>)],
@@ -1020,7 +1022,17 @@ fn nothing_lost(
             };
             let Some(was) = f.origin.as_ref().and_then(|o| made.first.get(o)) else {
                 let bytes = f.lines.concat().into_bytes();
-                if !held.iter().any(|(b, x, _)| **b == bytes && *x == f.exec) {
+                // Made where the start held a file whose mark the other branch changed: that
+                // change is the other branch's, and lands on whatever is at the path.
+                let start = made.first.get(path);
+                let marked_by_other = made.ends[1 - branch].get(path).is_some_and(|o| {
+                    o.origin.as_deref() == Some(path.as_str())
+                        && start.is_some_and(|s| s.exec != o.exec)
+                });
+                if !held
+                    .iter()
+                    .any(|(b, x, _)| **b == bytes && (*x == f.exec || marked_by_other))
+                {
                     return lost("the file it added");
                 }
                 continue;
@@ -1048,10 +1060,12 @@ fn nothing_lost(
                     .unwrap_or_default();
                 return lost(&format!("the line {missing:?} it added"));
             }
-            // The mark of the file this one became: at its path, unless the other branch put a
-            // file of another origin there; or, moved, on the file holding its lines.
+            // The mark of the file this one became: the file at its path, unless the other branch
+            // holds a file of another origin there and this one somewhere else. Or any file
+            // holding all it added and a line of its own.
             let other = made.ends[1 - branch].get(path);
-            let still_this = other.is_none_or(|o| o.origin == f.origin);
+            let gone_elsewhere = made.ends[1 - branch].values().any(|o| o.origin == f.origin);
+            let still_this = other.is_none_or(|o| o.origin == f.origin) || !gone_elsewhere;
             let marked_here = still_this && at.iter().any(|(p, x)| *p == path && *x == f.exec);
             let moved = |lines: &BTreeMap<String, usize>| {
                 holds_added(lines) && f.lines.iter().any(|l| lines.contains_key(l))
@@ -1434,4 +1448,19 @@ fn nothing_lost_wants_the_lines_a_branch_added_in_one_file() {
         nothing_lost(&made, &split),
         Err(r#"branch 0's a.txt: the line "p" it added is in none of Opalro's results"#.into())
     );
+}
+
+/// A branch that only turned the mark on, where the other removed the file and made a new one
+/// at the same path: the mark stays on the file there, which is what this one became.
+#[test]
+fn nothing_lost_reads_a_mark_from_the_new_file_where_the_old_was_removed() {
+    let start: &[Spec] = &[("a.txt", &["one"], false, Some("a.txt"))];
+    let marked: &[Spec] = &[("a.txt", &["one"], true, Some("a.txt"))];
+    let remade: &[Spec] = &[("a.txt", &["other"], false, None)];
+    let made = three_trees([start, marked, remade]);
+    let kept = [
+        result(&[("a.txt", "one\n", true)]),
+        result(&[("a.txt", "other\n", true)]),
+    ];
+    assert_eq!(nothing_lost(&made, &kept), Ok(()));
 }
