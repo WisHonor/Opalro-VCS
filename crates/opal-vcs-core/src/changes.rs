@@ -340,29 +340,42 @@ pub(crate) fn stored(
     if size.unwrap_or(0) > MAX_LINES_SIZE {
         return Ok(Side::TooBig);
     }
-    let mut out = Capped::default();
-    match store.copy_content(&id, &mut out) {
-        Ok(()) => Ok(Side::Bytes(out.bytes)),
-        Err(_) if out.over => Ok(Side::TooBig),
-        Err(e) => Err(e.into()),
+    Ok(read_capped(store, &id, MAX_LINES_SIZE)?.map_or(Side::TooBig, Side::Bytes))
+}
+
+/// A file's bytes from the store, or `None` once they pass `limit`, whatever its listing said.
+pub(crate) fn read_capped(
+    store: &Store,
+    id: &Id,
+    limit: u64,
+) -> Result<Option<Vec<u8>>, StoreError> {
+    let mut out = Capped {
+        bytes: Vec::new(),
+        over: false,
+        limit,
+    };
+    match store.copy_content(id, &mut out) {
+        Ok(()) => Ok(Some(out.bytes)),
+        Err(_) if out.over => Ok(None),
+        Err(e) => Err(e),
     }
 }
 
-/// Bytes, refusing to hold more than the limit.
-#[derive(Default)]
+/// Bytes, refusing to hold more than `limit`.
 struct Capped {
     bytes: Vec<u8>,
     over: bool,
+    limit: u64,
 }
 
 impl Write for Capped {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        let room = usize::try_from(MAX_LINES_SIZE)
+        let room = usize::try_from(self.limit)
             .unwrap_or(usize::MAX)
             .saturating_sub(self.bytes.len());
         if buf.len() > room {
             self.over = true;
-            return Err(io::Error::other("over the size lines are shown for"));
+            return Err(io::Error::other("over the size Opalro reads it at"));
         }
         self.bytes.extend_from_slice(buf);
         Ok(buf.len())
@@ -603,6 +616,7 @@ mod tests {
         let mut out = Capped {
             bytes: vec![0; usize::try_from(MAX_LINES_SIZE).unwrap() - 1],
             over: false,
+            limit: MAX_LINES_SIZE,
         };
         assert!(out.write_all(b"a").is_ok() && !out.over);
         assert!(out.write_all(b"b").is_err() && out.over);

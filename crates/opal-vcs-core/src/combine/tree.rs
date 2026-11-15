@@ -70,9 +70,9 @@ pub(crate) struct Merged {
     /// The first 100 conflicts in path order (never more are kept), and how many more there were.
     pub conflicts: Vec<Conflict>,
     pub more: u64,
-    /// Whether a file, named or counted, is in conflict only because `opalro.toml` wasn't read
-    /// whole.
-    pub rules_not_whole: bool,
+    /// Whose `opalro.toml`, if any, wasn't read whole and left a file, named or counted, in
+    /// conflict only for that.
+    pub rules_not_whole: Option<Side>,
     /// Files whose comparison ran past its deadline.
     pub timed_out: Vec<String>,
     /// Sides where too many files left for moves to be followed by their contents.
@@ -106,7 +106,7 @@ pub(crate) fn merge_trees(
         merged_files: Vec::new(),
         conflicts: Vec::new(),
         more: 0,
-        rules_not_whole: false,
+        rules_not_whole: None,
         timed_out: Vec::new(),
         unfollowed: Vec::new(),
         notes_unbelieved: false,
@@ -407,8 +407,8 @@ impl Walk<'_> {
         let rule = self
             .rules
             .line_merge(path, self.moved.get(path).map(String::as_str));
-        if rule == LineMerge::RuleSaysNo {
-            self.conflict(path, Clash::BothChanged(NotMerged::NoMarkers));
+        if let LineMerge::RuleSaysNo { theirs } = rule {
+            self.conflict(path, Clash::BothChanged(NotMerged::NoMarkers { theirs }));
             return Ok(None);
         }
         let (text, late) = {
@@ -429,9 +429,13 @@ impl Walk<'_> {
             }
         };
         // A file that clashes for a reason of its own keeps it; one that would merge doesn't.
-        if rule == LineMerge::RulesNotWhole {
-            self.merged.rules_not_whole = true;
-            self.conflict(path, Clash::BothChanged(NotMerged::RulesNotWhole));
+        if let LineMerge::RulesNotWhole { theirs } = rule {
+            // One matcher serves the whole combine, so every such file names the same side.
+            self.merged.rules_not_whole = Some(if theirs { Side::Theirs } else { Side::Ours });
+            self.conflict(
+                path,
+                Clash::BothChanged(NotMerged::RulesNotWhole { theirs }),
+            );
             return Ok(None);
         }
         let id = store_held(self.packs, self.store, &bytes).map_err(|e| ingest_failed(e, path))?;

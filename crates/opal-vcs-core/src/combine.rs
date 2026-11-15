@@ -30,7 +30,7 @@ use crate::moves::{
 use crate::names::PortabilityProblem;
 use crate::pack::{ObjectKind, PackSet};
 use crate::repo::{ChangeLock, RepoError, Repository};
-use crate::rules::RuleMatcher;
+use crate::rules::{RuleMatcher, read_saved};
 use crate::save::{EXTRA_LINE, MAX_MOVE_NOTES, Person, Save};
 use crate::snapshot::{NAMED, SaveError, listed, store_listing};
 use crate::store::StoreError;
@@ -89,10 +89,15 @@ pub enum NotMerged {
     Binary,
     TooBig,
     TooManyLines,
-    /// Its `conflict-markers` rule is `false`.
-    NoMarkers,
-    /// It would have been merged, but `opalro.toml` wasn't read whole.
-    RulesNotWhole,
+    /// Its `conflict-markers` rule is `false`; `theirs`: only in the target's `opalro.toml`.
+    NoMarkers {
+        theirs: bool,
+    },
+    /// It would have been merged, but `opalro.toml` wasn't read whole; `theirs`: only the
+    /// target's.
+    RulesNotWhole {
+        theirs: bool,
+    },
     /// A link, a project link, or not a file on every side.
     NotFiles,
 }
@@ -138,6 +143,13 @@ impl Conflict {
             (name(first), name(other))
         };
         let both = "changed on both lines";
+        let on_theirs = |theirs| {
+            if theirs {
+                format!(" on {}", name(Side::Theirs))
+            } else {
+                String::new()
+            }
+        };
         let what = match &self.clash {
             Clash::BothChanged(why) => match why {
                 NotMerged::Overlap {
@@ -155,11 +167,14 @@ impl Conflict {
                 NotMerged::TooManyLines => {
                     format!("{both}, and has over 1,000,000 lines, too many to merge line by line")
                 }
-                NotMerged::NoMarkers => {
-                    format!("{both}, and opalro.toml says conflict-markers = false for it")
-                }
-                NotMerged::RulesNotWhole => format!(
-                    "{both}, and opalro.toml can't be read whole, so no file is merged line by line"
+                NotMerged::NoMarkers { theirs } => format!(
+                    "{both}, and opalro.toml{} says conflict-markers = false for it",
+                    on_theirs(*theirs)
+                ),
+                NotMerged::RulesNotWhole { theirs } => format!(
+                    "{both}, and opalro.toml{} can't be read whole, so no file is merged line by \
+                     line",
+                    on_theirs(*theirs)
                 ),
                 NotMerged::NotFiles => {
                     format!("{both}, and only files are merged line by line")
@@ -234,13 +249,13 @@ pub enum CombineError {
     )]
     Tangled { names: Names },
     /// The first 100 conflicts in path order, and how many more there were; `rules_not_whole`
-    /// says whether any, named or counted, is there because `opalro.toml` wasn't read whole.
+    /// says whose `opalro.toml`, if any, wasn't read whole and left one, named or counted, there.
     #[error("{}", conflicts_words(names, conflicts, *more))]
     Conflicts {
         names: Names,
         conflicts: Vec<Conflict>,
         more: u64,
-        rules_not_whole: bool,
+        rules_not_whole: Option<Side>,
     },
     #[error(
         "Combining {} into {} needs their common starting points combined first, and those \
@@ -248,8 +263,12 @@ pub enum CombineError {
         names.target,
         names.line
     )]
-    /// `rules_not_whole`: a file among them would have merged, but `opalro.toml` wasn't read whole.
-    StartsConflict { names: Names, rules_not_whole: bool },
+    /// `rules_not_whole`: a file among them would have merged, but that side's `opalro.toml`
+    /// wasn't read whole.
+    StartsConflict {
+        names: Names,
+        rules_not_whole: Option<Side>,
+    },
     /// A merged folder would hold two names that clash; `folder` is `""` at the top.
     #[error(
         "Combining {} into {} would put two names in one folder that clash, so nothing was \
@@ -311,15 +330,26 @@ impl CombineError {
             }
             CombineError::Unrelated { .. } => "Opalro combines only lines that share some history.",
             CombineError::Conflicts {
-                rules_not_whole: true,
+                rules_not_whole: Some(Side::Ours),
                 ..
             }
             | CombineError::StartsConflict {
-                rules_not_whole: true,
+                rules_not_whole: Some(Side::Ours),
                 ..
             } => {
                 "opalro setup says what is wrong with opalro.toml. Fix or remove it and save; then \
                  run opalro combine again."
+            }
+            CombineError::Conflicts {
+                rules_not_whole: Some(Side::Theirs),
+                ..
+            }
+            | CombineError::StartsConflict {
+                rules_not_whole: Some(Side::Theirs),
+                ..
+            } => {
+                "The other side's opalro.toml has a mistake in it. Go there, fix or remove it \
+                 (opalro setup says what is wrong) and save; then run opalro combine again."
             }
             CombineError::Conflicts { .. } => {
                 "For each of these files, make the two lines agree and save; then run opalro \
@@ -854,7 +884,9 @@ fn make_save(
     with: Id,
     mut bounds: Bounds,
 ) -> Result<MadeSave, CombineError> {
-    let rules = RuleMatcher::new(repo.rules());
+    let (ours, theirs) = (version_of(repo, from)?, version_of(repo, with)?);
+    let theirs_rules = read_saved(repo.store(), &repo.store().listing(&theirs.root)?)?;
+    let rules = RuleMatcher::new(repo.rules(), &theirs_rules);
     let mut made = Made {
         max_held: bounds.max_held,
         deadline: bounds.deadline,
@@ -883,7 +915,6 @@ fn make_save(
     };
     let start = inner.start_from(&starts)?;
     let starts_unfollowed = inner.unfollowed;
-    let (ours, theirs) = (version_of(repo, from)?, version_of(repo, with)?);
     let merged = merge_three(
         repo, &mut packs, &mut made, false, &start, &ours, &theirs, &rules,
     )?;
@@ -959,7 +990,7 @@ fn of_starts(e: CombineError) -> CombineError {
     match e {
         CombineError::NamesClash { names, .. } => CombineError::StartsConflict {
             names,
-            rules_not_whole: false,
+            rules_not_whole: None,
         },
         CombineError::Past { names, detail, .. } => CombineError::Past {
             names,

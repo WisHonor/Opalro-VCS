@@ -113,7 +113,7 @@ impl Fixture {
     }
 
     fn merge(&mut self, ids: [Id; 3]) -> Result<Merged, CombineError> {
-        let rules = RuleMatcher::new(&RulesRead::default());
+        let rules = RuleMatcher::new(&RulesRead::default(), &RulesRead::default());
         self.merge_with(ids, &rules, false, &mut Made::default())
     }
 
@@ -619,7 +619,7 @@ fn nothing_is_stored_while_merging() {
     let [s, o, t] = fx.three(&s, &o, &t);
     let packs_before = fx.repo.store().pack_count();
     let mut packs = fx.repo.new_packs().unwrap();
-    let rules = RuleMatcher::new(&RulesRead::default());
+    let rules = RuleMatcher::new(&RulesRead::default(), &RulesRead::default());
     let mut made = Made::default();
     let store = fx.repo.store();
     let m = merge_trees(
@@ -655,7 +655,7 @@ fn an_outer_merge_keeps_no_text_and_an_inner_one_keeps_its_own() {
     let (s, o, t) = (&s, &o, &t);
     let only_text = |t: &Tree| tree(&[("t", t["t"].clone())]);
     let ids = fx.three(&only_text(s), &only_text(o), &only_text(t));
-    let rules = RuleMatcher::new(&RulesRead::default());
+    let rules = RuleMatcher::new(&RulesRead::default(), &RulesRead::default());
 
     let mut made = Made::default();
     let m = fx.merge_with(ids, &rules, false, &mut made).unwrap();
@@ -698,7 +698,7 @@ fn a_later_merge_reads_what_an_earlier_one_made() {
         tree(&[("t", f("a\nb\nc\nd\nE\n"))]),
     ];
     let [s, o, t] = fx.three(&s, &o, &t);
-    let rules = RuleMatcher::new(&RulesRead::default());
+    let rules = RuleMatcher::new(&RulesRead::default(), &RulesRead::default());
     let mut made = Made::default();
     let mut packs = fx.repo.new_packs().unwrap();
     let store = fx.repo.store();
@@ -772,10 +772,13 @@ fn a_rule_with_conflict_markers_false_is_never_merged() {
     };
     let text = opal_toml(Preset::Game, &found).unwrap();
     let (rules, _) = crate::rules::parse(text.as_bytes()).unwrap();
-    let rules = RuleMatcher::new(&RulesRead {
-        rules,
-        ..RulesRead::default()
-    });
+    let rules = RuleMatcher::new(
+        &RulesRead {
+            rules,
+            ..RulesRead::default()
+        },
+        &RulesRead::default(),
+    );
     let base: String = (0..20).map(|i| format!("line {i}\n")).collect();
     let ours = base.replace("line 1\n", "ours\n");
     let theirs = base.replace("line 18\n", "theirs\n");
@@ -792,7 +795,7 @@ fn a_rule_with_conflict_markers_false_is_never_merged() {
     assert_eq!(m.conflicts[0].path, "Assets/Main.unity");
     assert_eq!(
         m.conflicts[0].clash,
-        Clash::BothChanged(NotMerged::NoMarkers)
+        Clash::BothChanged(NotMerged::NoMarkers { theirs: false })
     );
     // The same file merges where no rule says otherwise.
     let m = fx.merge(ids).unwrap();
@@ -1130,12 +1133,12 @@ fn every_clash_has_its_words() {
                 .to_owned(),
         ),
         (
-            both(NotMerged::NoMarkers),
+            both(NotMerged::NoMarkers { theirs: false }),
             "changed on both lines, and opalro.toml says conflict-markers = false for it"
                 .to_owned(),
         ),
         (
-            both(NotMerged::RulesNotWhole),
+            both(NotMerged::RulesNotWhole { theirs: false }),
             "changed on both lines, and opalro.toml can't be read whole, so no file is merged line by line"
                 .to_owned(),
         ),
@@ -1431,7 +1434,7 @@ fn tree_merge_agrees_with_a_path_by_path_model() {
             // Read back from what it made, never stored: no text is merged here.
             let mut packs = fx.repo.new_packs().unwrap();
             let mut made = Made::default();
-            let rules = RuleMatcher::new(&RulesRead::default());
+            let rules = RuleMatcher::new(&RulesRead::default(), &RulesRead::default());
             let store = fx.repo.store();
             let merged = merge_trees(
                 store,
@@ -1634,7 +1637,12 @@ impl Hist {
     /// The merge of three versions, with the conflicts described with the sides called `main`
     /// and `side`, and its result read back.
     fn outcome(&mut self, s: Version, o: Version, t: Version) -> (Vec<String>, Tree) {
-        self.outcome_with(s, o, t, &RuleMatcher::new(&RulesRead::default()))
+        self.outcome_with(
+            s,
+            o,
+            t,
+            &RuleMatcher::new(&RulesRead::default(), &RulesRead::default()),
+        )
     }
 
     /// `outcome`, with `rules`.
@@ -1826,10 +1834,13 @@ fn a_history_without_notes_is_followed_by_contents() {
 fn scene_rule() -> RuleMatcher {
     let text = "[[rule]]\nfiles = [\"*.unity\"]\nconflict-markers = false\n";
     let (rules, _) = crate::rules::parse(text.as_bytes()).unwrap();
-    RuleMatcher::new(&RulesRead {
-        rules,
-        ..RulesRead::default()
-    })
+    RuleMatcher::new(
+        &RulesRead {
+            rules,
+            ..RulesRead::default()
+        },
+        &RulesRead::default(),
+    )
 }
 
 /// `from` saved on `main`; on `main`, moved to `to` in a save of its own, then edited there; on
@@ -2212,7 +2223,7 @@ fn following_by_contents_holds_a_bounded_amount() {
         max_left_bytes: fits - 1,
         ..Made::default()
     };
-    let rules = RuleMatcher::new(&RulesRead::default());
+    let rules = RuleMatcher::new(&RulesRead::default(), &RulesRead::default());
     let (vs, vt) = (h.version(s), h.version(t));
     let m = merge_three(
         &h.repo, &mut packs, &mut made, false, &vs, &made_up, &vt, &rules,
@@ -3178,7 +3189,7 @@ fn moves_case(
     let lock = h.repo.lock_for_change("test", &mut |_| {}).unwrap();
     let mut packs = h.repo.new_packs().unwrap();
     let mut made = Made::default();
-    let rules = RuleMatcher::new(&RulesRead::default());
+    let rules = RuleMatcher::new(&RulesRead::default(), &RulesRead::default());
     let m = merge_three(&h.repo, &mut packs, &mut made, false, &vs, &vo, &vt, &rules).unwrap();
     let got: BTreeSet<String> = m.conflicts.iter().map(|c| c.path.clone()).collect();
     prop_assert_eq!(&got, &want.conflicts);
@@ -3701,7 +3712,7 @@ fn many_conflicts_are_counted_after_the_first_100() {
         names,
         conflicts: vec![conflict("a"), conflict("b")],
         more: 1_234,
-        rules_not_whole: false,
+        rules_not_whole: None,
     };
     assert_eq!(
         err.to_string(),
@@ -3839,7 +3850,7 @@ fn starting_points_that_cant_be_combined_while_the_rules_are_not_read_whole_say_
         matches!(
             err,
             CombineError::StartsConflict {
-                rules_not_whole: true,
+                rules_not_whole: Some(Side::Ours),
                 ..
             }
         ),
@@ -4011,7 +4022,7 @@ fn the_folders_rules_decide() {
     };
     let want = Conflict {
         path: "Main.unity".into(),
-        clash: Clash::BothChanged(NotMerged::NoMarkers),
+        clash: Clash::BothChanged(NotMerged::NoMarkers { theirs: false }),
     };
     assert_eq!(conflicts, &[want]);
     // Without the rule, the same file merges.
@@ -4061,7 +4072,7 @@ fn while_the_rules_are_not_read_whole_no_file_is_merged_line_by_line() {
         let CombineError::Conflicts {
             conflicts,
             more: 0,
-            rules_not_whole: true,
+            rules_not_whole: Some(Side::Ours),
             ..
         } = &err
         else {
@@ -4069,7 +4080,7 @@ fn while_the_rules_are_not_read_whole_no_file_is_merged_line_by_line() {
         };
         let want = Conflict {
             path: "a.txt".into(),
-            clash: Clash::BothChanged(NotMerged::RulesNotWhole),
+            clash: Clash::BothChanged(NotMerged::RulesNotWhole { theirs: false }),
         };
         assert_eq!(conflicts, &[want], "{text}");
         assert_eq!(
@@ -4115,7 +4126,7 @@ fn a_file_that_clashes_for_a_reason_of_its_own_keeps_it_while_the_rules_are_not_
     let err = combine_in(&mut h, "side").unwrap_err();
     let CombineError::Conflicts {
         conflicts,
-        rules_not_whole: false,
+        rules_not_whole: None,
         ..
     } = &err
     else {
@@ -4164,8 +4175,11 @@ fn the_hint_names_the_rules_file_when_only_a_counted_conflict_is_there_for_it() 
     else {
         panic!("{err:?}");
     };
-    assert_eq!((conflicts.len(), *more, *rules_not_whole), (100, 1, true));
-    let own = Clash::BothChanged(NotMerged::RulesNotWhole);
+    assert_eq!(
+        (conflicts.len(), *more, *rules_not_whole),
+        (100, 1, Some(Side::Ours))
+    );
+    let own = Clash::BothChanged(NotMerged::RulesNotWhole { theirs: false });
     assert!(conflicts.iter().all(|c| c.clash != own));
     assert_eq!(err.hint().unwrap(), RULES_HINT);
 }
@@ -4205,6 +4219,283 @@ fn a_line_moved_forward_warns_of_the_rules_file_it_leaves_not_the_one_it_started
     let done = combine_in(&mut h, "side").unwrap();
     assert_eq!(done.result, Combined::Forward);
     assert!(done.applied.warnings.is_empty(), "{done:?}");
+}
+
+const SCENE_RULE: &str = "[[rule]]\nfiles = [\"*.unity\"]\nconflict-markers = false\n";
+
+const THEIRS_HINT: &str = "The other side's opalro.toml has a mistake in it. Go there, fix or \
+                           remove it (opalro setup says what is wrong) and save; then run opalro \
+                           combine again.";
+
+const CONFLICTS_HINT: &str = "For each of these files, make the two lines agree and save; then \
+                              run opalro combine again.";
+
+/// `Main.unity` edited near its end on `art`, which also saves `art_rules` as its `opalro.toml`,
+/// and near its start on `main`, which saves `main_rules`; the project is on `main`. Gives the
+/// two lines' trees.
+fn scene_apart(h: &mut Hist, art_rules: Option<&str>, main_rules: Option<&str>) -> (Tree, Tree) {
+    let first = h.first;
+    let lines: String = (0..20).map(|i| format!("line {i}\n")).collect();
+    let scene = |from: &str, to: &str, rules: Option<&str>| {
+        let mut t = tree(&[("Main.unity", f(&lines.replace(from, to)))]);
+        if let Some(rules) = rules {
+            t.insert("opalro.toml".into(), f(rules));
+        }
+        t
+    };
+    let base = h.save("main", first, &scene("", "", None));
+    let art = scene("line 18\n", "art\n", art_rules);
+    let main = scene("line 1\n", "main\n", main_rules);
+    h.save("art", base, &art);
+    h.save("main", base, &main);
+    (art, main)
+}
+
+fn only_conflict(err: &CombineError) -> (&Conflict, Option<Side>) {
+    let CombineError::Conflicts {
+        conflicts,
+        more: 0,
+        rules_not_whole,
+        ..
+    } = err
+    else {
+        panic!("{err:?}");
+    };
+    assert_eq!(conflicts.len(), 1, "{err:?}");
+    (&conflicts[0], *rules_not_whole)
+}
+
+/// Before a combine asked the rules of both lines, the scene was merged line by line, and the
+/// combined save held the rule that should have stopped it.
+#[test]
+fn a_rule_only_the_line_combined_in_has_stops_the_combine_and_names_that_line() {
+    let mut h = Hist::new();
+    let (art, _) = scene_apart(&mut h, Some(SCENE_RULE), None);
+    let before = h.untouched();
+    let err = combine_in(&mut h, "art").unwrap_err();
+    let (conflict, not_whole) = only_conflict(&err);
+    assert_eq!(
+        conflict.clash,
+        Clash::BothChanged(NotMerged::NoMarkers { theirs: true })
+    );
+    assert_eq!(not_whole, None);
+    assert_eq!(
+        err.to_string(),
+        "Combining art into main would leave 1 file in conflict, which Opalro can't keep yet, so \
+         nothing was changed:\n  Main.unity: changed on both lines, and opalro.toml on art says \
+         conflict-markers = false for it"
+    );
+    assert_eq!(err.hint().unwrap(), CONFLICTS_HINT);
+    assert_untouched(&h, &before);
+    // The other way round, the rule is the folder's: today's words.
+    h.on("art", &art);
+    let err = combine_in(&mut h, "main").unwrap_err();
+    let (conflict, _) = only_conflict(&err);
+    assert_eq!(
+        conflict.clash,
+        Clash::BothChanged(NotMerged::NoMarkers { theirs: false })
+    );
+    assert_eq!(
+        err.to_string(),
+        "Combining main into art would leave 1 file in conflict, which Opalro can't keep yet, so \
+         nothing was changed:\n  Main.unity: changed on both lines, and opalro.toml says \
+         conflict-markers = false for it"
+    );
+}
+
+#[test]
+fn a_rule_on_both_lines_is_the_folders() {
+    let mut h = Hist::new();
+    scene_apart(&mut h, Some(SCENE_RULE), Some(SCENE_RULE));
+    let err = combine_in(&mut h, "art").unwrap_err();
+    assert_eq!(
+        only_conflict(&err).0.clash,
+        Clash::BothChanged(NotMerged::NoMarkers { theirs: false })
+    );
+}
+
+/// `a.txt` changed apart on `main` and `side`, `side`'s save also holding `rules` at the top;
+/// the project is on `main`.
+fn theirs_rules_apart(h: &mut Hist, rules: &[(&str, V)]) {
+    let first = h.first;
+    let base = h.save("main", first, &tree(&[("a.txt", f(BODY))]));
+    let side = with(&tree(&[("a.txt", edit(0, "side"))]), rules);
+    let side = h.plant(&[base], &side, Some(&[]));
+    h.set(|s| {
+        s.lines.insert("side".into(), side);
+    });
+    h.save("main", base, &tree(&[("a.txt", edit(4, "main"))]));
+}
+
+#[test]
+fn while_the_other_sides_rules_are_not_read_whole_no_file_is_merged_and_that_side_is_named() {
+    let mut over = "#".repeat(1 << 20);
+    over.push('\n');
+    let cases: [(&str, Vec<(&str, V)>); 6] = [
+        ("not TOML", vec![("opalro.toml", f(NOT_WHOLE[0]))]),
+        ("a part in a rule", vec![("opalro.toml", f(NOT_WHOLE[1]))]),
+        ("a part at the top", vec![("opalro.toml", f(NOT_WHOLE[2]))]),
+        ("a link", vec![("opalro.toml", link("real.toml"))]),
+        ("a folder", vec![("opalro.toml/a.txt", f("a\n"))]),
+        ("over 1 MiB", vec![("opalro.toml", f(&over))]),
+    ];
+    for (case, rules) in cases {
+        let mut h = Hist::new();
+        theirs_rules_apart(&mut h, &rules);
+        let before = h.untouched();
+        let err = combine_in(&mut h, "side").unwrap_err();
+        let (conflict, not_whole) = only_conflict(&err);
+        assert_eq!(
+            conflict.clash,
+            Clash::BothChanged(NotMerged::RulesNotWhole { theirs: true }),
+            "{case}"
+        );
+        assert_eq!(not_whole, Some(Side::Theirs), "{case}");
+        assert_eq!(
+            err.to_string(),
+            "Combining side into main would leave 1 file in conflict, which Opalro can't keep \
+             yet, so nothing was changed:\n  a.txt: changed on both lines, and opalro.toml on \
+             side can't be read whole, so no file is merged line by line",
+            "{case}"
+        );
+        assert_eq!(err.hint().unwrap(), THEIRS_HINT, "{case}");
+        assert_untouched(&h, &before);
+    }
+}
+
+#[test]
+fn the_other_sides_rules_file_listed_over_1_mib_is_passed_over_unread() {
+    let mut h = Hist::new();
+    let first = h.first;
+    let base = h.save("main", first, &tree(&[("a.txt", f(BODY))]));
+    // A rule that allows `a.txt`, under a listing that says it is over 1 MiB: were it read, the
+    // file would merge.
+    let side = tree(&[("a.txt", edit(0, "side")), ("opalro.toml", f(SCENE_RULE))]);
+    let side = h.plant(&[base], &side, Some(&[]));
+    let root = {
+        let mut entries = h
+            .repo
+            .store()
+            .listing(&h.version(side).root)
+            .unwrap()
+            .entries()
+            .to_vec();
+        let rules = entries
+            .iter_mut()
+            .find(|e| e.name == "opalro.toml")
+            .unwrap();
+        rules.size = (1 << 20) + 1;
+        let lock = h.repo.lock_for_change("test", &mut |_| {}).unwrap();
+        let mut packs = h.repo.new_packs().unwrap();
+        let listing = Listing::new(entries).unwrap();
+        let root = store_listing(h.repo.store(), &mut packs, &listing).unwrap();
+        h.repo.store_packs(&lock, packs).unwrap();
+        root
+    };
+    let side = h.plant_root(&[base], root, vec![]);
+    h.set(|s| {
+        s.lines.insert("side".into(), side);
+    });
+    h.save("main", base, &tree(&[("a.txt", edit(4, "main"))]));
+    let err = combine_in(&mut h, "side").unwrap_err();
+    assert_eq!(
+        only_conflict(&err),
+        (
+            &Conflict {
+                path: "a.txt".into(),
+                clash: Clash::BothChanged(NotMerged::RulesNotWhole { theirs: true }),
+            },
+            Some(Side::Theirs)
+        )
+    );
+}
+
+#[test]
+fn when_both_rules_files_are_broken_the_folders_is_named() {
+    let mut h = Hist::new();
+    theirs_rules_apart(&mut h, &[("opalro.toml", f(NOT_WHOLE[0]))]);
+    rules_file(&h, NOT_WHOLE[2]);
+    let err = combine_in(&mut h, "side").unwrap_err();
+    let (conflict, not_whole) = only_conflict(&err);
+    assert_eq!(
+        conflict.clash,
+        Clash::BothChanged(NotMerged::RulesNotWhole { theirs: false })
+    );
+    assert_eq!(not_whole, Some(Side::Ours));
+    assert_eq!(
+        err.to_string(),
+        "Combining side into main would leave 1 file in conflict, which Opalro can't keep yet, \
+         so nothing was changed:\n  a.txt: changed on both lines, and opalro.toml can't be read \
+         whole, so no file is merged line by line"
+    );
+    assert_eq!(err.hint().unwrap(), RULES_HINT);
+}
+
+#[test]
+fn with_no_rules_file_on_either_side_a_file_merges_as_before() {
+    let mut h = Hist::new();
+    theirs_rules_apart(&mut h, &[]);
+    let done = combine_in(&mut h, "side").unwrap();
+    let Combined::Made { merged_files, .. } = &done.result else {
+        panic!("{done:?}");
+    };
+    assert_eq!(merged_files, &["a.txt"]);
+}
+
+#[test]
+fn a_moved_file_whose_old_name_only_the_other_sides_rules_protect_is_not_merged() {
+    let mut h = Hist::new();
+    let first = h.first;
+    let s = h.save("main", first, &tree(&[("Main.unity", f(BODY))]));
+    let o = h.save("main", s, &tree(&[("Main.txt", f(BODY))]));
+    let main = tree(&[("Main.txt", edit(0, "ONE"))]);
+    h.save("main", o, &main);
+    let side = tree(&[
+        ("Main.unity", edit(4, "FIVE")),
+        ("opalro.toml", f(SCENE_RULE)),
+    ]);
+    h.save("side", s, &side);
+    h.on("main", &main);
+    let err = combine_in(&mut h, "side").unwrap_err();
+    assert_eq!(
+        only_conflict(&err),
+        (
+            &Conflict {
+                path: "Main.txt".into(),
+                clash: Clash::BothChanged(NotMerged::NoMarkers { theirs: true }),
+            },
+            None
+        )
+    );
+}
+
+#[test]
+fn starting_points_that_cant_be_combined_for_the_other_sides_rules_say_so() {
+    let mut h = Hist::new();
+    let base = tree(&[("a.txt", f(BODY))]);
+    let b1 = tree(&[("a.txt", edit(0, "ONE"))]);
+    let b2 = tree(&[("a.txt", edit(4, "FIVE"))]);
+    let both = tree(&[("a.txt", f("ONE\ntwo\nthree\nfour\nFIVE\n"))]);
+    let crossed = crossed(&mut h, &base, &[b1, b2], &both);
+    let side = with(
+        &both,
+        &[("s.txt", f("s\n")), ("opalro.toml", f(NOT_WHOLE[0]))],
+    );
+    tips(&mut h, crossed, &with(&both, &[("m.txt", f("m\n"))]), &side);
+    let before = h.untouched();
+    let err = combine_in(&mut h, "side").unwrap_err();
+    assert!(
+        matches!(
+            err,
+            CombineError::StartsConflict {
+                rules_not_whole: Some(Side::Theirs),
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert_eq!(err.hint().unwrap(), THEIRS_HINT);
+    assert_untouched(&h, &before);
 }
 
 #[test]

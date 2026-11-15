@@ -728,6 +728,61 @@ fn a_combine_that_brings_in_the_fixed_opalro_toml_says_nothing_of_it() {
     assert_eq!(doc["warnings"], serde_json::json!([]), "{doc}");
 }
 
+/// A scene on `main`; line `art` adds a rule that scenes are never merged line by line and edits
+/// the scene near its end, `main` edits it near its start; the project is back on `main`.
+fn scene_ruled_on_art(env: &Env) {
+    let scene: String = (0..20).map(|i| format!("line {i}\n")).collect();
+    env.overwrite("Main.unity", &scene);
+    run(env, &["save", "Scene"], 0);
+    run(env, &["line", "new", "art"], 0);
+    env.overwrite(
+        "opalro.toml",
+        "[[rule]]\nfiles = [\"*.unity\"]\nconflict-markers = false\n",
+    );
+    env.overwrite("Main.unity", &scene.replace("line 18\n", "art\n"));
+    run(env, &["save", "Scenes are never merged"], 0);
+    run(env, &["goto", "main"], 0);
+    env.overwrite("Main.unity", &scene.replace("line 1\n", "main\n"));
+    run(env, &["save", "On main"], 0);
+}
+
+const AGREE_HINT: &str = "For each of these files, make the two lines agree and save; then run \
+                          opalro combine again.";
+
+#[test]
+fn a_rule_only_the_line_combined_in_has_stops_the_combine_and_names_that_line() {
+    let env = project();
+    scene_ruled_on_art(&env);
+    let row = "\n  Main.unity: changed on both lines, and opalro.toml on art says conflict-markers = \
+               false for it";
+    let before = env.standing();
+    let (shown, said) = run(&env, &["combine", "art"], 1);
+    assert_eq!(shown, "");
+    assert!(said.contains(&format!("{row}\n")), "{said}");
+    assert!(said.contains(&format!("hint: {AGREE_HINT}")), "{said}");
+    assert_eq!(env.standing(), before);
+    let doc = json(&env, &["combine", "art"], 1);
+    let message = doc["error"]["message"].as_str().unwrap();
+    assert!(message.ends_with(row), "{doc}");
+    assert_eq!(doc["error"]["hint"], AGREE_HINT);
+    assert_eq!(env.standing(), before);
+}
+
+#[test]
+fn the_same_two_lines_combined_the_other_way_round_clash_in_the_folders_words() {
+    let env = project();
+    scene_ruled_on_art(&env);
+    run(&env, &["goto", "art"], 0);
+    let row = "\n  Main.unity: changed on both lines, and opalro.toml says conflict-markers = false \
+               for it";
+    let (_, said) = run(&env, &["combine", "main"], 1);
+    assert!(said.contains(&format!("{row}\n")), "{said}");
+    let doc = json(&env, &["combine", "main"], 1);
+    let message = doc["error"]["message"].as_str().unwrap();
+    assert!(message.ends_with(row), "{doc}");
+    assert_eq!(doc["error"]["hint"], AGREE_HINT);
+}
+
 #[test]
 fn starting_points_that_cant_be_combined_while_opalro_toml_cant_be_read_whole_say_so() {
     let env = project();

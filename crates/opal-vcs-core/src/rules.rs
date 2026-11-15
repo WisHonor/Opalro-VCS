@@ -8,11 +8,14 @@ use std::path::Path;
 use opal_platform::dir::{Dir, EntryType};
 use toml::{Table, Value};
 
+use crate::changes::read_capped;
 use crate::chunks::{CHUNK_FROM, CHUNK_UP_TO};
 use crate::drive::Drive;
 use crate::ignore::{Decision, Matcher, Rules as IgnoreRules};
+use crate::listing::{EntryKind, Listing};
 use crate::safe_fs;
 use crate::scope::ancestors;
+use crate::store::{Store, StoreError};
 use crate::text::{escape, thousands};
 use crate::warning::{self, Warning};
 
@@ -79,27 +82,69 @@ const RULE_DRIVE: Drive = Drive {
     composes_unicode: false,
 };
 
-/// Whether a file both lines changed may be merged line by line.
+/// Whether a file both lines changed may be merged line by line. `theirs`: only the `opalro.toml`
+/// of the save being combined in is the reason.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum LineMerge {
     Yes,
     /// Its rule says `conflict-markers = false`.
-    RuleSaysNo,
+    RuleSaysNo {
+        theirs: bool,
+    },
     /// `opalro.toml`, or a part of it, was passed over: what it says can't be known, so no file is.
-    RulesNotWhole,
+    RulesNotWhole {
+        theirs: bool,
+    },
 }
 
-/// The project's `[[rule]]` tables, each turned into a matcher once.
+/// What a combine asks about merging: the folder's rules and those of the save combined in.
 #[derive(Debug)]
 pub(crate) struct RuleMatcher {
-    rules: Vec<(Matcher, Option<bool>)>,
-    /// Whether the whole of `opalro.toml` was read.
-    whole: bool,
+    ours: FileRules,
+    theirs: FileRules,
 }
 
 impl RuleMatcher {
     #[must_use]
-    pub fn new(read: &RulesRead) -> RuleMatcher {
+    pub fn new(ours: &RulesRead, theirs: &RulesRead) -> RuleMatcher {
+        RuleMatcher {
+            ours: FileRules::new(ours),
+            theirs: FileRules::new(theirs),
+        }
+    }
+
+    /// Whether the file at `path` (`a/b/c`) may be merged line by line: only when both files allow
+    /// it. `was` is the name a moved file had at the starting point, whose rule must allow it too.
+    /// A rule's no comes before a file not read whole, and the folder's file before the other.
+    #[must_use]
+    pub fn line_merge(&self, path: &str, was: Option<&str>) -> LineMerge {
+        let says_no = |rules: &FileRules| {
+            !rules.conflict_markers(path) || was.is_some_and(|was| !rules.conflict_markers(was))
+        };
+        if says_no(&self.ours) {
+            LineMerge::RuleSaysNo { theirs: false }
+        } else if says_no(&self.theirs) {
+            LineMerge::RuleSaysNo { theirs: true }
+        } else if !self.ours.whole {
+            LineMerge::RulesNotWhole { theirs: false }
+        } else if !self.theirs.whole {
+            LineMerge::RulesNotWhole { theirs: true }
+        } else {
+            LineMerge::Yes
+        }
+    }
+}
+
+/// One `opalro.toml`'s `[[rule]]` tables, each turned into a matcher once.
+#[derive(Debug)]
+struct FileRules {
+    rules: Vec<(Matcher, Option<bool>)>,
+    /// Whether the whole of the file was read.
+    whole: bool,
+}
+
+impl FileRules {
+    fn new(read: &RulesRead) -> FileRules {
         let rules = read.rules.rules.iter().map(|rule| {
             let mut text = Vec::new();
             // A pattern can't be split across lines of the one rule file it becomes.
@@ -115,22 +160,9 @@ impl RuleMatcher {
             matcher.enter("", vec![IgnoreRules::parse(&text, "", false)]);
             (matcher, rule.conflict_markers)
         });
-        RuleMatcher {
+        FileRules {
             rules: rules.collect(),
             whole: read.skipped.is_none() && read.ignored.is_empty(),
-        }
-    }
-
-    /// Whether the file at `path` (`a/b/c`) may be merged line by line; `was` is the name a moved
-    /// file had at the starting point, whose rule must allow it too.
-    #[must_use]
-    pub fn line_merge(&self, path: &str, was: Option<&str>) -> LineMerge {
-        if !self.conflict_markers(path) || was.is_some_and(|was| !self.conflict_markers(was)) {
-            LineMerge::RuleSaysNo
-        } else if !self.whole {
-            LineMerge::RulesNotWhole
-        } else {
-            LineMerge::Yes
         }
     }
 
@@ -420,14 +452,54 @@ pub struct RulesRead {
     pub ignored: Vec<(String, String)>,
 }
 
+const A_LINK: &str = "it is a link, which Opalro doesn't follow here";
+const NOT_A_FILE: &str = "it is a folder or special file, not a regular file";
+const TOO_LARGE: &str = "it is larger than 1 MiB";
+
+fn skipped(why: String) -> RulesRead {
+    RulesRead {
+        skipped: Some(why),
+        ..RulesRead::default()
+    }
+}
+
+/// What the bytes of an `opalro.toml` give.
+fn parsed(bytes: &[u8]) -> RulesRead {
+    match parse(bytes) {
+        Ok((rules, ignored)) => RulesRead {
+            rules,
+            file: true,
+            skipped: None,
+            ignored,
+        },
+        Err(why) => skipped(why),
+    }
+}
+
+/// Reads the `opalro.toml` in the top folder of a save, `root` its listing, on the terms `read`
+/// has for the folder's: the size its listing gives is checked before anything is read.
+pub(crate) fn read_saved(store: &Store, root: &Listing) -> Result<RulesRead, StoreError> {
+    let Some(entry) = root.get("opalro.toml") else {
+        return Ok(RulesRead::default());
+    };
+    let why = match entry.kind {
+        EntryKind::File | EntryKind::Executable if entry.size > MAX_RULES_FILE_BYTES => TOO_LARGE,
+        EntryKind::File | EntryKind::Executable => {
+            return Ok(match read_capped(store, &entry.id, MAX_RULES_FILE_BYTES)? {
+                Some(bytes) => parsed(&bytes),
+                None => skipped(TOO_LARGE.to_owned()),
+            });
+        }
+        EntryKind::Symlink => A_LINK,
+        EntryKind::Folder | EntryKind::ProjectLink | EntryKind::Conflict => NOT_A_FILE,
+    };
+    Ok(skipped(why.to_owned()))
+}
+
 /// Reads `opalro.toml` in `top`. Never fails: what can't be used is in `skipped` or `ignored`.
 #[must_use]
 pub fn read(top: &Dir) -> RulesRead {
     let name = OsStr::new("opalro.toml");
-    let skipped = |why| RulesRead {
-        skipped: Some(why),
-        ..RulesRead::default()
-    };
     let shown = Path::new("opalro.toml");
     let bytes = match safe_fs::read_capped_in(top, name, shown, MAX_RULES_FILE_BYTES) {
         Ok(bytes) => bytes,
@@ -442,27 +514,15 @@ pub fn read(top: &Dir) -> RulesRead {
         }
         Err(e) => return skipped(unusable(top, name, &e)),
     };
-    match parse(&bytes) {
-        Ok((rules, ignored)) => RulesRead {
-            rules,
-            file: true,
-            skipped: None,
-            ignored,
-        },
-        Err(why) => skipped(why),
-    }
+    parsed(&bytes)
 }
 
 /// Why the file `name` couldn't be read, judged by what it is.
 fn unusable(top: &Dir, name: &OsStr, e: &io::Error) -> String {
     match top.metadata(name).map(|m| (m.kind, m.size)) {
-        Ok((EntryType::Symlink, _)) => "it is a link, which Opalro doesn't follow here".to_owned(),
-        Ok((EntryType::Dir | EntryType::Other, _)) => {
-            "it is a folder or special file, not a regular file".to_owned()
-        }
-        Ok((EntryType::File, size)) if size > MAX_RULES_FILE_BYTES => {
-            "it is larger than 1 MiB".to_owned()
-        }
+        Ok((EntryType::Symlink, _)) => A_LINK.to_owned(),
+        Ok((EntryType::Dir | EntryType::Other, _)) => NOT_A_FILE.to_owned(),
+        Ok((EntryType::File, size)) if size > MAX_RULES_FILE_BYTES => TOO_LARGE.to_owned(),
         _ => format!("Opalro couldn't read it: {}", escape(&e.to_string(), false)),
     }
 }
@@ -787,18 +847,23 @@ mod tests {
             lockable: None,
             conflict_markers: *markers,
         });
-        RuleMatcher::new(&RulesRead {
-            rules: Rules {
-                rules: rules.collect(),
-                ..Rules::default()
+        RuleMatcher::new(
+            &RulesRead {
+                rules: Rules {
+                    rules: rules.collect(),
+                    ..Rules::default()
+                },
+                ..RulesRead::default()
             },
-            ..RulesRead::default()
-        })
+            &RulesRead::default(),
+        )
     }
 
     /// Whether a rule of `patterns` matches `path`.
     fn matches(patterns: &[&str], path: &str) -> bool {
-        !matcher(&[(patterns, Some(false))]).conflict_markers(path)
+        !matcher(&[(patterns, Some(false))])
+            .ours
+            .conflict_markers(path)
     }
 
     fn read_text(text: &str) -> RulesRead {
@@ -810,17 +875,23 @@ mod tests {
     #[test]
     fn no_file_is_merged_line_by_line_while_the_rules_are_not_read_whole() {
         let rule = "[[rule]]\nfiles = [\"*.unity\"]\nconflict-markers = false\n";
-        let whole = RuleMatcher::new(&read_text(rule));
+        let whole = RuleMatcher::new(&read_text(rule), &RulesRead::default());
         assert_eq!(whole.line_merge("a.txt", None), LineMerge::Yes);
-        assert_eq!(whole.line_merge("Main.unity", None), LineMerge::RuleSaysNo);
-        let none = RuleMatcher::new(&RulesRead::default());
+        assert_eq!(
+            whole.line_merge("Main.unity", None),
+            LineMerge::RuleSaysNo { theirs: false }
+        );
+        let none = RuleMatcher::new(&RulesRead::default(), &RulesRead::default());
         assert_eq!(none.line_merge("Main.unity", None), LineMerge::Yes);
         // Passed over whole: no rule is known, and no file is merged.
-        let skipped = RuleMatcher::new(&read_text("[[rule]\nfiles = [\"*.unity\"]\n"));
+        let skipped = RuleMatcher::new(
+            &read_text("[[rule]\nfiles = [\"*.unity\"]\n"),
+            &RulesRead::default(),
+        );
         for path in ["a.txt", "Main.unity"] {
             assert_eq!(
                 skipped.line_merge(path, None),
-                LineMerge::RulesNotWhole,
+                LineMerge::RulesNotWhole { theirs: false },
                 "{path}"
             );
         }
@@ -836,15 +907,15 @@ mod tests {
             );
             let read = read_text(&text);
             assert_eq!(read.ignored.len(), 1, "{text}");
-            let m = RuleMatcher::new(&read);
+            let m = RuleMatcher::new(&read, &RulesRead::default());
             assert_eq!(
                 m.line_merge("a.txt", None),
-                LineMerge::RulesNotWhole,
+                LineMerge::RulesNotWhole { theirs: false },
                 "{text}"
             );
             assert_eq!(
                 m.line_merge("Main.unity", None),
-                LineMerge::RuleSaysNo,
+                LineMerge::RuleSaysNo { theirs: false },
                 "{text}"
             );
         }
@@ -856,11 +927,42 @@ mod tests {
         assert_eq!(m.line_merge("Main.txt", Some("a.txt")), LineMerge::Yes);
         assert_eq!(
             m.line_merge("Main.txt", Some("Main.unity")),
-            LineMerge::RuleSaysNo
+            LineMerge::RuleSaysNo { theirs: false }
         );
         assert_eq!(
             m.line_merge("Main.unity", Some("Main.txt")),
-            LineMerge::RuleSaysNo
+            LineMerge::RuleSaysNo { theirs: false }
+        );
+    }
+
+    #[test]
+    fn a_file_is_merged_only_when_both_rules_files_allow_it() {
+        let none = RulesRead::default();
+        let ruled = read_text("[[rule]]\nfiles = [\"*.unity\"]\nconflict-markers = false\n");
+        let broken = read_text("[[rule]\n");
+        let ask = |ours: &RulesRead, theirs: &RulesRead, path: &str, was: Option<&str>| {
+            RuleMatcher::new(ours, theirs).line_merge(path, was)
+        };
+        let no = |theirs| LineMerge::RuleSaysNo { theirs };
+        let not_whole = |theirs| LineMerge::RulesNotWhole { theirs };
+        assert_eq!(ask(&none, &none, "Main.unity", None), LineMerge::Yes);
+        assert_eq!(ask(&none, &ruled, "a.txt", None), LineMerge::Yes);
+        // The folder's file is named when it is a reason, the other side's when only it is.
+        assert_eq!(ask(&ruled, &none, "Main.unity", None), no(false));
+        assert_eq!(ask(&none, &ruled, "Main.unity", None), no(true));
+        assert_eq!(ask(&ruled, &ruled, "Main.unity", None), no(false));
+        assert_eq!(ask(&broken, &none, "a.txt", None), not_whole(false));
+        assert_eq!(ask(&none, &broken, "a.txt", None), not_whole(true));
+        assert_eq!(ask(&broken, &broken, "a.txt", None), not_whole(false));
+        // A rule that says no is the file's own reason, whichever file holds it.
+        assert_eq!(ask(&broken, &ruled, "Main.unity", None), no(true));
+        assert_eq!(ask(&ruled, &broken, "Main.unity", None), no(false));
+        assert_eq!(ask(&ruled, &broken, "a.txt", None), not_whole(true));
+        // A moved file whose old name only the other side's rules protect.
+        assert_eq!(ask(&none, &ruled, "Main.txt", Some("Main.unity")), no(true));
+        assert_eq!(
+            ask(&none, &ruled, "Main.txt", Some("a.txt")),
+            LineMerge::Yes
         );
     }
 
@@ -887,7 +989,7 @@ mod tests {
 
     #[test]
     fn no_rule_means_markers() {
-        assert!(matcher(&[]).conflict_markers("a.txt"));
+        assert!(matcher(&[]).ours.conflict_markers("a.txt"));
     }
 
     #[test]
@@ -897,9 +999,9 @@ mod tests {
             (&["Assets/Keep/*.unity"], Some(true)),
             (&["*.unity"], None),
         ]);
-        assert!(!m.conflict_markers("Assets/a.unity"));
-        assert!(m.conflict_markers("Assets/Keep/b.unity"));
-        assert!(m.conflict_markers("a.txt"));
+        assert!(!m.ours.conflict_markers("Assets/a.unity"));
+        assert!(m.ours.conflict_markers("Assets/Keep/b.unity"));
+        assert!(m.ours.conflict_markers("a.txt"));
     }
 
     #[test]
@@ -967,7 +1069,7 @@ mod tests {
     fn a_rule_of_only_reincluding_patterns_matches_nothing() {
         let m = matcher(&[(&["!*.unity", "!keep/"], Some(false))]);
         for path in ["a.unity", "keep/a.txt", "a.txt"] {
-            assert!(m.conflict_markers(path), "{path}");
+            assert!(m.ours.conflict_markers(path), "{path}");
         }
     }
 
@@ -992,14 +1094,17 @@ mod tests {
         let text = opal_toml(Preset::Game, &found).unwrap();
         let (rules, ignored) = parse(text.as_bytes()).unwrap();
         assert!(ignored.is_empty(), "{ignored:?}");
-        let m = RuleMatcher::new(&RulesRead {
-            rules,
-            ..RulesRead::default()
-        });
-        assert!(!m.conflict_markers("Assets/Main.unity"));
-        assert!(!m.conflict_markers("Assets/P.prefab"));
-        assert!(!m.conflict_markers("Assets/P.prefab.meta"));
-        assert!(m.conflict_markers("Assets/Player.cs"));
+        let m = RuleMatcher::new(
+            &RulesRead {
+                rules,
+                ..RulesRead::default()
+            },
+            &RulesRead::default(),
+        );
+        assert!(!m.ours.conflict_markers("Assets/Main.unity"));
+        assert!(!m.ours.conflict_markers("Assets/P.prefab"));
+        assert!(!m.ours.conflict_markers("Assets/P.prefab.meta"));
+        assert!(m.ours.conflict_markers("Assets/Player.cs"));
     }
 
     proptest::proptest! {
@@ -1267,6 +1372,83 @@ mod tests {
             assert!(rules_warnings(&result.unwrap()).is_empty());
             assert_eq!(repo.rules().rules, Rules::default());
             assert!(chunk_lists(&repo).contains(&hash_content(&one_and_a_half)));
+        }
+
+        /// The rules read from a save whose top folder holds `entry` as `opalro.toml`, its
+        /// contents stored first when there are any.
+        fn saved(
+            repo: &mut Repository,
+            kind: EntryKind,
+            contents: Option<&[u8]>,
+            size: u64,
+        ) -> RulesRead {
+            let id = match contents {
+                Some(bytes) => {
+                    let lock = repo.lock_for_change("test", &mut |_| {}).unwrap();
+                    let mut packs = repo.new_packs().unwrap();
+                    let id = packs.add_content(bytes).unwrap();
+                    repo.store_packs(&lock, packs).unwrap();
+                    id
+                }
+                // Nothing stored under it: reading it would fail.
+                None => Id([7; 32]),
+            };
+            let entry = crate::listing::Entry {
+                name: "opalro.toml".into(),
+                kind,
+                id,
+                size,
+            };
+            let root = Listing::new(vec![entry]).unwrap();
+            read_saved(repo.store(), &root).unwrap()
+        }
+
+        #[test]
+        fn a_saves_rules_file_is_read_on_the_folders_terms() {
+            let (_dir, mut repo) = project();
+            let none = read_saved(repo.store(), &Listing::empty()).unwrap();
+            assert!(!none.file && none.skipped.is_none() && none.ignored.is_empty());
+            let text = b"[[rule]]\nfiles = [\"*.unity\"]\nconflict-markers = false\n";
+            for kind in [EntryKind::File, EntryKind::Executable] {
+                let read = saved(&mut repo, kind, Some(text), text.len() as u64);
+                assert!(read.file && read.skipped.is_none() && read.ignored.is_empty());
+                assert_eq!(read.rules.rules.len(), 1);
+            }
+            let broken = saved(&mut repo, EntryKind::File, Some(b"[[rule]\n"), 8);
+            assert!(broken.skipped.unwrap().starts_with("it isn't TOML: line 1"));
+            let part = saved(&mut repo, EntryKind::File, Some(b"colour = \"red\"\n"), 15);
+            assert_eq!(part.ignored.len(), 1);
+            // Exactly 1 MiB is read.
+            let mut full = vec![b'#'; 1 << 20];
+            full[(1 << 20) - 1] = b'\n';
+            let read = saved(&mut repo, EntryKind::File, Some(&full), 1 << 20);
+            assert!(read.file && read.skipped.is_none());
+            // What isn't a regular file is passed over whole, with the reason a drive's gets.
+            let link = saved(&mut repo, EntryKind::Symlink, Some(b"real.toml"), 9);
+            assert_eq!(
+                link.skipped.unwrap(),
+                "it is a link, which Opalro doesn't follow here"
+            );
+            for kind in [EntryKind::Folder, EntryKind::ProjectLink] {
+                let read = saved(&mut repo, kind, None, 0);
+                assert_eq!(
+                    read.skipped.unwrap(),
+                    "it is a folder or special file, not a regular file"
+                );
+            }
+        }
+
+        #[test]
+        fn a_saves_rules_file_over_1_mib_is_passed_over_without_reading_more() {
+            let (_dir, mut repo) = project();
+            // Its listed size decides: nothing is read, though nothing could be.
+            let listed = saved(&mut repo, EntryKind::File, None, (1 << 20) + 1);
+            assert_eq!(listed.skipped.unwrap(), "it is larger than 1 MiB");
+            // A listing that says less than there is: the read stops past 1 MiB.
+            let mut over = vec![b'#'; (1 << 20) + 1];
+            over[1 << 20] = b'\n';
+            let lied = saved(&mut repo, EntryKind::File, Some(&over), 10);
+            assert_eq!(lied.skipped.unwrap(), "it is larger than 1 MiB");
         }
     }
 }
