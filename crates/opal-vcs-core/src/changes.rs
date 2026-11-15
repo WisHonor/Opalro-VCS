@@ -317,8 +317,10 @@ pub fn save_changes<E: From<SaveError> + From<StoreError>>(
         if !scope.as_ref().is_none_or(|s| s.holds(c.path)) {
             return Ok(());
         }
-        let c = PathChange::from(c);
+        let mut c = PathChange::from(c);
         if c.change.is_conflict() {
+            // Whether the newer save holds a conflict there.
+            c.in_conflict = c.change != ChangeKind::ConflictFixed;
             let none = Lines::Hunks {
                 hunks: Vec::new(),
                 timed_out: false,
@@ -341,18 +343,29 @@ pub fn for_each_save_change<E: From<StoreError>>(
     mut each: impl FnMut(FileChange<'_>) -> Result<(), E>,
 ) -> Result<(), E> {
     let keeps = repo.keeps_conflicts();
+    // The place of the last conflict handed out, `/` after it: a folder on the other side is
+    // the conflict's, so its files aren't changes of their own.
+    let mut place = String::new();
     for_each_change(repo.store(), old_root, new_root, |mut c| {
-        if keeps {
-            let held = |k: Option<EntryKind>| k == Some(EntryKind::Conflict);
-            // `kind` is the new side's when there is one.
-            let new = c.new_id.map(|_| c.kind);
-            c.change = match (held(c.old_kind), held(new)) {
-                (false, true) => ChangeKind::InConflict,
-                (true, true) => ChangeKind::StillInConflict,
-                (true, false) => ChangeKind::ConflictFixed,
-                (false, false) => c.change,
-            };
+        if !keeps {
+            return each(c);
         }
+        if !place.is_empty() && c.path.starts_with(&place) {
+            return Ok(());
+        }
+        let held = |k: Option<EntryKind>| k == Some(EntryKind::Conflict);
+        // `kind` is the new side's when there is one.
+        let new = c.new_id.map(|_| c.kind);
+        c.change = match (held(c.old_kind), held(new)) {
+            (false, true) => ChangeKind::InConflict,
+            (true, true) => ChangeKind::StillInConflict,
+            (true, false) => ChangeKind::ConflictFixed,
+            (false, false) => return each(c),
+        };
+        // A place's own path comes before the paths below it.
+        place.clear();
+        place.push_str(c.path);
+        place.push('/');
         each(c)
     })
 }
@@ -820,5 +833,78 @@ mod tests {
         };
         assert!(out.write_all(b"a").is_ok() && !out.over);
         assert!(out.write_all(b"b").is_err() && out.over);
+    }
+
+    /// A place in a planted save: a file holding these bytes, or a conflict with them as yours.
+    #[derive(Clone, Copy)]
+    enum Place {
+        File(&'static [u8]),
+        Conflict(&'static [u8]),
+    }
+
+    /// What `changes --save` hands out for a save holding `after` at `d/a`, `d/b` and `d/c`
+    /// after one holding `before`, and the listings and records it and `show`'s walk read.
+    fn compared(
+        before: [Place; 3],
+        after: [Place; 3],
+    ) -> (Vec<(String, ChangeKind)>, usize, usize) {
+        use crate::status::tests::{project, versions};
+        let (_dir, mut repo) = project();
+        let mut plant = |places: [Place; 3]| {
+            let (mut files, mut conflicts) = (Vec::new(), Vec::new());
+            for (path, place) in ["d/a", "d/b", "d/c"].into_iter().zip(places) {
+                match place {
+                    Place::File(b) => files.push((path, EntryKind::File, b)),
+                    Place::Conflict(b) => {
+                        conflicts.push((path, versions(Some(conflict::tests::file_of(b)))));
+                    }
+                }
+            }
+            crate::test_support::plant_with(&mut repo, &files, &conflicts);
+            crate::history::current_save(&repo).unwrap()
+        };
+        plant(before);
+        let id = plant(after);
+        let store = repo.store();
+        let save = store.save(&id, false).unwrap();
+        let old = store.save(&save.parents[0], false).unwrap().root;
+        let before = (store.listings_read(), store.conflicts_read());
+        let mut seen = Vec::new();
+        save_changes(&repo, id, None, &mut |path, c, _| {
+            seen.push((path.to_owned(), c.change));
+            Ok::<(), SaveError>(())
+        })
+        .unwrap();
+        for_each_save_change(&repo, Some(old), save.root, |_| Ok::<(), StoreError>(())).unwrap();
+        let read = (store.listings_read(), store.conflicts_read());
+        (seen, read.0 - before.0, read.1 - before.1)
+    }
+
+    #[test]
+    fn telling_a_saves_conflicts_reads_no_record_and_no_more_listings() {
+        use Place::{Conflict as C, File as F};
+        // `d/a` made, `d/b` kept with another version, `d/c` fixed.
+        let (seen, listings, records) = compared(
+            [F(b"a0"), C(b"b0"), C(b"c0")],
+            [C(b"a1"), C(b"b1"), F(b"c1")],
+        );
+        let kinds = [
+            ChangeKind::InConflict,
+            ChangeKind::StillInConflict,
+            ChangeKind::ConflictFixed,
+        ];
+        let paths = ["d/a", "d/b", "d/c"].map(String::from);
+        assert_eq!(
+            seen,
+            paths.clone().into_iter().zip(kinds).collect::<Vec<_>>()
+        );
+        assert_eq!(records, 0);
+        // The same save with ordinary files at those places.
+        let (seen, plain, records) = compared(
+            [F(b"a0"), F(b"b0"), F(b"c0")],
+            [F(b"a1"), F(b"b1"), F(b"c1")],
+        );
+        assert_eq!(seen.len(), 3);
+        assert_eq!((listings, records), (plain, 0));
     }
 }

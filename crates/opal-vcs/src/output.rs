@@ -577,17 +577,22 @@ impl Columns {
         let room = self.room(s);
         let path = s.fit_path(&row.path, room);
         let pad = |text: &str, width: usize| " ".repeat(width.saturating_sub(style::columns(text)));
-        let line = format!(
-            "    {}{}  {}{}  {}{}",
+        let start = format!(
+            "    {}{}  {}",
             s.paint(row.role, row.word),
             pad(row.word, self.word),
             s.paint(Role::Path, &path),
+        );
+        // A row that holds nothing ends at its path, whatever the path ends in.
+        if row.held.is_empty() {
+            return start;
+        }
+        format!(
+            "{start}{}  {}{}",
             pad(&path, self.path.min(room)),
             pad(&row.held, self.held),
             row.held
-        );
-        // A row that holds nothing ends at its path.
-        line.trim_end().to_owned()
+        )
     }
 }
 

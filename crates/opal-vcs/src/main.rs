@@ -1542,7 +1542,8 @@ fn changes_command(
             if shown.get() > 1 {
                 wrote(writeln!(out, "{}", output::between_files()))?;
             }
-            if c.in_conflict {
+            // Between two saves no file is compared with what a conflict stands as.
+            if c.in_conflict && save.is_none() {
                 let s = style::out();
                 let path = s.paint(style::Role::Path, &escape(path, false));
                 wrote(writeln!(
@@ -1737,6 +1738,7 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
     let (mut count, mut columns) = (0_usize, output::Columns::default());
     // The places it made, kept with another version, and fixed.
     let mut conflicts = [0_u64; 3];
+    let keeps = repo.keeps_conflicts();
     for_each_save_change(repo, old_root, save.root, |c| {
         count += 1;
         let at = match c.change {
@@ -1763,7 +1765,15 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
                 "{\"changes\":[",
                 |each| {
                     for_each_save_change(repo, old_root, save.root, |c| {
-                        each(&output::change_json(&c))
+                        let mut change = output::change_json(&c);
+                        if keeps {
+                            change["in_conflict"] = matches!(
+                                c.change,
+                                ChangeKind::InConflict | ChangeKind::StillInConflict
+                            )
+                            .into();
+                        }
+                        each(&change)
                     })
                 },
                 || {
@@ -1772,17 +1782,18 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
                     let mut warnings: Vec<Warning> = unfinished.into_iter().collect();
                     let short = short_or_whole(repo, &id, &save.change_id, &mut warnings);
                     warnings.extend(store.warnings());
-                    (
-                        json!({
-                            "conflicts_changed": conflicts[1],
-                            "conflicts_fixed": conflicts[2],
-                            "conflicts_made": conflicts[0],
-                            "opalro_json": OPALRO_JSON,
-                            "save": output::save_json(&id, &save, &short),
-                            "tags": tags,
-                        }),
-                        warnings,
-                    )
+                    let mut doc = json!({
+                        "opalro_json": OPALRO_JSON,
+                        "save": output::save_json(&id, &save, &short),
+                        "tags": tags,
+                    });
+                    // A project as v0.1 made it gets the document v0.1 gave.
+                    if keeps {
+                        doc["conflicts_made"] = conflicts[0].into();
+                        doc["conflicts_changed"] = conflicts[1].into();
+                        doc["conflicts_fixed"] = conflicts[2].into();
+                    }
+                    (doc, warnings)
                 },
             );
         }

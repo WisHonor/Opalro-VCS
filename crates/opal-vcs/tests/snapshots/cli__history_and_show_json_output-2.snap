@@ -6,6 +6,7 @@ expression: show
   "changes": [
     {
       "change": "added",
+      "in_conflict": false,
       "kind": "file",
       "new_size": 5,
       "old_size": null,

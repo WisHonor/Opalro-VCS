@@ -408,11 +408,30 @@ fn changes_marks_a_file_in_conflict() {
         .collect();
     assert_eq!(marked, [("notes.txt", true), ("plain.txt", false)]);
 
-    // A save's own changes are never in conflict.
+    // Between two saves, `in_conflict` says whether the newer one holds a conflict there.
     let doc = json(&env, &["changes", "--save", "main"]);
-    let changes = doc["changes"].as_array().unwrap();
-    assert!(!changes.is_empty(), "{doc}");
-    assert!(changes.iter().all(|c| c["in_conflict"] == false), "{doc}");
+    let marked: Vec<(&str, &str, bool)> = doc["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| {
+            (
+                c["path"].as_str().unwrap(),
+                c["change"].as_str().unwrap(),
+                c["in_conflict"].as_bool().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        marked,
+        [
+            ("notes.txt", "in_conflict", true),
+            ("plain.txt", "added", false)
+        ],
+        "{doc}"
+    );
+    let (shown, _) = run(&env, &["changes", "--save", "main"], 0);
+    assert!(!shown.contains("In conflict:"), "{shown}");
 }
 
 #[test]
@@ -1171,7 +1190,13 @@ fn show_and_changes_save_name_a_conflict_made_still_there_and_fixed() {
         for c in doc["changes"].as_array().unwrap() {
             assert_eq!(c["content"], "text", "{doc}");
             assert_eq!(c["hunks"], serde_json::json!([]), "{doc}");
-            assert_eq!(c["in_conflict"], false, "{doc}");
+            // Whether the newer save holds a conflict there.
+            let held = c["change"] != "conflict_fixed";
+            assert_eq!(c["in_conflict"], held, "{doc}");
+        }
+        let doc = json(&env, &["show", save]);
+        for c in doc["changes"].as_array().unwrap() {
+            assert_eq!(c["in_conflict"], c["change"] != "conflict_fixed", "{doc}");
         }
     }
 }
@@ -1232,32 +1257,193 @@ fn without_the_feature_show_names_a_planted_conflict_as_v01_does() {
     let env = started();
     plant(&env, &[], &[("yours.png", versions(Some(term(PICTURE))))]);
     support::without_conflicts_feature(env.root());
-    let (shown, _) = run(&env, &["show"], 0);
-    let row = shown.lines().find(|l| l.contains("yours.png")).unwrap();
+    // Whole outputs, as v0.1 gave them: a conflict's entry is an added file of kind conflict,
+    // empty text, and no field v0.1 didn't have.
+    let doc = json(&env, &["show"]);
+    let save = doc["save"].clone();
+    let change = serde_json::json!({
+        "change": "added",
+        "kind": "conflict",
+        "new_size": 0,
+        "old_size": null,
+        "path": "yours.png",
+    });
     assert_eq!(
-        row.split_whitespace().collect::<Vec<_>>(),
-        ["added", "yours.png", "0", "B"],
+        doc,
+        serde_json::json!({
+            "changes": [change],
+            "opalro_json": 1,
+            "save": save,
+            "tags": [],
+            "warnings": [],
+        })
+    );
+    let (shown, _) = run(&env, &["show"], 0);
+    let short = save["change_id_short"].as_str().unwrap();
+    let head = format!("Save {short} \"Planted\"\n\n");
+    assert!(shown.starts_with(&head), "{shown}");
+    let fingerprint = format!("    Fingerprint  {}\n", save["id"].as_str().unwrap());
+    let (_, tail) = shown.split_once(&fingerprint).unwrap();
+    assert_eq!(tail, "\n1 file changed:\n\n    added  yours.png  0 B\n");
+    let (shown, _) = run(&env, &["changes", "--save", "main"], 0);
+    assert_eq!(shown, "added  yours.png  +0 -0  (0 B)\n");
+    let doc = json(&env, &["changes", "--save", "main"]);
+    let mut file = change.clone();
+    for (k, v) in [
+        ("content", serde_json::json!("text")),
+        ("hunks", serde_json::json!([])),
+        ("in_conflict", serde_json::json!(false)),
+        ("only_line_endings", serde_json::json!(false)),
+        ("timed_out", serde_json::json!(false)),
+    ] {
+        file[k] = v;
+    }
+    assert_eq!(
+        doc,
+        serde_json::json!({
+            "changes": [file],
+            "opalro_json": 1,
+            "save": save,
+            "warnings": [],
+        })
+    );
+}
+
+/// `main` and `side` apart from a save holding `dir/x.txt` and `gone.txt`: `side` makes `dir` a
+/// file and changes `gone.txt`, `main` changes `dir/x.txt` and removes `gone.txt`; then combined,
+/// so `dir` is a conflict standing as your folder and `gone.txt` one standing as nothing.
+fn folder_and_gone() -> Env {
+    let env = started();
+    put(&env, "dir/x.txt", b"x\n");
+    put(&env, "gone.txt", b"gone\n");
+    run(&env, &["save", "Start"], 0);
+    run(&env, &["line", "new", "side"], 0);
+    std::fs::remove_dir_all(env.root().join("dir")).unwrap();
+    put(&env, "dir", b"a file now\n");
+    put(&env, "gone.txt", b"changed\n");
+    run(&env, &["save", "On side"], 0);
+    run(&env, &["goto", "main"], 0);
+    put(&env, "dir/x.txt", b"main\n");
+    std::fs::remove_file(env.root().join("gone.txt")).unwrap();
+    run(&env, &["save", "On main"], 0);
+    run(&env, &["combine", "side"], 0);
+    env
+}
+
+#[test]
+fn a_folder_that_became_a_conflict_and_back_is_one_row() {
+    let env = folder_and_gone();
+    let (shown, _) = run(&env, &["show"], 0);
+    assert!(
+        shown.ends_with(
+            "\n2 files changed:\n\n    in conflict  dir\n    in conflict  gone.txt\n\n2 places \
+             became conflicts in this save.\n"
+        ),
         "{shown}"
     );
-    assert!(!shown.contains("conflict"), "{shown}");
+    let (shown, _) = run(&env, &["changes", "--save", "main"], 0);
+    assert_eq!(shown, "in conflict  dir\n\nin conflict  gone.txt\n");
     let doc = json(&env, &["show"]);
-    let change = doc["changes"]
+    let rows: Vec<(&str, &str, bool)> = doc["changes"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|c| c["path"] == "yours.png")
-        .unwrap();
-    assert_eq!(change["change"], "added", "{doc}");
-    assert_eq!(change["kind"], "conflict", "{doc}");
-    for k in ["conflicts_made", "conflicts_changed", "conflicts_fixed"] {
-        assert_eq!(doc[k], 0, "{doc}");
-    }
+        .map(|c| {
+            let (p, k) = (c["path"].as_str().unwrap(), c["change"].as_str().unwrap());
+            (p, k, c["in_conflict"].as_bool().unwrap())
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("dir", "in_conflict", true),
+            ("gone.txt", "in_conflict", true)
+        ],
+        "{doc}"
+    );
+    assert_eq!(doc["conflicts_made"], 2, "{doc}");
+    // Back to the folder, and the gone file removed: each one row. A save first, so the fix is
+    // a save of its own and not folded into the combined one.
+    put(&env, "other.txt", b"o\n");
+    run(&env, &["save", "Other", "other.txt"], 0);
+    run(&env, &["resolve", "dir", "gone.txt", "--keep", "mine"], 0);
+    let (shown, _) = run(&env, &["show"], 0);
+    assert!(
+        shown.ends_with(
+            "\n2 files changed:\n\n    conflict fixed  dir\n    conflict fixed  gone.txt\n\n2 \
+             conflicts were fixed in this save.\n"
+        ),
+        "{shown}"
+    );
     let doc = json(&env, &["changes", "--save", "main"]);
-    let change = doc["changes"]
+    let rows: Vec<(&str, &str, bool)> = doc["changes"]
         .as_array()
         .unwrap()
         .iter()
-        .find(|c| c["path"] == "yours.png")
-        .unwrap();
-    assert_eq!(change["change"], "added", "{doc}");
+        .map(|c| {
+            let (p, k) = (c["path"].as_str().unwrap(), c["change"].as_str().unwrap());
+            (p, k, c["in_conflict"].as_bool().unwrap())
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ("dir", "conflict_fixed", false),
+            ("gone.txt", "conflict_fixed", false)
+        ],
+        "{doc}"
+    );
+    assert_eq!(json(&env, &["show"])["conflicts_fixed"], 2);
+}
+
+/// A conflict in a folder the save added is a place that became a conflict; in a folder the save
+/// removed, one that stopped being one: the place itself is gone.
+#[test]
+fn a_conflict_in_a_folder_added_or_removed_is_named_at_its_place() {
+    let env = started();
+    plant(
+        &env,
+        &[("art/plain.txt", b"one\n")],
+        &[("art/pic.png", versions(Some(term(PICTURE))))],
+    );
+    let (shown, _) = run(&env, &["show"], 0);
+    assert!(
+        shown.ends_with(
+            "\n2 files changed:\n\n    in conflict  art/pic.png\n    added        \
+             art/plain.txt  4 B\n\n1 place became a conflict in this save.\n"
+        ),
+        "{shown}"
+    );
+    plant(&env, &[("plain.txt", b"one\n")], &[]);
+    let (shown, _) = run(&env, &["show"], 0);
+    assert!(
+        shown.ends_with(
+            "\n3 files changed:\n\n    conflict fixed  art/pic.png\n    removed         \
+             art/plain.txt  4 B\n    added           plain.txt      4 B\n\n1 conflict was fixed \
+             in this save.\n"
+        ),
+        "{shown}"
+    );
+}
+
+#[test]
+fn a_conflict_row_keeps_the_paths_own_trailing_spaces() {
+    let env = started();
+    let (nbsp, wide) = ("b\u{a0}", "pictures\u{3000}");
+    plant(
+        &env,
+        &[],
+        &[
+            (nbsp, versions(Some(term(PICTURE)))),
+            (wide, versions(Some(term(PICTURE)))),
+        ],
+    );
+    let (shown, _) = run(&env, &["show"], 0);
+    assert!(
+        shown.ends_with(&format!(
+            "\n    in conflict  {nbsp}\n    in conflict  {wide}\n\n2 places became conflicts in \
+             this save.\n"
+        )),
+        "{shown:?}"
+    );
 }

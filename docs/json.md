@@ -8,7 +8,7 @@
 
 - **One document, on stdout, in one line.** Nothing else goes to stdout. When the command succeeds, its warnings also go to stderr, as text; after a failure they are only in the document (§4 names the few that are told before the error). `history`, `show`, `changes` and `undo --list --all` print their documents while they read, but what comes out is still one object. Don't depend on the order of its keys.
 - **`opalro_json` is the version of the format,** a number, `1` now. It is in every document.
-- **The versioning rule.** Within one `opalro_json` number, fields may be added, and kinds of warnings may be added. Fields are never removed, renamed, or given another type or meaning. Programs must ignore fields and warning kinds they don't know. A change that breaks the rule gets the next number. A field that can be `null` says so in its table, and says when: `start`'s `save`, for one, is `null` if the project was made but its first save couldn't be read back (a `first_save_not_read` warning says so). Check for `null` before you use such a field.
+- **The versioning rule.** Within one `opalro_json` number, fields may be added, and kinds of warnings may be added. Fields are never removed, renamed, or given another type or meaning. Programs must ignore fields and warning kinds they don't know. A field never takes a value an older Opalro didn't give it, except in a project whose `.opalro/format` lists a feature that older Opalro didn't know: in a project made by Opalro 0.1 and not upgraded, every field takes only the values 0.1 gave it (new fields may still appear, under the rule above), and the values milestone 9 added (`change`'s `"in_conflict"`, `"still_in_conflict"` and `"conflict_fixed"`, and `verify`'s `nested_conflict`) appear only once `conflicts` is on. A change that breaks the rule gets the next number. A field that can be `null` says so in its table, and says when: `start`'s `save`, for one, is `null` if the project was made but its first save couldn't be read back (a `first_save_not_read` warning says so). Check for `null` before you use such a field.
 - **Frozen at v0.1.** When v0.1 is released, `opalro_json` 1 is fixed for good under the rule above ([decision 117](decisions/117-what-json-covers-at-v0.1.md)): the field names, their types and meanings, the `kind` of each warning and the exit codes. The wording of `message` and `hint` texts isn't part of it: they are for people, and may change.
 - **Never in a document, and never because of `--json`:** colour or any other terminal code, symbols picked for the terminal, progress, and the lines Opalro adds for a person at a terminal ("Next:", the hint the first time a Git word is used). With `--json` Opalro never asks a question: where it would ask a person, it fails and its hint names the flag (`--yes`, `--line`, `--preset`).
 - **Exit codes.** `0`: the command did its work, though it may have warnings. `1`: it failed, and the document has `error`. `2`: the command line was wrong; the usage message is text, not JSON, and so is what Opalro says about a Git word it doesn't run ([decision 116](decisions/116-gits-words-as-shortcuts.md)).
@@ -213,7 +213,7 @@ Saving gives one of two documents, told apart by `result`.
 | `hunks` | list of hunk | The changed lines with 3 lines of context around them, as in a unified diff. `[]` unless `content` is `"text"`. |
 | `timed_out` | boolean | The diff took more than 2 seconds, so Opalro stopped it: the hunks are right, but in bigger pieces than they could be. A `diff_timed_out` warning says so too. |
 | `only_line_endings` | boolean | Every line the hunks remove or add is one of a pair that differs only in its line ending (see `eol_only` below): CRLF into LF, LF into CRLF, or some of each. |
-| `in_conflict` | boolean | `true` for a file at a place in conflict, or below one standing as a folder: it is compared with what the conflict stands as, what the folder held for it after the last save. Always `false` with `--save`, and in a project whose `.opalro/format` doesn't list `conflicts`. |
+| `in_conflict` | boolean | Without `--save`: `true` for a file at a place in conflict, or below one standing as a folder: it is compared with what the conflict stands as, what the folder held for it after the last save. With `--save`: whether the save holds a conflict at the place, `true` for a change that is `"in_conflict"` or `"still_in_conflict"`, `false` for every other. Always `false` in a project whose `.opalro/format` doesn't list `conflicts`. |
 
 **A hunk:** `old_start`, `old_lines`, `new_start`, `new_lines` (numbers: the first line's number on each side, from 1, or the line before it for a side with no lines, and how many lines of that side the hunk covers), and `lines`, a list of `{"tag": …, "text": …}`: `tag` is `"same"`, `"removed"` or `"added"`, and `text` is the line with its ending (`"\n"`, `"\r\n"`, or none for a last line without one). Bytes that aren't UTF-8 show as U+FFFD. A removed line and an added line that differ only in their ending, `"\r\n"` for `"\n"` or the other way round, both have `"eol_only": true`; the pairs are the diff's own, the first of a run of removed lines with the first of the added lines right after it, the second with the second, and so on. Other lines leave `eol_only` out. For people, the line of such a pair that ends in CRLF is shown with `(CRLF)` after it.
 
@@ -605,7 +605,7 @@ A step that stops it fails it with exit code 1, and its document is the error do
 | `save` | save | The save shown. |
 | `tags` | list of string | The names of the tags at the save shown, in order, as they are; empty when it has none. |
 | `changes` | list of change | What the save changed compared with its first parent (with all of its files for a save that has none), in the order of the paths. |
-| `conflicts_made`, `conflicts_changed`, `conflicts_fixed` | number | How many of `changes` are `"in_conflict"`, `"still_in_conflict"` and `"conflict_fixed"`. `0` in a project whose `.opalro/format` doesn't list `conflicts`. |
+| `conflicts_made`, `conflicts_changed`, `conflicts_fixed` | number | How many of `changes` are `"in_conflict"`, `"still_in_conflict"` and `"conflict_fixed"`. Only in a project whose `.opalro/format` lists `conflicts`. |
 | `warnings` | list | See §4. |
 
 **A change:**
@@ -617,7 +617,10 @@ A step that stops it fails it with exit code 1, and its document is the error do
 | `kind` | string | `"file"`, `"executable"`, `"symlink"`, `"project_link"` or `"conflict"`: the kind after the change, or before it for a removed file. |
 | `old_size`, `new_size` | number or `null` | Size in bytes before and after. **`null` means the path wasn't there on that side:** `old_size` for an added file, `new_size` for a removed one. A project link or a conflict has size `0`. |
 
-Folders are not listed; the files in them are.
+Folders are not listed; the files in them are. In a project that keeps conflicts:
+
+- each change also has `in_conflict` (boolean): whether the save holds a conflict at the place, `true` for `"in_conflict"` and `"still_in_conflict"`, `false` for every other;
+- a change that is `"in_conflict"`, `"still_in_conflict"` or `"conflict_fixed"` is the place alone: a folder that became a conflict's place, or a conflict's place that became a folder, is that one change, with nothing listed below it. These three never carry hunks or line counts: in `changes --save` their `content` is `"text"` with `hunks` empty, and says nothing about what the versions are, since no version is read for them.
 
 ## 4. Warnings
 
