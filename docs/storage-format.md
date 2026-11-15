@@ -281,7 +281,7 @@ Server names and their line names follow the line-name rules, and no two server 
 | `state/lock-info` | Who holds the lock, for the waiting message | No |
 | `state/journal` | Present only while a command rewrites the folder | Yes |
 | `state/tidied` | The start of the undo window the last `opalro tidy` used, so a longer window later doesn't ask for what it freed (§11): a whole number of milliseconds since 1970-01-01 UTC in decimal digits, then an LF. Read with a cap of 32 bytes; a file that is anything else, or names a time later than now, counts as absent. Written whole through `tmp/` and a rename. Where a link is in its place, the write is refused like any write over a link, and `tidy` stops before it removes anything. A reader that ignores it only stops a `tidy` that could have gone on | No |
-| `cache/` | Rebuildable speed-ups, sealed with a key kept in the user's own settings so that a cache Opalro didn't write for this account is ignored ([decision 053](decisions/053-file-state-cache.md)): `files`, the file-state cache (a file's kind, size, modified time, change time, file ID and content ID, below), `change-ids`, each line's saves in order with their change IDs (below), and `other-lines`, what the check before an amend read of the other lines (below) | No |
+| `cache/` | Rebuildable speed-ups, sealed with a key kept in the user's own settings so that a cache Opalro didn't write for this account is ignored ([decision 053](decisions/053-file-state-cache.md)): `files`, the file-state cache (a file's kind, size, modified time, change time, file ID and content ID, below), `change-ids`, each line's saves in order with their change IDs (below), `other-lines`, what the check before an amend read of the other lines (below), and `last-made`, the save this computer made last on a line and the diary entry that recorded it (below) | No |
 | `tmp/` | Files being written | No |
 | `config.toml` | Personal settings | No |
 
@@ -395,6 +395,18 @@ bytes[32] seal
 ```
 
 A run is used for a line whose newest save is the run's first. It says which saves follow one another from there, and which save comes next; it doesn't say where the line ends. Like a list, it is a fact about saves, which never change, so one that starts at the right save can't be stale. The check before an amend ([decision 074](decisions/074-save-amend.md)) looks for the change ID in the run, then goes on from the save that comes next: if that save is on the amended line's own list, nothing is read; otherwise the saves it reads are added to the run. Only that check reads this file. Runs whose first save is no line's newest are dropped when the file is next written; when the runs would pass 64 MiB, what was read last isn't kept. It is written like `cache/files`: through `tmp/` and a rename, without the lock and without a flush, and a write that fails is just skipped.
+
+**`cache/last-made`** (not normative) names the save this computer made last on a line and the diary entry that recorded it, so that the check before an amend of that save needs to ask only about the lines, tags and server lines that are new or have moved since that entry ([decision 185](decisions/185-save-amend-and-a-save-something-else-holds.md)). Sealed as above; exactly 105 bytes with the seal, and a file of any other size is ignored.
+
+```text
+bytes[8] "OPALMADE"
+u8       version = 1 (a note of another version is ignored)
+id       the save
+id       the diary entry that recorded it
+bytes[32] seal
+```
+
+The check before an amend uses it only when the save being amended is the save it names, and then only with the diary entry it names: that entry must be readable and have the amended line at that save, or the note is not used and every other line, tag and server line is asked about. It is a hint, never a truth: a wrong one under a good seal can make that check miss a line (the amend goes ahead, that line keeps the old save, and `opalro undo` takes the amend back), and it can change no stored save. It is written whole each time, like `cache/files`: through `tmp/` and a rename, without the lock and without a flush, and a write that fails is just skipped.
 
 ## 11. Pack files
 
@@ -757,6 +769,8 @@ Vectors are added milestone by milestone, for the records each milestone builds;
   - `conflict.json`: conflict records (§8). Six that a reader takes, each with its bytes and ID: `markers` (three file terms, the own version a file, marker length 7); `yours` (a file, an absent term, an executable file; no own version); `kinds` (a folder against a file, a symlink with its size, a project link); `half-fixed` (the own version an executable file, marker length 9); `removed-own` (an own version that is absent, marker length 0); `five-terms` (five terms, which Opalro 0.2 never writes but reads). And nineteen that every reader must refuse, each breaking only the rule it names and given with the error it gets: version 2; term counts 2, 4, 1 and 257; kinds 0, 6 and 7; a folder of size 1; a project link of size 1; marker length 6; marker length 7 on an absent own version, on a folder and on a symlink; a present flag of 2; an own-version flag of 2; a trailing byte; bytes that end in the middle of an ID; a term count written in a longer form than needed.
   - `crates/opal-vcs-core/tests/vectors.rs` checks each valid record's bytes both ways and its ID, and that each invalid one is refused with its error.
   - `format.json` gains a second vector, `chunks-and-conflicts` (§10, [decision 178](decisions/178-the-conflicts-feature.md)): the `format` that `opalro start` and `opalro import` write from v0.2, listing `feature chunks` then `feature conflicts`, which the writer must write byte for byte. The first vector, `start`, stays as one a reader must accept: the `format` of a project v0.1 made. `vectors.rs` checks what `start` writes against the second, and that a project whose `format` holds the first still opens, without conflicts.
+- **Milestone 10** (written from §10's text before the code, [decision 185](decisions/185-save-amend-and-a-save-something-else-holds.md)):
+  - `last_made.json`: a sealed `cache/last-made` (§10) naming save 11…11 and diary entry 22…22; its key, its body and the sealed bytes.
 
 ## 14. Open points
 

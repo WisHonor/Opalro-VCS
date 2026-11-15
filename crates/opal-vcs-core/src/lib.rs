@@ -23,6 +23,7 @@ pub(crate) mod ingest;
 pub mod journal;
 pub(crate) mod kept;
 pub mod keyed;
+pub mod lastmade;
 pub mod lines;
 pub mod link;
 pub mod listing;

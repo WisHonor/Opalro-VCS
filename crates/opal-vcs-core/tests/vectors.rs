@@ -855,6 +855,60 @@ fn other_lines_match_their_vector() {
     assert_eq!(open_sealed(&[0; 32], &sealed), None);
 }
 
+/// Save 11…11, made last, and diary entry 22…22, which recorded it, as storage-format.md §10
+/// lays them out.
+fn last_made_body() -> String {
+    format!(
+        "{}01{}{}",
+        hex(b"OPALMADE"),
+        "11".repeat(32),
+        "22".repeat(32)
+    )
+}
+
+#[test]
+#[ignore = "prints the vector; run by hand to regenerate tests/vectors/last_made.json"]
+fn print_last_made_vector() {
+    let key = [0x42; 32];
+    let body = last_made_body();
+    println!(
+        "[\n  {{\"name\": \"save-and-entry\", \"key\": \"{}\", \"body\": \"{body}\", \"sealed\": \"{}\"}}\n]",
+        hex(&key),
+        hex(&opal_core::keyed::seal(&key, &unhex(&body)))
+    );
+}
+
+#[test]
+fn last_made_matches_its_vector() {
+    use opal_core::keyed::{open_sealed, seal};
+    use opal_core::lastmade::LastMade;
+    let path = format!(
+        "{}/tests/vectors/last_made.json",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let vectors: Vec<SealedVector> =
+        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    assert_eq!(vectors.len(), 1);
+    let v = &vectors[0];
+    assert_eq!(v.body, last_made_body());
+    let key: [u8; 32] = unhex(&v.key).try_into().unwrap();
+    assert_eq!(key, [0x42; 32]);
+    let (body, sealed) = (unhex(&v.body), unhex(&v.sealed));
+    assert_eq!((body.len(), sealed.len()), (73, 105));
+    let made = LastMade::decode(&body).unwrap();
+    assert_eq!(
+        made,
+        LastMade {
+            save: Id([0x11; 32]),
+            entry: Id([0x22; 32])
+        }
+    );
+    assert_eq!(made.encode(), body);
+    assert_eq!(seal(&key, &body), sealed, "{}", v.name);
+    assert_eq!(open_sealed(&key, &sealed), Some(&body[..]));
+    assert_eq!(open_sealed(&[0; 32], &sealed), None);
+}
+
 /// `a.txt`, 3 bytes, modified at 1,700,000,000.123456789 s, changed at 1,700,000,001.5 s, file 9
 /// on drive 0x0102030405060708, racy, with content 11…11; and `b`, an executable of 300 bytes,
 /// modified at -1.5 s (whole seconds round down, to -2), changed at -0.999999999 s, file 2^64 + 5
