@@ -985,9 +985,11 @@ fn kept_sides(env: &Env) -> Vec<(Files, BTreeMap<String, bool>)> {
 
 /// Whether everything either branch made is in one of Opalro's `results` (the files as the
 /// combine left them, or each side of its conflicts taken everywhere): every line a branch added
-/// to a file, as many times as it added it, in one file there; a change of the executable mark,
-/// on a file there holding that file's lines; and a file a branch added whole, whole. A version
-/// that only took lines out has nothing that can be lost.
+/// to a file, as many times as it added it, in one file there; a file a branch added whole,
+/// whole with its mark; and a change of the executable mark, on the file this one became: the
+/// file at its path, unless the other branch holds a file of another origin there, or a file
+/// holding what it added and a line of its own. A version that only took lines out has nothing
+/// that can be lost.
 fn nothing_lost(
     made: &Generated,
     results: &[(Files, BTreeMap<String, bool>)],
@@ -1046,8 +1048,11 @@ fn nothing_lost(
                     .unwrap_or_default();
                 return lost(&format!("the line {missing:?} it added"));
             }
-            // The mark is that of the file where it is, or, moved, of the file holding its lines.
-            let marked_here = at.iter().any(|(p, x)| *p == path && *x == f.exec);
+            // The mark of the file this one became: at its path, unless the other branch put a
+            // file of another origin there; or, moved, on the file holding its lines.
+            let other = made.ends[1 - branch].get(path);
+            let still_this = other.is_none_or(|o| o.origin == f.origin);
+            let marked_here = still_this && at.iter().any(|(p, x)| *p == path && *x == f.exec);
             let moved = |lines: &BTreeMap<String, usize>| {
                 holds_added(lines) && f.lines.iter().any(|l| lines.contains_key(l))
             };
@@ -1339,5 +1344,94 @@ fn nothing_lost_reads_a_mark_from_the_file_where_it_is() {
             "branch 0's a.txt: the executable mark it changed is in none of Opalro's results"
                 .into()
         )
+    );
+}
+
+/// A branch that only turned the mark on, where the other moved the file: the mark is found on
+/// the file where it went.
+#[test]
+fn nothing_lost_reads_a_mark_from_the_file_where_it_went() {
+    let start: &[Spec] = &[("a.txt", &["one"], false, Some("a.txt"))];
+    let marked: &[Spec] = &[("a.txt", &["one"], true, Some("a.txt"))];
+    let moved: &[Spec] = &[("b.txt", &["one"], false, Some("a.txt"))];
+    let made = three_trees([start, marked, moved]);
+    let kept = [result(&[("b.txt", "one\n", true)])];
+    assert_eq!(nothing_lost(&made, &kept), Ok(()));
+}
+
+/// The other branch moved the file away and put another file, marked, at its old path: that file
+/// proves nothing of the mark, which the moved file lost.
+#[test]
+fn nothing_lost_takes_no_mark_from_a_file_of_another_origin_at_the_path() {
+    let start: &[Spec] = &[("a.txt", &["one"], false, Some("a.txt"))];
+    let marked: &[Spec] = &[("a.txt", &["one"], true, Some("a.txt"))];
+    let moved: &[Spec] = &[
+        ("a.txt", &["other"], true, None),
+        ("b.txt", &["one"], false, Some("a.txt")),
+    ];
+    let made = three_trees([start, marked, moved]);
+    let lost = nothing_lost(
+        &made,
+        &[result(&[
+            ("a.txt", "other\n", true),
+            ("b.txt", "one\n", false),
+        ])],
+    );
+    assert_eq!(
+        lost,
+        Err(
+            "branch 0's a.txt: the executable mark it changed is in none of Opalro's results"
+                .into()
+        )
+    );
+}
+
+#[test]
+fn nothing_lost_names_a_file_a_branch_added_that_is_there_with_another_mark() {
+    let start: &[Spec] = &[("a.txt", &["one"], false, Some("a.txt"))];
+    let added: &[Spec] = &[
+        ("a.txt", &["one"], false, Some("a.txt")),
+        ("b.txt", &["bee"], true, None),
+    ];
+    let made = three_trees([start, start, added]);
+    let lost = nothing_lost(
+        &made,
+        &[result(&[
+            ("a.txt", "one\n", false),
+            ("b.txt", "bee\n", false),
+        ])],
+    );
+    assert_eq!(
+        lost,
+        Err("branch 1's b.txt: the file it added is in none of Opalro's results".into())
+    );
+}
+
+#[test]
+fn nothing_lost_counts_a_line_a_branch_added_twice() {
+    let start: &[Spec] = &[("a.txt", &["one"], false, Some("a.txt"))];
+    let twice: &[Spec] = &[("a.txt", &["one", "x", "x"], false, Some("a.txt"))];
+    let made = three_trees([start, twice, start]);
+    let lost = nothing_lost(&made, &[result(&[("a.txt", "one\nx\n", false)])]);
+    assert_eq!(
+        lost,
+        Err(r#"branch 0's a.txt: the line "x" it added is in none of Opalro's results"#.into())
+    );
+}
+
+/// Each line a branch added is somewhere, but not all in one file: lost, naming the first line,
+/// since no single line is missing.
+#[test]
+fn nothing_lost_wants_the_lines_a_branch_added_in_one_file() {
+    let start: &[Spec] = &[("a.txt", &["one"], false, Some("a.txt"))];
+    let two: &[Spec] = &[("a.txt", &["one", "p", "q"], false, Some("a.txt"))];
+    let made = three_trees([start, two, start]);
+    let split = [result(&[
+        ("a.txt", "one\np\n", false),
+        ("b.txt", "q\n", false),
+    ])];
+    assert_eq!(
+        nothing_lost(&made, &split),
+        Err(r#"branch 0's a.txt: the line "p" it added is in none of Opalro's results"#.into())
     );
 }
