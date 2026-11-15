@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use super::*;
 use crate::chunks::{Chunk, ChunkList, set_test_cut_sizes};
+use crate::conflict::{Own, Record, Term};
 use crate::diary::{Action, DiaryEntry, FolderChange, Position, ServerLines, State, Tag, TagList};
 use crate::history::tip_of;
 use crate::id::{ChangeId, hash_content};
@@ -1897,4 +1898,192 @@ fn tidy_is_unchanged_by_saves_that_cannot_be_written_out() {
             assert!(left.contains(id), "{id}");
         }
     }
+}
+
+fn term(kind: EntryKind, id: Id, size: u64) -> Option<Term> {
+    Some(Term { kind, id, size })
+}
+
+/// Commits a save whose top folder holds, as its only entry, the conflict `build` stores the
+/// versions of; gives the record's ID.
+fn plant_conflict(repo: &mut Repository, build: impl FnOnce(&mut PackSet) -> Record) -> Id {
+    let mut planted = None;
+    plant_root(repo, |packs| {
+        let record = build(packs);
+        let id = packs
+            .add_record(ObjectKind::Conflict, &record.encode())
+            .unwrap();
+        planted = Some(id);
+        many(packs, 1, EntryKind::Conflict, id, 0)
+    });
+    planted.unwrap()
+}
+
+#[test]
+fn tidy_keeps_every_version_a_kept_conflict_names() {
+    let (_dir, mut repo) = project(50);
+    let big = noise(4, 3_000);
+    let pieces = [&big[..1_000], &big[1_000..]];
+    let mut kept: Vec<(Id, ObjectKind)> = Vec::new();
+    let unneeded = hash_content(b"nothing needs this");
+    let record = plant_conflict(&mut repo, |packs| {
+        let mine = packs.add_content(b"mine\n").unwrap();
+        let chunks: Vec<Chunk> = pieces
+            .iter()
+            .map(|piece| Chunk {
+                id: packs.add_content(piece).unwrap(),
+                size: piece.len() as u64,
+            })
+            .collect();
+        let list = ChunkList {
+            file: hash_content(&big),
+            size: 3_000,
+            chunks: chunks.clone(),
+        };
+        packs.add_chunk_list(&list).unwrap();
+        let inside = packs.add_content(b"theirs, inside\n").unwrap();
+        let theirs = many(packs, 2, EntryKind::File, inside, 15);
+        let link = add_link(packs, &[0xab; 20]);
+        let half = packs.add_content(b"half fixed\n").unwrap();
+        packs.add_content(b"nothing needs this").unwrap();
+        kept.extend([
+            (mine, ObjectKind::Content),
+            (list.file, ObjectKind::Content),
+            (theirs, ObjectKind::FolderListing),
+            (inside, ObjectKind::Content),
+            (link, ObjectKind::ProjectLink),
+            (half, ObjectKind::Content),
+        ]);
+        kept.extend(chunks.iter().map(|c| (c.id, ObjectKind::Content)));
+        Record {
+            terms: vec![
+                term(EntryKind::File, mine, 5),
+                term(EntryKind::File, list.file, 3_000),
+                term(EntryKind::Folder, theirs, 0),
+                term(EntryKind::ProjectLink, link, 0),
+                None,
+            ],
+            own: Some(Own {
+                version: term(EntryKind::File, half, 11),
+                marker: 0,
+            }),
+        }
+    });
+    age_packs(&repo, 48);
+    tidied(&mut repo);
+    assert!(reads(&repo, &record, ObjectKind::Conflict));
+    for (id, kind) in kept {
+        assert!(reads(&repo, &id, kind), "{kind:?} {id}");
+    }
+    assert!(!indexed(&repo).contains(&unneeded));
+}
+
+#[test]
+fn tidy_frees_a_record_and_its_versions_once_no_save_holds_it() {
+    let (_dir, mut repo) = project(50);
+    let lines = repo.current().unwrap().1.state.lines;
+    let text = b"only the conflict names this\n";
+    let record = plant_conflict(&mut repo, |packs| {
+        let mine = packs.add_content(text).unwrap();
+        Record {
+            terms: vec![term(EntryKind::File, mine, text.len() as u64), None, None],
+            own: None,
+        }
+    });
+    // Forty days ago the line went back to the save before it.
+    commit(&mut repo, |e| {
+        e.who = days_ago(40);
+        e.state.lines = lines;
+    });
+    age_packs(&repo, 48);
+    tidied(&mut repo);
+    assert!(!reads(&repo, &record, ObjectKind::Conflict));
+    assert!(!reads(&repo, &hash_content(text), ObjectKind::Content));
+    assert!(reads(&repo, &tip(&repo), ObjectKind::Save));
+}
+
+#[test]
+fn a_record_that_cant_be_read_stops_tidy_as_damage_naming_it() {
+    let (_dir, mut repo) = project(50);
+    let mut planted = None;
+    plant_root(&mut repo, |packs| {
+        let id = packs
+            .add_record(ObjectKind::Conflict, b"not a conflict record")
+            .unwrap();
+        planted = Some(id);
+        many(packs, 1, EntryKind::Conflict, id, 0)
+    });
+    let record = planted.unwrap();
+    age_packs(&repo, 48);
+    let before = pack_names(&repo);
+    let stopped = tidy(&mut repo, 30, now(), &mut |_| {}, &mut |_| {
+        panic!("an estimate was given")
+    });
+    match stopped {
+        Err(e @ RepoError::Damaged { .. }) => {
+            let said = e.to_string();
+            assert!(
+                said.contains(&format!("conflict record {record}")),
+                "{said}"
+            );
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(pack_names(&repo), before);
+}
+
+#[test]
+fn tidy_follows_a_planted_nested_record_whole() {
+    let (_dir, mut repo) = project(50);
+    let text = b"inside the inner conflict\n";
+    let mut inner = None;
+    let outer = plant_conflict(&mut repo, |packs| {
+        let file = packs.add_content(text).unwrap();
+        let record = Record {
+            terms: vec![term(EntryKind::File, file, text.len() as u64), None, None],
+            own: None,
+        };
+        let id = packs
+            .add_record(ObjectKind::Conflict, &record.encode())
+            .unwrap();
+        inner = Some(id);
+        let holds = many(packs, 1, EntryKind::Conflict, id, 0);
+        let folder = many(packs, 1, EntryKind::Folder, holds, 0);
+        Record {
+            terms: vec![term(EntryKind::Folder, folder, 0), None, None],
+            own: None,
+        }
+    });
+    age_packs(&repo, 48);
+    tidied(&mut repo);
+    assert!(reads(&repo, &outer, ObjectKind::Conflict));
+    assert!(reads(&repo, &inner.unwrap(), ObjectKind::Conflict));
+    assert!(reads(&repo, &hash_content(text), ObjectKind::Content));
+}
+
+#[test]
+fn a_folder_term_3000_deep_is_walked_on_a_small_stack() {
+    let (_dir, mut repo) = project(50);
+    let text = b"three thousand folders down\n";
+    plant_conflict(&mut repo, |packs| {
+        let file = packs.add_content(text).unwrap();
+        let mut at = many(packs, 1, EntryKind::File, file, text.len() as u64);
+        for _ in 0..3_000 {
+            at = many(packs, 1, EntryKind::Folder, at, 0);
+        }
+        Record {
+            terms: vec![None, None, term(EntryKind::Folder, at, 0)],
+            own: None,
+        }
+    });
+    age_packs(&repo, 48);
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .stack_size(256 << 10)
+            .spawn_scoped(scope, || tidied(&mut repo))
+            .unwrap()
+            .join()
+            .unwrap()
+    });
+    assert!(reads(&repo, &hash_content(text), ObjectKind::Content));
 }

@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use opal_platform::dir::{Dir, EntryMeta};
 
+use crate::conflict::{Record, Term, stands_as};
 use crate::diary::{Action, DiaryEntry, Position, ServerLines, State, TagList};
 use crate::encoding::DecodeError;
 use crate::fsio::{self, fault_point};
@@ -69,7 +70,7 @@ struct Holds {
 /// before `now_ms` are left as they are. `on_estimate` is told about how much that frees before
 /// anything is removed. It reads only records and chunk lists to mark what to keep, never a file's
 /// contents: one of those it can't read stops it before then, and so does a pack it can't open,
-/// read or check, or a conflict record, which it can't follow.
+/// read or check, or, in a project that doesn't keep conflicts, a conflict record.
 pub fn tidy(
     repo: &mut Repository,
     window_days: u32,
@@ -367,14 +368,15 @@ struct Survey {
 
 /// Reads the index of each of `packs`, in `folder` at `packs_dir`, young ones too, and checks it
 /// against its checksum. A pack that can't be opened, read or checked stops `tidy`, since it could
-/// hold the only chunk list naming chunks in the others; so does a conflict record, which this
-/// version doesn't follow. For `verify` (`lenient`), which checks each pack on its own, they are
-/// passed over, and every ID read is kept in `all`.
+/// hold the only chunk list naming chunks in the others; so does a conflict record, unless the
+/// project keeps conflicts (`conflicts`). For `verify` (`lenient`), which checks each pack on its
+/// own, they are passed over, and every ID read is kept in `all`.
 fn survey(
     folder: &Dir,
     packs_dir: &Path,
     packs: &[Listed],
     lenient: bool,
+    conflicts: bool,
 ) -> Result<Survey, RepoError> {
     let mut survey = Survey::default();
     for (at, listed) in packs.iter().enumerate() {
@@ -404,7 +406,7 @@ fn survey(
                         survey.reads.insert((at, line.offset), line);
                     }
                 }
-                ObjectKind::Conflict if !lenient => {
+                ObjectKind::Conflict if !lenient && !conflicts => {
                     return Err(RepoError::CantTidy {
                         path: path.clone(),
                         why: None,
@@ -424,16 +426,19 @@ fn survey(
 /// file reached, or one in a young pack, names. `packs` are the store's packs; the undo window
 /// starts at `since`.
 fn kept(repo: &Repository, packs: &[Listed], since: i64) -> Result<HashSet<Id>, RepoError> {
-    let survey = survey(repo.packs_folder(), repo.packs_dir(), packs, false)?;
+    let src = Source::of(repo);
+    let survey = survey(src.folder, src.packs_dir, packs, false, src.conflicts)?;
     let (head, _) = repo.current()?;
-    let (kept, _) = mark(&Source::of(repo), packs, survey, head, since, None)?;
+    let (kept, _) = mark(&src, packs, survey, head, since, None)?;
     Ok(kept)
 }
 
-/// Where marking reads: a store, whether its saves may be signed, and the packs' folder.
+/// Where marking reads: a store, whether its saves may be signed, whether the project keeps
+/// conflicts, and the packs' folder.
 pub(crate) struct Source<'a> {
     pub(crate) store: &'a Store,
     pub(crate) signed: bool,
+    pub(crate) conflicts: bool,
     pub(crate) folder: &'a Dir,
     pub(crate) packs_dir: &'a Path,
 }
@@ -443,6 +448,7 @@ impl<'a> Source<'a> {
         Source {
             store: repo.store(),
             signed: repo.signatures_allowed(),
+            conflicts: repo.keeps_conflicts(),
             folder: repo.packs_folder(),
             packs_dir: repo.packs_dir(),
         }
@@ -478,6 +484,8 @@ pub(crate) struct Noted {
     pub(crate) sizes_found: u64,
     /// The IDs noted as missing or held as another kind, each noted once.
     pub(crate) absent: HashSet<Id>,
+    /// What each conflict record read stands as.
+    pub(crate) stands: HashMap<Id, Option<Term>>,
 }
 
 impl Noted {
@@ -488,37 +496,69 @@ impl Noted {
             entries: listing.entries().len() as u64,
             ..Shape::default()
         };
-        // One link to each folder listing named, however many entries name it.
+        // One link to each folder listing or record named, however many entries name it.
         let mut folders: HashMap<Id, (u64, usize)> = HashMap::new();
+        let mut conflicts: HashMap<Id, (u64, usize)> = HashMap::new();
         for entry in listing.entries() {
-            if entry.kind == EntryKind::Folder {
-                let (times, longest) = folders.entry(entry.id).or_default();
-                *times = times.saturating_add(1);
-                *longest = (*longest).max(entry.name.len());
-                continue;
-            }
-            shape.longest = shape.longest.max(entry.name.len());
-            if !matches!(
-                entry.kind,
-                EntryKind::File | EntryKind::Executable | EntryKind::Symlink
-            ) {
-                continue;
-            }
-            // One no index names at all is told as missing from the set of IDs kept.
-            let Some(held) = self.known.get(&entry.id) else {
-                continue;
+            let linked = match entry.kind {
+                EntryKind::Folder => &mut folders,
+                // Its own path, whatever it stands as.
+                EntryKind::Conflict => {
+                    shape.longest = shape.longest.max(entry.name.len());
+                    &mut conflicts
+                }
+                _ => {
+                    shape.longest = shape.longest.max(entry.name.len());
+                    self.file_named(id, &entry.name, entry.kind, entry.id, entry.size);
+                    continue;
+                }
             };
-            match held.file_size() {
-                Some(_) if held.has_size(entry.size) => {}
-                Some(stored) => self.wrong_size(id, &entry.name, entry.size, stored),
-                None => self.absent(entry.id, Unread::OtherKind),
+            let (times, longest) = linked.entry(entry.id).or_default();
+            *times = times.saturating_add(1);
+            *longest = (*longest).max(entry.name.len());
+        }
+        let links = |named: HashMap<Id, (u64, usize)>| {
+            let links = named.into_iter();
+            links
+                .map(|(to, (times, longest))| (to, times, longest))
+                .collect()
+        };
+        shape.folders = links(folders);
+        shape.conflicts = links(conflicts);
+        self.shapes.insert(id, shape);
+    }
+
+    /// Notes what the conflict record `id` stands as, and each version it names that is a file
+    /// of another size than the one stored, or stored only as another kind of object.
+    fn record_read(&mut self, id: Id, record: &Record) {
+        self.stands.insert(id, stands_as(record));
+        let own = record.own.and_then(|own| own.version);
+        let terms = record.terms.iter().enumerate();
+        let named = terms.map(|(n, term)| (format!("version {}", n + 1), *term));
+        for (name, term) in named.chain([("its own version".to_owned(), own)]) {
+            if let Some(t) = term {
+                self.file_named(id, &name, t.kind, t.id, t.size);
             }
         }
-        shape.folders = folders
-            .into_iter()
-            .map(|(folder, (times, longest))| (folder, times, longest))
-            .collect();
-        self.shapes.insert(id, shape);
+    }
+
+    /// Checks a file that `at` names `name`, as `kind`, `id` and `size`, against what is stored.
+    fn file_named(&mut self, at: Id, name: &str, kind: EntryKind, id: Id, size: u64) {
+        if !matches!(
+            kind,
+            EntryKind::File | EntryKind::Executable | EntryKind::Symlink
+        ) {
+            return;
+        }
+        // One no index names at all is told as missing from the set of IDs kept.
+        let Some(held) = self.known.get(&id) else {
+            return;
+        };
+        match held.file_size() {
+            Some(_) if held.has_size(size) => {}
+            Some(stored) => self.wrong_size(at, name, size, stored),
+            None => self.absent(id, Unread::OtherKind),
+        }
     }
 
     /// Counts a file the listing `id` gives as `listed` bytes, stored as `stored`; keeps its
@@ -596,6 +636,8 @@ pub(crate) struct Shape {
     /// Each folder listing it names, once: how many of its entries name it, and the longest
     /// of their names.
     pub(crate) folders: Vec<(Id, u64, usize)>,
+    /// Each conflict record it names, in the same way.
+    pub(crate) conflicts: Vec<(Id, u64, usize)>,
 }
 
 /// Why `verify`'s marking couldn't read a record.
@@ -628,7 +670,7 @@ pub(crate) fn needs(
     since: i64,
     noted: Noted,
 ) -> Result<(HashSet<Id>, Noted), RepoError> {
-    let survey = survey(src.folder, src.packs_dir, packs, true)?;
+    let survey = survey(src.folder, src.packs_dir, packs, true, src.conflicts)?;
     let (kept, noted) = mark(src, packs, survey, head, since, Some(noted))?;
     Ok((kept, noted.unwrap_or_default()))
 }
@@ -655,6 +697,7 @@ fn mark(
         followed: HashSet::new(),
         saves: Vec::new(),
         listings: Vec::new(),
+        records: Vec::new(),
         lists: &lists,
         reads,
         stored: &entries,
@@ -724,6 +767,8 @@ struct Marks<'a> {
     followed: HashSet<(u8, Id)>,
     saves: Vec<Id>,
     listings: Vec<Id>,
+    /// Conflict records to read.
+    records: Vec<Id>,
     /// Every chunk list's line, by its file's ID.
     lists: &'a HashMap<Id, Vec<(usize, IndexEntry)>>,
     /// The chunk lists to read once all else is marked.
@@ -836,13 +881,26 @@ impl Marks<'_> {
         kind: ObjectKind,
         what: &str,
     ) -> Result<Option<Vec<u8>>, RepoError> {
-        let e = match self.src.store.read_record(id, kind) {
-            Ok(bytes) => return Ok(Some(bytes)),
-            Err(e) => e,
-        };
+        match self.src.store.read_record(id, kind) {
+            Ok(bytes) => Ok(Some(bytes)),
+            Err(e) => self.unread(id, what, e).map(|()| None),
+        }
+    }
+
+    /// Reads and decodes the conflict record `id`, which must be kept; `None` when `verify` noted
+    /// it couldn't. One past its size limit is refused unread.
+    fn conflict(&mut self, id: &Id) -> Result<Option<Record>, RepoError> {
+        match self.src.store.conflict(id) {
+            Ok(record) => Ok(Some(record)),
+            Err(e) => self.unread(id, "conflict record", e).map(|()| None),
+        }
+    }
+
+    /// Why the record `id`, `what`, couldn't be read: noted for `verify`, else the stop.
+    fn unread(&mut self, id: &Id, what: &str, e: StoreError) -> Result<(), RepoError> {
         if let Some(noted) = &mut self.noted {
             noted.unread.push((*id, Unread::of(&e)));
-            return Ok(None);
+            return Ok(());
         }
         Err(match e {
             // Memory or I/O: the copy may be fine, so this isn't damage.
@@ -1005,37 +1063,62 @@ impl Marks<'_> {
                     noted.listing_read(id, &listing);
                 }
                 for entry in listing.entries() {
-                    match entry.kind {
-                        // Content is kept by its fingerprint, unread; a big file's chunk lists
-                        // are read once all else is marked.
-                        EntryKind::File | EntryKind::Executable | EntryKind::Symlink => {
-                            self.kept.insert(entry.id);
-                            for &(at, line) in self.lists.get(&entry.id).into_iter().flatten() {
-                                self.reads.insert((at, line.offset), line);
-                            }
-                        }
-                        EntryKind::Folder => self.listing(entry.id),
-                        EntryKind::ProjectLink => {
-                            if self.first(ObjectKind::ProjectLink, entry.id) {
-                                self.read(&entry.id, ObjectKind::ProjectLink, "project link")?;
-                            }
-                        }
-                        EntryKind::Conflict => {
-                            let said = format!(
-                                "folder listing {id} holds a conflict, which this version of \
-                                 Opalro can't follow"
-                            );
-                            let Some(noted) = &mut self.noted else {
-                                return Err(damaged(said));
-                            };
-                            noted.unread.push((id, Unread::Damaged(said)));
-                        }
+                    if entry.kind == EntryKind::Conflict && !self.src.conflicts {
+                        let said = format!(
+                            "folder listing {id} holds a conflict, which this version of \
+                             Opalro can't follow"
+                        );
+                        let Some(noted) = &mut self.noted else {
+                            return Err(damaged(said));
+                        };
+                        noted.unread.push((id, Unread::Damaged(said)));
+                        continue;
                     }
+                    self.named(entry.kind, entry.id)?;
+                }
+            } else if let Some(id) = self.records.pop() {
+                let Some(record) = self.conflict(&id)? else {
+                    continue;
+                };
+                if let Some(noted) = &mut self.noted {
+                    noted.record_read(id, &record);
+                }
+                // Every version, whatever its folders hold: nothing it names may be lost.
+                let own = record.own.and_then(|own| own.version);
+                for term in record.terms.iter().chain([&own]).flatten() {
+                    self.named(term.kind, term.id)?;
                 }
             } else {
                 return Ok(());
             }
         }
+    }
+
+    /// Marks what an entry of `kind` naming `id` needs, as a listing's entry or a conflict's
+    /// version.
+    fn named(&mut self, kind: EntryKind, id: Id) -> Result<(), RepoError> {
+        match kind {
+            // Content is kept by its fingerprint, unread; a big file's chunk lists are read once
+            // all else is marked.
+            EntryKind::File | EntryKind::Executable | EntryKind::Symlink => {
+                self.kept.insert(id);
+                for &(at, line) in self.lists.get(&id).into_iter().flatten() {
+                    self.reads.insert((at, line.offset), line);
+                }
+            }
+            EntryKind::Folder => self.listing(id),
+            EntryKind::ProjectLink => {
+                if self.first(ObjectKind::ProjectLink, id) {
+                    self.read(&id, ObjectKind::ProjectLink, "project link")?;
+                }
+            }
+            EntryKind::Conflict => {
+                if self.first(ObjectKind::Conflict, id) {
+                    self.records.push(id);
+                }
+            }
+        }
+        Ok(())
     }
 }
 

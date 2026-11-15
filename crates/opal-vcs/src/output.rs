@@ -1248,6 +1248,19 @@ pub fn verified(v: &Verified, project: &str) -> String {
             "saves are too big for any reader:",
         );
         unshown |= group(&mut text, s, &too_big, big);
+        // Each says which record it is about, so each is a line of its own.
+        let (nested, n) = rows(ProblemKind::NestedConflict);
+        let shown = nested.len().min(PROBLEMS_SHOWN);
+        for p in &nested[..shown] {
+            let _ = writeln!(text, "{}", s.detail(Some(&cross), &p.message));
+        }
+        let more = n.saturating_sub(shown as u64);
+        if more > 0 {
+            let cut = s.sym(Sym::Cut);
+            let rest = format!("{cut} and {} more", thousands(more));
+            let _ = writeln!(text, "{}", s.detail(None, &rest));
+            unshown = true;
+        }
         let entries = counted(v.entries, "entry", "entries");
         let diary = if v.diary_gap {
             s.detail(
@@ -1495,6 +1508,35 @@ mod tests {
         );
         assert_eq!(lines[3], format!("    x {why}"));
         assert_eq!(lines.len(), 4, "{shown}");
+    }
+
+    #[test]
+    fn a_conflict_inside_a_conflict_is_a_line_of_its_own() {
+        let record = Id([0xab; 32]);
+        let said = format!(
+            "Conflict record {} stands as a folder that holds another conflict, which Opalro \
+             never writes.",
+            record.short_hex()
+        );
+        let v = Verified {
+            problems_total: 1,
+            nested_conflict: 1,
+            problems: vec![Problem {
+                kind: ProblemKind::NestedConflict,
+                pack: None,
+                object: Some(record),
+                needed_by: None,
+                message: said.clone(),
+            }],
+            needs_checked: true,
+            ..Verified::default()
+        };
+        let shown = verified(&v, "Skyrunner");
+        assert!(shown.contains(&format!("\n    x {said}\n")), "{shown}");
+        assert!(shown.contains("point to objects that exist"), "{shown}");
+        let document = verified_json(&v);
+        assert_eq!(document["problems"][0]["kind"], "nested_conflict");
+        assert_eq!(document["problems"][0]["object"], record.to_hex());
     }
 
     #[test]
