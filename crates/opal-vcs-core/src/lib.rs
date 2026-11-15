@@ -33,6 +33,7 @@ pub mod otherlines;
 pub mod pack;
 pub mod presets;
 pub mod repo;
+pub mod resolve;
 pub mod rules;
 pub mod safe_fs;
 pub mod save;

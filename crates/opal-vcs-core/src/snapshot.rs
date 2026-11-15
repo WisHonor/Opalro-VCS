@@ -32,7 +32,9 @@ use crate::otherlines::OtherLines;
 use crate::pack::{ObjectKind, PackError, PackSet};
 use crate::repo::{RepoError, Repository};
 use crate::rules::Rules;
-use crate::save::{EXTRA_GIT_COMMIT, EXTRA_LINE, GIT_FIELDS, MAX_MOVE_NOTES, Person, Save};
+use crate::save::{
+    EXTRA_GIT_COMMIT, EXTRA_LINE, GIT_FIELDS, MAX_MOVE_NOTES, MoveNote, Person, Save,
+};
 use crate::scope::Scope;
 use crate::store::{Store, StoreError};
 use crate::text::{self, escape, thousands};
@@ -512,6 +514,183 @@ pub(crate) fn save_recording(
         }
         early_cache = Some(cache);
     }
+    let mut walked = read_and_build(
+        repo,
+        req,
+        &parent,
+        recording,
+        true,
+        line.is_some(),
+        confirm_large,
+    )?;
+    let root = walked.root;
+    let message = req.message.unwrap_or(&parent.message);
+    if root == parent.root && (!req.amend || message == parent.message) {
+        let Walked {
+            packs,
+            seen,
+            now,
+            mut warnings,
+            ..
+        } = walked;
+        // Anything stored here replaces a damaged copy the last save needs, so it is kept.
+        if !packs.is_empty() {
+            packs.finish()?;
+        }
+        keep_file_cache(repo, seen, now, &mut warnings);
+        return Ok(SaveOutcome::NothingChanged {
+            current: parent_id,
+            warnings,
+        });
+    }
+    // Asked only now, so that a save with nothing to save never asks for a name.
+    let Some(line) = &line else {
+        return Err(SaveError::NeedsLineName);
+    };
+    let (move_notes, counted) = walked.moves(repo);
+    let mut cache = early_cache.unwrap_or_else(|| ChangeIds::load(repo));
+    let (save_id, save, short_change_id) = compose(
+        repo,
+        line,
+        parent_id,
+        &parent,
+        root,
+        message,
+        req.who,
+        req.amend,
+        move_notes,
+        &mut walked.packs,
+        &mut cache,
+        &mut walked.warnings,
+    )?;
+    let Walked {
+        packs,
+        met_conflicts,
+        mut warnings,
+        seen,
+        now,
+        before,
+        ..
+    } = walked;
+    let mut state = entry.state.clone();
+    state.lines.insert(line.clone(), save_id);
+    state.position = Position::OnLine(line.clone());
+    let diary = DiaryEntry {
+        parent: Some(head),
+        action: Action::Command,
+        command: req.command.to_owned(),
+        who: req.who.clone(),
+        opal_version: env!("CARGO_PKG_VERSION").into(),
+        state,
+        folder_change: None,
+    };
+    repo.commit(&lock, packs, &diary)?;
+    if req.amend {
+        cache.replace(line, parent_id, save_id);
+    } else {
+        cache.add(line, parent_id, save_id, save.change_id);
+    }
+    cache.store(repo, &diary.state);
+    keep_file_cache(repo, seen, now, &mut warnings);
+    // The save is committed now; failing to count its files must not make it look failed.
+    let counted = counted
+        .unwrap_or_else(|| before.and_then(|before| count_changes(repo.store(), before, root)));
+    let changed_files = match counted {
+        Ok(count) => Some(count),
+        Err(why) => {
+            warnings.push(Warning::new(
+                warning::CHANGED_FILES_NOT_COUNTED,
+                format!(
+                    "The save was made, but Opalro couldn't count the files it changed. {}",
+                    RepoError::from(why)
+                ),
+            ));
+            None
+        }
+    };
+    Ok(SaveOutcome::Saved {
+        save_id,
+        save,
+        changed_files,
+        short_change_id,
+        warnings,
+        replaced: req.amend.then_some(parent_id),
+        conflicts: met_conflicts,
+    })
+}
+
+/// What a walk of the folder built, before it becomes a save.
+pub(crate) struct Walked {
+    pub root: Id,
+    pub packs: PackSet,
+    /// The places in conflict the walk met that are still in conflict in what it built.
+    pub met_conflicts: u64,
+    pub warnings: Vec<Warning>,
+    /// What the walk learned of the files, kept as the file-state cache once the save is made.
+    pub seen: FileCache,
+    pub now: Option<i128>,
+    /// The save before this one, which for an amend is the first parent it takes over: its moves
+    /// are noted against it, and its files counted from it.
+    before: Result<Option<Id>, StoreError>,
+    held: Option<Held>,
+}
+
+impl Walked {
+    /// The moves noted against the save before, and the files changed when they could be
+    /// counted on the way.
+    pub(crate) fn moves(
+        &mut self,
+        repo: &Repository,
+    ) -> (Vec<MoveNote>, Option<Result<usize, StoreError>>) {
+        // The files are counted in the same walk as the moves, while the new listings are at
+        // hand; without them, after the commit, from the store.
+        let (_, most_bytes, most_left) = note_limits();
+        let keeps_conflicts = repo.keeps_conflicts();
+        // A conflict's place is never a file that left or arrived.
+        let place = move |o: Option<&Entry>, n: Option<&Entry>| {
+            keeps_conflicts
+                && [o, n]
+                    .into_iter()
+                    .flatten()
+                    .any(|e| e.kind == EntryKind::Conflict)
+        };
+        let compared = match (&self.before, self.held.take()) {
+            (Ok(Some(from)), Some(held)) => Some(moves::count_and_moves(
+                repo.store(),
+                &held.listings,
+                *from,
+                self.root,
+                most_left,
+                &place,
+            )),
+            _ => None,
+        };
+        // Notes say only what is certain and never stop a save: one that can't be compared with
+        // the save before it notes nothing, and is told it couldn't count its files only if it
+        // couldn't.
+        let (mut move_notes, counted) = match compared {
+            Some(Ok((count, notes))) => (notes.ok().flatten().unwrap_or_default(), Some(Ok(count))),
+            Some(Err(why)) => (vec![], Some(Err(why))),
+            None => (vec![], None),
+        };
+        let most = usize::try_from(MAX_MOVE_NOTES).unwrap_or(usize::MAX);
+        moves::first_that_fit(&mut move_notes, most, most_bytes);
+        (move_notes, counted)
+    }
+}
+
+/// Walks the folder on top of `parent` as `save` does, with every check `save` makes, settling
+/// the conflicts it meets with `recording`. `check_named`: whether what `req.only` names must
+/// match something. `has_line`: whether there is a line to save on, asked before a large save is.
+pub(crate) fn read_and_build(
+    repo: &Repository,
+    req: &SaveRequest,
+    parent: &Save,
+    recording: &Recording,
+    check_named: bool,
+    has_line: bool,
+    confirm_large: &mut dyn FnMut(&LargeSave) -> bool,
+) -> Result<Walked, SaveError> {
     // Before the walk, as for `read_folder`; without it every file is read.
     let now = filecache::drive_now(repo).ok();
     let drive = drive::probe(repo.tmp_folder()).map_err(RepoError::from)?;
@@ -579,7 +758,9 @@ pub(crate) fn save_recording(
                 recording,
             }),
         )?;
-        only::check_matched(&scope, given, &narrowed, &mut handles)?;
+        if check_named {
+            only::check_matched(&scope, given, &narrowed, &mut handles)?;
+        }
         // Only the records the folders that came back still name.
         let named: HashSet<Id> = rebuilt
             .iter()
@@ -608,7 +789,7 @@ pub(crate) fn save_recording(
     if let Some(large) = large_save(repo.store(), &repo.rules().rules, drive, &folders, last)? {
         // New files mean something to save, so a missing line name is asked for now: the
         // question comes after it, and what is stored is stored once.
-        if line.is_none() {
+        if !has_line {
             return Err(SaveError::NeedsLineName);
         }
         if !confirm_large(&large) {
@@ -664,54 +845,37 @@ pub(crate) fn save_recording(
     if !built.taken_back.is_empty() {
         warnings.push(gitignored_files_saved(built.taken_back));
     }
-    let message = req.message.unwrap_or(&parent.message);
-    if root == parent.root && (!req.amend || message == parent.message) {
-        // Anything stored here replaces a damaged copy the last save needs, so it is kept.
-        if !packs.is_empty() {
-            packs.finish()?;
-        }
-        keep_file_cache(repo, seen, now, &mut warnings);
-        return Ok(SaveOutcome::NothingChanged {
-            current: parent_id,
-            warnings,
-        });
-    }
-    // Asked only now, so that a save with nothing to save never asks for a name.
-    let Some(line) = &line else {
-        return Err(SaveError::NeedsLineName);
-    };
-    // The files are counted in the same walk as the moves, while the new listings are at hand;
-    // without them, after the commit, from the store.
-    let (_, most_bytes, most_left) = note_limits();
-    // A conflict's place is never a file that left or arrived.
-    let place = move |o: Option<&Entry>, n: Option<&Entry>| {
-        keeps_conflicts
-            && [o, n]
-                .into_iter()
-                .flatten()
-                .any(|e| e.kind == EntryKind::Conflict)
-    };
-    let compared = match (&before, held) {
-        (Ok(Some(from)), Some(held)) => Some(moves::count_and_moves(
-            repo.store(),
-            &held.listings,
-            *from,
-            root,
-            most_left,
-            &place,
-        )),
-        _ => None,
-    };
-    // Notes say only what is certain and never stop a save: one that can't be compared with the
-    // save before it notes nothing, and is told it couldn't count its files only if it couldn't.
-    let (mut move_notes, counted) = match compared {
-        Some(Ok((count, notes))) => (notes.ok().flatten().unwrap_or_default(), Some(Ok(count))),
-        Some(Err(why)) => (vec![], Some(Err(why))),
-        None => (vec![], None),
-    };
-    let most = usize::try_from(MAX_MOVE_NOTES).unwrap_or(usize::MAX);
-    moves::first_that_fit(&mut move_notes, most, most_bytes);
-    let save = if req.amend {
+    Ok(Walked {
+        root,
+        packs,
+        met_conflicts: built.met_conflicts,
+        warnings,
+        seen,
+        now,
+        before,
+        held,
+    })
+}
+
+/// A save of `root` on `line`: in place of `parent_id`, its newest save, when `amend`, else on top
+/// of it. Its extra fields and change ID are worked out as `save` does; the save goes in `packs`.
+/// Gives its ID, the save and its short change ID, from the line's saves in `cache`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compose(
+    repo: &Repository,
+    line: &str,
+    parent_id: Id,
+    parent: &Save,
+    root: Id,
+    message: &str,
+    who: &Person,
+    amend: bool,
+    move_notes: Vec<MoveNote>,
+    packs: &mut PackSet,
+    cache: &mut ChangeIds,
+    warnings: &mut Vec<Warning>,
+) -> Result<(Id, Save, String), SaveError> {
+    let save = if amend {
         let mut extra = parent.extra.clone();
         for field in GIT_FIELDS {
             extra.remove(field);
@@ -720,7 +884,7 @@ pub(crate) fn save_recording(
             root,
             parents: parent.parents.clone(),
             author: parent.author.clone(),
-            saver: req.who.clone(),
+            saver: who.clone(),
             message: message.to_owned(),
             change_id: parent.change_id,
             move_notes,
@@ -731,8 +895,8 @@ pub(crate) fn save_recording(
         Save {
             root,
             parents: vec![parent_id],
-            author: req.who.clone(),
-            saver: req.who.clone(),
+            author: who.clone(),
+            saver: who.clone(),
             message: message.to_owned(),
             change_id: ChangeId::random()
                 .map_err(io::Error::other)
@@ -749,9 +913,8 @@ pub(crate) fn save_recording(
     // Worked out before the commit, so that nothing after it can fail the save. The line's
     // saves come from the cache, which then learns this one; an amend takes the place of the
     // save it amends.
-    let mut cache = early_cache.unwrap_or_else(|| ChangeIds::load(repo));
     let shortened = cache.chain(repo, Some(line), parent_id).map(|saves| {
-        let behind = if req.amend {
+        let behind = if amend {
             saves.get(1..).unwrap_or_default()
         } else {
             saves
@@ -768,51 +931,7 @@ pub(crate) fn save_recording(
         ));
         save.change_id.to_letters()
     });
-    let mut state = entry.state.clone();
-    state.lines.insert(line.clone(), save_id);
-    state.position = Position::OnLine(line.clone());
-    let diary = DiaryEntry {
-        parent: Some(head),
-        action: Action::Command,
-        command: req.command.to_owned(),
-        who: req.who.clone(),
-        opal_version: env!("CARGO_PKG_VERSION").into(),
-        state,
-        folder_change: None,
-    };
-    repo.commit(&lock, packs, &diary)?;
-    if req.amend {
-        cache.replace(line, parent_id, save_id);
-    } else {
-        cache.add(line, parent_id, save_id, save.change_id);
-    }
-    cache.store(repo, &diary.state);
-    keep_file_cache(repo, seen, now, &mut warnings);
-    // The save is committed now; failing to count its files must not make it look failed.
-    let counted = counted
-        .unwrap_or_else(|| before.and_then(|before| count_changes(repo.store(), before, root)));
-    let changed_files = match counted {
-        Ok(count) => Some(count),
-        Err(why) => {
-            warnings.push(Warning::new(
-                warning::CHANGED_FILES_NOT_COUNTED,
-                format!(
-                    "The save was made, but Opalro couldn't count the files it changed. {}",
-                    RepoError::from(why)
-                ),
-            ));
-            None
-        }
-    };
-    Ok(SaveOutcome::Saved {
-        save_id,
-        save,
-        changed_files,
-        short_change_id,
-        warnings,
-        replaced: req.amend.then_some(parent_id),
-        conflicts: built.met_conflicts,
-    })
+    Ok((save_id, save, short_change_id))
 }
 
 /// Who else shows `id`, the newest save of `line`, as `AmendShared` names them: a line that holds
@@ -1073,7 +1192,7 @@ fn save_goes_on(
 
 /// Writes `seen`, holding what this walk vouched for and learned of the files, as the file-state
 /// cache, if the drive's "now" was found before the walk; failing to is only a warning.
-fn keep_file_cache(
+pub(crate) fn keep_file_cache(
     repo: &Repository,
     seen: FileCache,
     now: Option<i128>,
