@@ -1189,7 +1189,7 @@ Every message, row, question, hint, line of help and `--json` name this plan int
 | JSON | `status --json`: `conflicts`, every place, uncapped as `changes` is (`path`, `standing`: `"markers"`, `"fixed"`, `"yours"`, `"changed"`, `"nothing"`, `"not_here"`; `places_left`; `terms`); `changes --json`: `in_conflict` | 5 |
 | `goto` detail | `The save you went to holds places in conflict: opalro status lists them.` (no number, ruling B; second-round ruling 4) | 6 |
 | JSON | `goto --json`: `holds_conflicts` (boolean) | 6 |
-| `save` detail | `N places it met are still in conflict: opalro status lists them.` (`1 place it met is still in conflict: …`; nothing when 0) | 7 |
+| `save` detail | a save of everything: `N places are still in conflict: opalro status lists them.` (`1 place is still in conflict: opalro status lists it.`); a save of some paths: `N of the places you saved are still in conflict: opalro status lists every place in conflict.` (`1 of the places you saved is still in conflict: …`); nothing when 0 | 7 |
 | JSON | `save --json`: `conflicts` (the places it met still in conflict) | 7 |
 | Marker label, yours and theirs | `<name> (<8 letters>)` | 8 |
 | Marker label, the middle | `where the lines parted (<8 letters>)`; `where the lines parted (several saves)`; `where the lines parted (<8 letters>), which held nothing here`; `where the lines parted, which held nothing here`; `where the lines parted, which Opalro can't tell here` | 8 |
