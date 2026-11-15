@@ -880,8 +880,8 @@ fn put_places(
             let plain = result
                 .entry(&p.path)?
                 .is_some_and(|e| e.kind != EntryKind::Conflict);
-            // A second place at one path holds the same lines' entries as the first (a plain
-            // result means they hold it alike), so only its start term is not kept.
+            // A second place at one path holds the same lines' entries there as the first, so
+            // only its start term is not kept.
             if plain && taken.insert(p.path.clone()) {
                 open.push(p);
             }
