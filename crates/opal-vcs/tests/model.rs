@@ -1,27 +1,31 @@
-//! Random edits, saves, amends, switches, discards, shelves, lines, tags, combines, undos and redos,
-//! applied both to a project and to a model of what its folder, saves and diary should hold
-//! (testing.md §3).
+//! Random edits, saves, amends, switches, discards, shelves, lines, tags, combines, conflicts and
+//! their fixes, tidies, undos and redos, applied both to a project and to a model of what its
+//! folder, saves and diary should hold (testing.md §3).
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::path::Path;
 use std::rc::Rc;
 use std::time::{Duration, SystemTime};
 
-use opal_core::combine::{self, CombineError, Combined, Named};
+use opal_core::combine::{self, CombineError, Combined, Held, Keep, Named, NotKept, Stands};
+use opal_core::conflict::Term;
 use opal_core::diary::{self, Action, FolderChange, Position, Tag, TagList};
 use opal_core::diff::ChangeKind;
 use opal_core::id::{Id, hash_record};
 use opal_core::lines::{self, LineError, NameError, Target};
 use opal_core::listing::EntryKind;
+use opal_core::names::Given;
 use opal_core::pack::ObjectKind;
 use opal_core::presets::{self, Found, Preset};
 use opal_core::repo::Repository;
+use opal_core::resolve::{self, ResolveError, ResolveOutcome, ResolveRequest};
 use opal_core::save::Person;
 use opal_core::setup::{apply_setup, plan_setup};
 use opal_core::shelf::{Shelved, shelf, unshelf};
 use opal_core::snapshot::{SaveError, SaveOutcome, SaveRequest, save_folder};
-use opal_core::status::status;
+use opal_core::status::{Standing, status};
 use opal_core::store::Store;
 use opal_core::switch::{SwitchError, discard, goto};
 use opal_core::tags::{self, Ask, TagError, Tagged};
@@ -29,6 +33,7 @@ use opal_core::undo::{
     Effect, StepInfo, StepRequest, UndoError, UndoOutcome, redo, undo, undo_list, undo_to,
 };
 use proptest::prelude::*;
+use proptest::test_runner::TestRunner;
 use serde_json::{Value, json};
 
 mod support;
@@ -164,27 +169,81 @@ enum Act {
         to: &'static str,
         remake: bool,
     },
-    /// Saves a text edit to `path` with any unsaved work, goes to an older save `pick` chooses in
-    /// the history of that one, and saves another edit to `path` there, which starts a line: work
-    /// a combine then finds on both sides, often in one file. With `back`, the first edit's save
-    /// is then combined into that line.
+    /// Saves the first of `changes` to a text the save holds (`path`, if it holds none), with any
+    /// unsaved work, goes to an older save `pick` chooses in the history of that one, and saves
+    /// the second there, which starts a line: work a combine then finds on both sides, often at
+    /// one place. With `back`, the first change's save is then combined into that line.
     Fork {
         pick: usize,
         path: &'static str,
         at: usize,
         edit: u8,
         back: bool,
+        changes: (Change, Change),
     },
-    /// Combines the line or save `pick` chooses into the line the project is on.
+    /// Combines the line or save `pick` chooses into the line the project is on, keeping the
+    /// conflicts it meets unless asked for a clean line.
     Combine {
         pick: usize,
         message: bool,
+        clean: bool,
     },
     /// Combines the line `pick` chooses into this one and this one's old save into that, then
     /// that line into this one: two lines that took each other's work, with two starting points.
+    /// With `fix`, each line keeps its own side of what the first two combines left in conflict,
+    /// so the two disagree about what they parted from.
     CrissCross {
         pick: usize,
+        fix: bool,
     },
+    /// `resolve`, at a place in conflict `pick` chooses, or at every one.
+    Resolve {
+        pick: usize,
+        how: ResolveHow,
+    },
+    /// Writes a file shown with markers without them, or with one marked place left.
+    FixFile {
+        pick: usize,
+    },
+    /// Changes what stands at a place in conflict shown as a version.
+    ChangeInPlace {
+        pick: usize,
+    },
+    /// `tidy`, as if two days later, keeping every step.
+    Tidy,
+}
+
+/// What one line of a `Fork` does to its file, each kind of clash a combine meets drawn on
+/// purpose; the numbers pick among the places that were empty when the fork began.
+#[derive(Debug, Clone, Copy)]
+enum Change {
+    /// A line put in, taken out or replaced where `at` and `edit` say.
+    Edit,
+    /// A new last line.
+    EditEnd,
+    Remove,
+    /// Moved to an empty place, and with `true` a new text made where it was.
+    Move(usize, bool),
+    /// Bytes that aren't text.
+    Binary,
+    /// A new text at an empty place, the file left alone.
+    Add(usize),
+    /// Removed and saved, then another file moved onto its place.
+    Arrive,
+}
+
+/// Makes the two changes of a fork's lines from two picks and a choice.
+type Pair = fn(usize, usize, bool) -> (Change, Change);
+
+/// How `resolve` is asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResolveHow {
+    /// Every place the folder shows fixed.
+    All,
+    /// A place, or the whole project, as the folder holds it.
+    Paths,
+    KeepMine,
+    KeepTheirs,
 }
 
 /// What a goto does with unsaved work first.
@@ -212,6 +271,71 @@ fn act() -> impl Strategy<Value = Act> {
         1 => prop::sample::select(&LABELS[..]).prop_map(Some)
     ];
     let name = || prop::sample::select(&NAMES[..]);
+    // Pairs for the two lines of a fork, each kind of clash among them: a change on both, a
+    // change against a removal, two additions, moves apart, against a removal and onto an
+    // addition, a file that arrived where the other line changed the one there, and moves
+    // followed into a change.
+    let change = || {
+        let pairs: [Pair; 29] = [
+            |_, _, _| (Change::Edit, Change::Edit),
+            |_, _, _| (Change::Edit, Change::EditEnd),
+            |_, _, _| (Change::EditEnd, Change::Edit),
+            |_, _, _| (Change::EditEnd, Change::EditEnd),
+            |_, _, _| (Change::Binary, Change::Edit),
+            |_, _, _| (Change::Edit, Change::Binary),
+            |_, _, _| (Change::Binary, Change::Binary),
+            |_, _, _| (Change::Binary, Change::EditEnd),
+            |_, _, _| (Change::EditEnd, Change::Binary),
+            |_, _, _| (Change::Edit, Change::Remove),
+            |_, _, _| (Change::Remove, Change::Edit),
+            |a, b, _| (Change::Add(a), Change::Add(b)),
+            |a, _, _| {
+                (
+                    Change::Move(a, false),
+                    Change::Move(a.wrapping_add(1), false),
+                )
+            },
+            |a, _, _| {
+                (
+                    Change::Move(a.wrapping_add(1), false),
+                    Change::Move(a, false),
+                )
+            },
+            |a, _, _| {
+                (
+                    Change::Move(a, false),
+                    Change::Move(a.wrapping_add(1), false),
+                )
+            },
+            |a, _, _| (Change::Move(a, false), Change::Remove),
+            |a, _, _| (Change::Move(a, false), Change::Remove),
+            |a, _, r| (Change::Move(a, r), Change::Remove),
+            |_, b, _| (Change::Remove, Change::Move(b, false)),
+            |_, b, _| (Change::Remove, Change::Move(b, false)),
+            |_, b, r| (Change::Remove, Change::Move(b, r)),
+            |a, _, _| (Change::Move(a, false), Change::Add(a)),
+            |a, _, _| (Change::Move(a, false), Change::Add(a)),
+            |a, _, _| (Change::Add(a), Change::Move(a, false)),
+            |a, _, _| (Change::Add(a), Change::Move(a, false)),
+            |_, _, _| (Change::Arrive, Change::Edit),
+            |_, _, _| (Change::Edit, Change::Arrive),
+            |a, _, r| (Change::Move(a, r), Change::Edit),
+            |_, b, r| (Change::Edit, Change::Move(b, r)),
+        ];
+        (
+            prop::sample::select(pairs.to_vec()),
+            any::<usize>(),
+            any::<usize>(),
+            any::<bool>(),
+        )
+            .prop_map(|(pair, a, b, r)| pair(a, b, r))
+    };
+    let how = prop_oneof![
+        2 => Just(ResolveHow::All),
+        2 => Just(ResolveHow::Paths),
+        1 => Just(ResolveHow::KeepMine),
+        1 => Just(ResolveHow::KeepTheirs)
+    ];
     prop_oneof![
         5 => (file(), any::<u8>(), prop::sample::select(&LENGTHS[..]), when())
             .prop_map(|(p, b, n, w)| Act::Write(p, b, n, w)),
@@ -251,11 +375,27 @@ fn act() -> impl Strategy<Value = Act> {
             .prop_map(|(path, at, edit)| Act::Text { path, at, edit }),
         2 => (any::<usize>(), file(), any::<bool>())
             .prop_map(|(pick, to, remake)| Act::Moved { pick, to, remake }),
-        4 => (any::<usize>(), file(), any::<usize>(), any::<u8>(), any::<bool>())
-            .prop_map(|(pick, path, at, edit, back)| Act::Fork { pick, path, at, edit, back }),
-        2 => (any::<usize>(), any::<bool>())
-            .prop_map(|(pick, message)| Act::Combine { pick, message }),
-        2 => any::<usize>().prop_map(|pick| Act::CrissCross { pick }),
+        10 => (
+            (any::<usize>(), file(), any::<usize>(), any::<u8>()),
+            prop::bool::weighted(0.75),
+            change(),
+        )
+            .prop_map(|((pick, path, at, edit), back, changes)| Act::Fork {
+                pick,
+                path,
+                at,
+                edit,
+                back,
+                changes
+            }),
+        3 => (any::<usize>(), any::<bool>(), prop::bool::weighted(0.25))
+            .prop_map(|(pick, message, clean)| Act::Combine { pick, message, clean }),
+        3 => (any::<usize>(), prop::bool::weighted(0.75))
+            .prop_map(|(pick, fix)| Act::CrissCross { pick, fix }),
+        4 => (any::<usize>(), how).prop_map(|(pick, how)| Act::Resolve { pick, how }),
+        4 => any::<usize>().prop_map(|pick| Act::FixFile { pick }),
+        2 => any::<usize>().prop_map(|pick| Act::ChangeInPlace { pick }),
+        1 => Just(Act::Tidy),
     ]
 }
 
@@ -285,17 +425,105 @@ impl std::fmt::Debug for File {
     }
 }
 
-/// Files by path, and every folder, a file's included.
+/// Files by path, and every folder, a file's included; in a save as stored, the places in
+/// conflict too, with nothing below them. A folder on a drive holds none.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct Tree {
     files: BTreeMap<String, File>,
     folders: BTreeSet<String>,
+    kept: BTreeMap<String, Kept>,
+}
+
+/// One version a conflict holds: a file, or a folder with everything in it, its paths its own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum Part {
+    File(File),
+    Folder(Tree),
+}
+
+/// A place in conflict as a save holds it: yours, where the lines parted, and theirs; and, when
+/// the folder holds a version of its own there, that version with its marker length (0: none).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Kept {
+    terms: [Option<Part>; 3],
+    own: Option<(Option<Part>, u8)>,
+}
+
+impl Kept {
+    /// What the folder holds for it: its own version, else yours.
+    fn stands(&self) -> Option<&Part> {
+        match &self.own {
+            Some((own, _)) => own.as_ref(),
+            None => self.terms[0].as_ref(),
+        }
+    }
+
+    /// Its marker length: 0 unless it is shown with markers.
+    fn marker(&self) -> u8 {
+        self.own.as_ref().map_or(0, |(_, m)| *m)
+    }
 }
 
 impl Tree {
     fn put(&mut self, path: &str, file: File) {
         self.add_folders_above(path);
+        self.kept.remove(path);
         self.files.insert(path.to_owned(), file);
+    }
+
+    /// Holds the conflict `k` at `path`, in place of whatever was there.
+    fn keep(&mut self, path: &str, k: Kept) {
+        self.remove(path);
+        self.add_folders_above(path);
+        self.kept.insert(path.to_owned(), k);
+    }
+
+    /// Everything strictly below the folder `path`, its paths taken from there.
+    fn below(&self, path: &str) -> Tree {
+        let rest = |p: &str| p.strip_prefix(path)?.strip_prefix('/').map(str::to_owned);
+        Tree {
+            files: (self.files.iter())
+                .filter_map(|(p, f)| Some((rest(p)?, f.clone())))
+                .collect(),
+            folders: self.folders.iter().filter_map(|p| rest(p)).collect(),
+            kept: (self.kept.iter())
+                .filter_map(|(p, k)| Some((rest(p)?, k.clone())))
+                .collect(),
+        }
+    }
+
+    /// Makes `path` hold `part`, or nothing.
+    fn place(&mut self, path: &str, part: Option<&Part>) {
+        self.remove(path);
+        match part {
+            Some(Part::File(f)) => self.put(path, f.clone()),
+            Some(Part::Folder(t)) => {
+                self.add_folder(path);
+                for (p, f) in &t.files {
+                    self.put(&format!("{path}/{p}"), f.clone());
+                }
+                for p in &t.folders {
+                    self.add_folder(&format!("{path}/{p}"));
+                }
+                for (p, k) in &t.kept {
+                    self.keep(&format!("{path}/{p}"), k.clone());
+                }
+            }
+            None => {}
+        }
+    }
+
+    /// The tree as it stands in a folder: each place in conflict holding what it stands as.
+    fn standing(&self) -> Tree {
+        let mut t = Tree {
+            files: self.files.clone(),
+            folders: self.folders.clone(),
+            kept: BTreeMap::new(),
+        };
+        for (p, k) in &self.kept {
+            t.place(p, k.stands());
+        }
+        t
     }
 
     fn add_folder(&mut self, path: &str) {
@@ -315,6 +543,7 @@ impl Tree {
     fn remove(&mut self, path: &str) {
         self.files.retain(|p, _| !within(p, path));
         self.folders.retain(|p| !within(p, path));
+        self.kept.retain(|p, _| !within(p, path));
     }
 
     /// Makes `path` and everything in it what `other` has there.
@@ -326,11 +555,16 @@ impl Tree {
         for p in other.folders.iter().filter(|p| within(p, path)) {
             self.add_folder(p);
         }
+        for (p, k) in other.kept.iter().filter(|(p, _)| within(p, path)) {
+            self.keep(p, k.clone());
+        }
     }
 
     /// Makes the entry at `path` what `other` has there: a file, a folder, or nothing.
     fn set(&mut self, path: &str, other: &Tree) {
-        if let Some(f) = other.files.get(path) {
+        if let Some(k) = other.kept.get(path) {
+            self.keep(path, k.clone());
+        } else if let Some(f) = other.files.get(path) {
             self.put(path, f.clone());
         } else if other.folders.contains(path) {
             self.add_folder(path);
@@ -452,7 +686,10 @@ fn set_aside(folder: &Tree, tip: &Tree, paths: &BTreeSet<String>) -> Vec<String>
 #[derive(Debug, Clone)]
 struct Saved {
     id: Id,
+    /// What it stands as in a folder, which `goto` writes.
     tree: Tree,
+    /// As stored, its places in conflict included; a shelf's is what it stands as.
+    stored: Tree,
     /// Its first parent.
     parent: Option<usize>,
     /// Its other parents: a combined save's target.
@@ -589,6 +826,7 @@ impl Model {
             saves: vec![Saved {
                 id: first,
                 tree: Tree::default(),
+                stored: Tree::default(),
                 parent: None,
                 others: Vec::new(),
                 change: 0,
@@ -610,9 +848,14 @@ impl Model {
         self.entries[self.entries.len() - 1].0
     }
 
-    /// What the save the project is on holds.
+    /// What the save the project is on stands as.
     fn tip(&self) -> &Tree {
         &self.saves[self.state.on].tree
+    }
+
+    /// The places in conflict the save the project is on holds.
+    fn kept(&self) -> &BTreeMap<String, Kept> {
+        &self.saves[self.state.on].stored.kept
     }
 }
 
@@ -705,10 +948,15 @@ fn run(acts: &[Act]) {
             "save {:?}",
             s.id
         );
-        assert_eq!(saved_tree(repo.store(), s.id), s.tree, "save {:?}", s.id);
+        let stored = saved_tree(repo.store(), s.id);
+        if s.shelf {
+            assert_eq!(stored.standing(), s.tree, "shelf {:?}", s.id);
+        } else {
+            assert_eq!(stored, s.stored, "save {:?}", s.id);
+        }
         // A shelf notes nothing; any other save, what moved since its first parent.
         let want = match s.parent {
-            Some(p) if !s.shelf => same_contents(&m.saves[p].tree, &s.tree),
+            Some(p) if !s.shelf => same_contents(&m.saves[p].stored, &s.stored),
             _ => Vec::new(),
         };
         let noted: Vec<(String, String)> = (save.move_notes.iter())
@@ -951,6 +1199,7 @@ fn apply(repo: &mut Repository, m: &mut Model, root: &Path, a: &Act) -> Option<S
             at,
             edit,
             back,
+            changes,
         } => {
             // A text the save holds, saved first if there is none, so both sides change it.
             let texts: Vec<&'static str> = (FILES.into_iter())
@@ -964,21 +1213,10 @@ fn apply(repo: &mut Repository, m: &mut Model, root: &Path, a: &Act) -> Option<S
                     path
                 }
             };
-            // Sometimes it moves to an empty place instead, and sometimes makes a new text where
-            // it was.
             let empty: Vec<&'static str> = (FILES.into_iter())
                 .filter(|p| !m.folder.files.contains_key(*p))
                 .collect();
-            if edit % 4 >= 2
-                && let Some(&to) = empty.get(pick / 4 % empty.len().max(1))
-            {
-                apply(repo, m, root, &Act::Rename(path, to));
-                if edit % 4 == 3 {
-                    edit_text(m, root, path, 0, 0);
-                }
-            } else {
-                edit_text(m, root, path, at, edit);
-            }
+            change_file(repo, m, root, changes.0, path, (at, edit), &empty);
             save(repo, m, None);
             let first = m.state.on;
             // An older save than this one, so the two lines part: mostly its parent, where the
@@ -1000,36 +1238,64 @@ fn apply(repo: &mut Repository, m: &mut Model, root: &Path, a: &Act) -> Option<S
                 unsaved,
             };
             apply(repo, m, root, &goto);
-            // A new last line, apart from the first edit unless that was at the end too.
-            let end = (m.folder.files.get(path)).map_or(0, |f| lines_of(&f.bytes).len());
-            edit_text(m, root, path, end, 0);
+            change_file(repo, m, root, changes.1, path, (at, edit), &empty);
             save(repo, m, None);
             if back {
-                combine_into(repo, m, &Aim::Save(first), None);
+                combine_into(repo, m, &Aim::Save(first), None, Keep::Conflicts);
             }
             None
         }
-        Act::Combine { pick, message } => {
+        Act::Combine {
+            pick,
+            message,
+            clean,
+        } => {
             let aims = aims(m);
-            combine_into(
-                repo,
-                m,
-                &aims[pick % aims.len()],
-                message.then_some("Combined"),
-            );
+            let keep = if clean {
+                Keep::OnlyIfClean
+            } else {
+                Keep::Conflicts
+            };
+            let message = message.then_some("Combined");
+            combine_into(repo, m, &aims[pick % aims.len()], message, keep);
             None
         }
-        Act::CrissCross { pick } => {
-            let here = m.state.line.clone()?;
+        Act::CrissCross { pick, fix } => {
+            let mut here = m.state.line.clone()?;
             let others: Vec<String> = (aims(m).into_iter())
                 .filter_map(|a| match a {
                     Aim::Line(line) if line != here => Some(line),
                     _ => None,
                 })
                 .collect();
-            let there = others.get(pick % others.len().max(1))?.clone();
+            let mut there = others.get(pick % others.len().max(1)).cloned();
+            if fix {
+                // Two lines that each changed one text in the same place, from this one.
+                let fork = Act::Fork {
+                    pick,
+                    path: "a",
+                    at: pick,
+                    edit: (pick % 3) as u8,
+                    back: false,
+                    changes: (Change::Edit, Change::Edit),
+                };
+                apply(repo, m, root, &fork);
+                there = Some(here);
+                here = m.state.line.clone()?;
+                if !m.state.lines.contains_key(there.as_ref()?) || Some(&here) == there.as_ref() {
+                    return None;
+                }
+            }
+            let there = there?;
             let old = m.state.on;
-            combine_into(repo, m, &Aim::Line(there.clone()), None);
+            // Each line keeps its own side of what its combine left in conflict.
+            let own_side = |repo: &mut Repository, m: &mut Model| {
+                if fix && !m.kept().is_empty() {
+                    resolve_at(repo, m, Some(String::new()), ResolveHow::KeepMine, true);
+                }
+            };
+            combine_into(repo, m, &Aim::Line(there.clone()), None, Keep::Conflicts);
+            own_side(repo, m);
             let pick = m.state.lines.keys().position(|l| *l == there).unwrap();
             let unsaved = Unsaved::Discard;
             let goto = Act::Goto {
@@ -1038,8 +1304,26 @@ fn apply(repo: &mut Repository, m: &mut Model, root: &Path, a: &Act) -> Option<S
                 unsaved,
             };
             apply(repo, m, root, &goto);
-            combine_into(repo, m, &Aim::Save(old), None);
-            combine_into(repo, m, &Aim::Line(here), None);
+            combine_into(repo, m, &Aim::Save(old), None, Keep::Conflicts);
+            own_side(repo, m);
+            combine_into(repo, m, &Aim::Line(here), None, Keep::Conflicts);
+            None
+        }
+        Act::Resolve { pick, how } => {
+            // A place in conflict, or one past them for the whole project.
+            let places: Vec<String> = m.kept().keys().cloned().collect();
+            let place = match places.get(pick % (places.len() + 1)) {
+                Some(p) => p.clone(),
+                None => String::new(),
+            };
+            let given = (how != ResolveHow::All).then_some(place);
+            resolve_at(repo, m, given, how, (pick / 7).is_multiple_of(2));
+            None
+        }
+        Act::FixFile { pick } => fix_file(m, root, pick),
+        Act::ChangeInPlace { pick } => change_in_place(m, root, pick),
+        Act::Tidy => {
+            tidy_and_check(repo, m);
             None
         }
     };
@@ -1048,6 +1332,7 @@ fn apply(repo: &mut Repository, m: &mut Model, root: &Path, a: &Act) -> Option<S
         Act::Goto { .. }
             | Act::Combine { .. }
             | Act::CrissCross { .. }
+            | Act::Resolve { .. }
             | Act::Fork { back: true, .. }
             | Act::Discard(_)
             | Act::Undo { .. }
@@ -1064,6 +1349,62 @@ fn apply(repo: &mut Repository, m: &mut Model, root: &Path, a: &Act) -> Option<S
             .retain(|p| after.files.contains_key(p) && before.files.get(p) == after.files.get(p));
     }
     missable
+}
+
+/// Makes `change` to the text at `path` in the folder, for a line of a fork; `empty` are the
+/// places that were empty when the fork began.
+fn change_file(
+    repo: &mut Repository,
+    m: &mut Model,
+    root: &Path,
+    change: Change,
+    path: &'static str,
+    (at, edit): (usize, u8),
+    empty: &[&'static str],
+) {
+    let there = m.folder.files.contains_key(path);
+    let pick = |k: usize| empty.get(k % empty.len().max(1)).copied();
+    match change {
+        Change::Edit => drop(edit_text(m, root, path, at, edit)),
+        Change::EditEnd => {
+            // Apart from the other line's edit unless that was at the end too.
+            let end = (m.folder.files.get(path)).map_or(0, |f| lines_of(&f.bytes).len());
+            drop(edit_text(m, root, path, end, 0));
+        }
+        Change::Remove if there => drop(apply(repo, m, root, &Act::Delete(path))),
+        Change::Move(k, remake) if there => {
+            if let Some(to) = pick(k) {
+                apply(repo, m, root, &Act::Rename(path, to));
+                if remake {
+                    edit_text(m, root, path, 0, 0);
+                }
+            }
+        }
+        Change::Binary => {
+            let mut bytes = vec![0];
+            bytes.extend(fresh_line(m));
+            drop(put(m, root, path, bytes, When::Now));
+        }
+        Change::Add(k) => {
+            if let Some(to) = pick(k).filter(|to| !m.folder.files.contains_key(*to)) {
+                drop(edit_text(m, root, to, 0, 0));
+            }
+        }
+        Change::Arrive if there => {
+            // Another file, saved where the file was once that place is empty, so it is noted.
+            let others: Vec<&'static str> = (FILES.into_iter())
+                .filter(|p| {
+                    *p != path && m.folder.files.get(*p).is_some_and(|f| !f.bytes.is_empty())
+                })
+                .collect();
+            if let Some(&from) = others.get(at % others.len().max(1)) {
+                apply(repo, m, root, &Act::Delete(path));
+                save(repo, m, None);
+                apply(repo, m, root, &Act::Rename(from, path));
+            }
+        }
+        Change::Remove | Change::Move(..) | Change::Arrive => {}
+    }
 }
 
 /// Writes `len` bytes to `path`, leaving the modified time `when` says.
@@ -1193,14 +1534,22 @@ fn save(repo: &mut Repository, m: &mut Model, line: Option<&str>) {
         settle(repo, m, Vec::new());
         return;
     }
+    let stored = settled(&m.folder, &m.saves[m.state.on].stored);
     match done.unwrap() {
-        SaveOutcome::Saved { save_id, .. } => {
-            assert_ne!(m.folder, *m.tip(), "saved with nothing changed");
-            assert_eq!(saved_tree(repo.store(), save_id), m.folder);
+        SaveOutcome::Saved {
+            save_id, conflicts, ..
+        } => {
+            assert_ne!(
+                stored, m.saves[m.state.on].stored,
+                "saved with nothing changed"
+            );
+            assert_eq!(saved_tree(repo.store(), save_id), stored);
+            assert_eq!(conflicts, stored.kept.len() as u64, "still in conflict");
             let was = m.state.clone();
             m.saves.push(Saved {
                 id: save_id,
-                tree: m.folder.clone(),
+                tree: stored.standing(),
+                stored,
                 parent: Some(m.state.on),
                 others: Vec::new(),
                 change: m.saves.len(),
@@ -1221,10 +1570,39 @@ fn save(repo: &mut Repository, m: &mut Model, line: Option<&str>) {
             stepped(repo, m, "save", was, held);
         }
         SaveOutcome::NothingChanged { .. } => {
-            assert_eq!(m.folder, *m.tip(), "changes not saved");
+            assert_eq!(stored, m.saves[m.state.on].stored, "changes not saved");
             settle(repo, m, Vec::new());
         }
     }
+}
+
+/// What a save of `folder` holds on top of the save `tip` (as stored): the folder as it is,
+/// with each of the tip's places in conflict settled by what the folder shows there. Untouched,
+/// the conflict stays as it is; shown with markers, it is fixed once no marker line is left,
+/// and else keeps the file as its own; standing as a version, it keeps whatever the folder holds
+/// as its own, for only the person's word decides it.
+fn settled(folder: &Tree, tip: &Tree) -> Tree {
+    let mut out = folder.clone();
+    for (p, k) in &tip.kept {
+        let now = part_at(folder, p);
+        if now.as_ref() == k.stands() {
+            out.keep(p, k.clone());
+            continue;
+        }
+        let marker = k.marker();
+        if marker == 0 {
+            let own = Some((now, 0));
+            let terms = k.terms.clone();
+            out.keep(p, Kept { terms, own });
+        } else if let Some(Part::File(f)) = &now
+            && marker_lines(&f.bytes, marker) != (0, 0)
+        {
+            let own = Some((now.clone(), marker));
+            let terms = k.terms.clone();
+            out.keep(p, Kept { terms, own });
+        }
+    }
+    out
 }
 
 /// `save --amend`: refused at a save, and where another line or a tag shows the save.
@@ -1257,25 +1635,31 @@ fn amend(repo: &mut Repository, m: &mut Model, new_message: bool) {
         return;
     }
     let message = message.unwrap_or(m.saves[old].message.as_str()).to_owned();
-    let same = m.folder == m.saves[old].tree && message == m.saves[old].message;
+    let stored = settled(&m.folder, &m.saves[old].stored);
+    let same = stored == m.saves[old].stored && message == m.saves[old].message;
     match done.unwrap() {
         SaveOutcome::NothingChanged { .. } => {
             assert!(same, "nothing amended");
             settle(repo, m, Vec::new());
         }
         SaveOutcome::Saved {
-            save_id, replaced, ..
+            save_id,
+            replaced,
+            conflicts,
+            ..
         } => {
             assert!(!same, "amended with nothing to amend");
             assert_eq!(replaced, Some(m.saves[old].id));
-            assert_eq!(saved_tree(repo.store(), save_id), m.folder);
+            assert_eq!(saved_tree(repo.store(), save_id), stored);
+            assert_eq!(conflicts, stored.kept.len() as u64, "still in conflict");
             let was = m.state.clone();
             let (parent, change) = (m.saves[old].parent, m.saves[old].change);
             // An amend keeps every parent.
             let others = m.saves[old].others.clone();
             m.saves.push(Saved {
                 id: save_id,
-                tree: m.folder.clone(),
+                tree: stored.standing(),
+                stored,
                 parent,
                 others,
                 change,
@@ -1696,9 +2080,14 @@ fn new_shelf(
 ) -> usize {
     let (got, id) = made.next().expect("a shelf the engine didn't make");
     assert_eq!(got, label, "the new shelf's number");
-    assert_eq!(saved_tree(store, id), tree, "what shelf {label} holds");
+    assert_eq!(
+        saved_tree(store, id).standing(),
+        tree,
+        "what shelf {label} holds"
+    );
     m.saves.push(Saved {
         id,
+        stored: tree.clone(),
         tree,
         parent: Some(m.state.on),
         others: Vec::new(),
@@ -2025,13 +2414,28 @@ fn aims(m: &Model) -> Vec<Aim> {
 const MOST_STARTS: usize = 16;
 const MOST_INNER: usize = 64;
 
+/// A conflict a combine made: its place, the row it names it with (its lines called `O` and
+/// `T`), and how it stands in the folder, `None` where it isn't kept.
+type MadeRow = (String, String, Option<Stands>);
+
 /// Why the model's combine stops before it switches anything.
 #[derive(Debug)]
 enum Stopped {
     Unrelated,
     Tangled,
-    /// The paths that conflict, and the rows some of them are named with.
-    Conflicts(Clashes),
+    /// Asked for a clean line: the conflicts it would make, and how many the result would hold
+    /// already, on a forward the target's.
+    Unclean {
+        made: Vec<MadeRow>,
+        held: u64,
+        forward: bool,
+    },
+    /// Both lines changed `path`, and `on` holds a conflict at `at`, the path or below it.
+    Held {
+        path: String,
+        at: String,
+        on: Held,
+    },
 }
 
 impl Stopped {
@@ -2040,33 +2444,89 @@ impl Stopped {
             (Stopped::Unrelated, Err(CombineError::Unrelated { .. }))
             | (Stopped::Tangled, Err(CombineError::Tangled { .. })) => {}
             (
-                Stopped::Conflicts((want, rows)),
+                Stopped::Unclean {
+                    made,
+                    held,
+                    forward,
+                },
                 Err(CombineError::Conflicts {
-                    conflicts, more, ..
+                    conflicts,
+                    more,
+                    why,
+                    held: got_held,
+                    forward: got_forward,
+                    ..
                 }),
             ) => {
-                let got: Vec<&String> = conflicts.iter().map(|c| &c.path).collect();
-                let want: Vec<&String> = want.iter().collect();
+                let got: Vec<MadeRow> = conflicts.iter().map(row_of).collect();
                 assert_eq!(
-                    (got, *more),
-                    (want, 0),
-                    "the paths that conflict: {conflicts:?}"
+                    (&got, *more, *why, *got_held, *got_forward),
+                    (made, 0, NotKept::OnlyIfClean, *held, *forward),
+                    "what a combine asked for a clean line met"
                 );
-                for c in conflicts {
-                    if let Some(row) = rows.get(&c.path) {
-                        assert_eq!(&c.describe("O", "T"), row, "{c:?}");
-                    }
+                for (_, row, _) in made {
+                    met(clash_kind(row));
                 }
+                met("stopped for a clean line");
+            }
+            (
+                Stopped::Held { path, at, on },
+                Err(CombineError::HeldConflict {
+                    path: got_path,
+                    at: got_at,
+                    on: got_on,
+                    ..
+                }),
+            ) => {
+                assert_eq!((got_path, got_at, got_on), (path, at, on));
+                met("stopped at a conflict a line holds");
             }
             _ => panic!("the model's combine stops with {self:?}, the engine's with {done:?}"),
         }
     }
 }
 
+/// A conflict the engine named, as the model names one.
+fn row_of(c: &combine::Conflict) -> MadeRow {
+    (c.path.clone(), c.describe("O", "T"), c.stands)
+}
+
+/// Which kind of clash a row tells of, by its words (terminal.md).
+fn clash_kind(row: &str) -> &'static str {
+    let what = row.split_once(": ").map_or(row, |(_, w)| w);
+    if what.contains(", and to ") {
+        "moved apart"
+    } else if what.starts_with("moved here from") && what.contains(", removed on ") {
+        "moved, removed"
+    } else if what.contains("has something else") {
+        "moved onto"
+    } else if what.ends_with("can't tell what it held where they parted") {
+        "start unknown"
+    } else if what.contains(", removed on ") {
+        "changed, removed"
+    } else if what == "added on both lines, differently" {
+        "added on both"
+    } else if what == "changed on both lines, in the same place" {
+        "changed on both, in the same place"
+    } else if what.ends_with("differ only in line endings") {
+        "changed on both, line endings"
+    } else if what.contains("isn't text") {
+        "changed on both, not text"
+    } else {
+        "changed on both, other"
+    }
+}
+
 /// `combine`: nothing when the target is in the line's history, the line moved forward when the
-/// line's save is in the target's, else a combined save; the folder switched to the result as
-/// `goto` switches it.
-fn combine_into(repo: &mut Repository, m: &mut Model, aim: &Aim, message: Option<&str>) {
+/// line's save is in the target's, else a combined save holding the conflicts it keeps; the
+/// folder switched to the result as `goto` switches it. `keep` says whether conflicts are kept.
+fn combine_into(
+    repo: &mut Repository,
+    m: &mut Model,
+    aim: &Aim,
+    message: Option<&str>,
+    keep: Keep,
+) {
     let (target, with, raw) = match aim {
         Aim::Line(name) => (
             Target::Line(name.clone()),
@@ -2079,7 +2539,6 @@ fn combine_into(repo: &mut Repository, m: &mut Model, aim: &Aim, message: Option
         raw: raw.clone(),
         shown: raw.clone(),
     };
-    let keep = combine::Keep::OnlyIfClean;
     let done = combine::combine(
         repo,
         &target,
@@ -2106,10 +2565,24 @@ fn combine_into(repo: &mut Repository, m: &mut Model, aim: &Aim, message: Option
         return;
     }
     let (into, made) = if history(m, &[with]).contains(&from) {
-        (m.saves[with].tree.clone(), None)
+        let held = m.saves[with].stored.kept.len() as u64;
+        if keep == Keep::OnlyIfClean && held > 0 {
+            let made = Vec::new();
+            let forward = true;
+            Stopped::Unclean {
+                made,
+                held,
+                forward,
+            }
+            .holds(&done);
+            settle(repo, m, Vec::new());
+            return;
+        }
+        (m.saves[with].stored.clone(), None)
     } else {
-        match combined(m, from, with) {
-            Ok((tree, starts, merged)) => (tree, Some((starts, merged))),
+        let sides = (keep == Keep::Conflicts).then(|| sides(repo, m, &line, from, with, &raw));
+        match combined(m, from, with, sides.as_ref()) {
+            Ok(c) => (c.tree.clone(), Some(c)),
             Err(stopped) => {
                 stopped.holds(&done);
                 settle(repo, m, Vec::new());
@@ -2117,7 +2590,8 @@ fn combine_into(repo: &mut Repository, m: &mut Model, aim: &Aim, message: Option
             }
         }
     };
-    let Ok(folder) = switch(&m.folder, m.tip(), &into) else {
+    let standing = into.standing();
+    let Ok(folder) = switch(&m.folder, m.tip(), &standing) else {
         let stopped = matches!(done, Err(CombineError::Collisions { .. }));
         assert!(stopped, "{done:?}");
         settle(repo, m, Vec::new());
@@ -2132,16 +2606,39 @@ fn combine_into(repo: &mut Repository, m: &mut Model, aim: &Aim, message: Option
             );
             with
         }
-        Some((starts, merged_files)) => {
-            let starts = starts.iter().map(|&s| m.saves[s].id).collect();
-            let want = Combined::Made {
+        Some(c) => {
+            let Combined::Made {
                 starts,
                 merged_files,
-                conflicts: vec![],
-                more: 0,
-                conflict_count: 0,
+                conflicts,
+                more,
+                conflict_count,
+            } = &done.result
+            else {
+                panic!(
+                    "the model made a combined save, the engine {:?}",
+                    done.result
+                );
             };
-            assert_eq!(done.result, want);
+            let want_starts: Vec<Id> = c.starts.iter().map(|&s| m.saves[s].id).collect();
+            assert_eq!((starts, merged_files), (&want_starts, &c.merged));
+            let got: Vec<MadeRow> = conflicts.iter().map(row_of).collect();
+            assert_eq!(
+                (&got, *more),
+                (&c.made, 0),
+                "the conflicts the combine made"
+            );
+            assert_eq!(
+                *conflict_count,
+                into.kept.len() as u64,
+                "places in conflict"
+            );
+            for (_, row, _) in &c.made {
+                met(clash_kind(row));
+            }
+            if c.unsure {
+                met("starting points that disagree");
+            }
             assert_eq!(
                 saved_tree(repo.store(), done.save),
                 into,
@@ -2151,7 +2648,8 @@ fn combine_into(repo: &mut Repository, m: &mut Model, aim: &Aim, message: Option
                 message.map_or_else(|| format!("Combine {raw} into {line}"), str::to_owned);
             m.saves.push(Saved {
                 id: done.save,
-                tree: into,
+                tree: standing,
+                stored: into,
                 parent: Some(from),
                 others: vec![with],
                 change: m.saves.len(),
@@ -2166,6 +2664,56 @@ fn combine_into(repo: &mut Repository, m: &mut Model, aim: &Aim, message: Option
     m.state.on = to;
     let held = std::mem::replace(&mut m.folder, folder);
     stepped(repo, m, "combine", was, held);
+}
+
+/// The first 8 letters of a save's change ID, as a label shows it.
+fn letters(repo: &Repository, save: Id) -> String {
+    let change = repo.store().save(&save, false).unwrap().change_id;
+    change.to_letters()[..8].to_owned()
+}
+
+/// What the labels of a combine's marked texts are made of: the line and the target as the
+/// person named them, each with its save's letters, and the one save where they parted.
+struct Sides {
+    ours: String,
+    theirs: String,
+    /// `None` where they parted at several saves.
+    parted: Option<String>,
+}
+
+/// What a marked text's middle label says of where the lines parted at one place.
+#[derive(Clone, Copy)]
+enum Middle {
+    Parted,
+    Nothing,
+    Unknown,
+}
+
+impl Sides {
+    fn labels(&self, middle: Middle) -> [String; 3] {
+        let parted = "where the lines parted";
+        let base = match (middle, &self.parted) {
+            (Middle::Parted, Some(save)) => format!("{parted} ({save})"),
+            (Middle::Parted, None) => format!("{parted} (several saves)"),
+            (Middle::Nothing, Some(save)) => format!("{parted} ({save}), which held nothing here"),
+            (Middle::Nothing, None) => format!("{parted}, which held nothing here"),
+            (Middle::Unknown, _) => format!("{parted}, which Opalro can't tell here"),
+        };
+        [self.ours.clone(), base, self.theirs.clone()]
+    }
+}
+
+fn sides(repo: &Repository, m: &Model, line: &str, from: usize, with: usize, raw: &str) -> Sides {
+    let starts = common_starts(m, &[from], &[with]);
+    let parted = match starts[..] {
+        [one] => Some(letters(repo, m.saves[one].id)),
+        _ => None,
+    };
+    Sides {
+        ours: format!("{line} ({})", letters(repo, m.saves[from].id)),
+        theirs: format!("{raw} ({})", letters(repo, m.saves[with].id)),
+        parted,
+    }
 }
 
 /// Every save in the history of `tips`, through every parent, the tips included.
@@ -2195,9 +2743,9 @@ fn common_starts(m: &Model, a: &[usize], b: &[usize]) -> Vec<usize> {
     starts
 }
 
-/// One version a merge reads, and its save, `None` when it is made up; for a made-up one, the
-/// places where its starting points disagreed (`""` for everywhere), so nothing is known there or
-/// below.
+/// One version a merge reads, as stored, and its save, `None` when it is made up; for a made-up
+/// one, the places where its starting points disagreed (`""` for everywhere), so nothing is
+/// known there or below.
 #[derive(Debug, Clone)]
 struct Ver {
     tree: Tree,
@@ -2207,7 +2755,7 @@ struct Ver {
 
 fn ver(m: &Model, save: usize) -> Ver {
     Ver {
-        tree: m.saves[save].tree.clone(),
+        tree: m.saves[save].stored.clone(),
         save: Some(save),
         unsure: BTreeSet::new(),
     }
@@ -2223,12 +2771,23 @@ fn unsure_inside(unsure: &BTreeSet<String>, path: &str) -> bool {
     unsure.iter().any(|u| u != path && within(u, path))
 }
 
-/// The combined save's files, the common starting points, and the files merged line by line.
+/// A combined save worked out: its tree as stored, the common starting points, the files merged
+/// line by line, the conflicts it made, and whether its starting points disagreed anywhere.
+struct Combine {
+    tree: Tree,
+    starts: Vec<usize>,
+    merged: Vec<String>,
+    made: Vec<MadeRow>,
+    unsure: bool,
+}
+
+/// The combined save, or why there is none; `sides` only where conflicts are kept.
 fn combined(
     m: &Model,
     from: usize,
     with: usize,
-) -> Result<(Tree, Vec<usize>, Vec<String>), Stopped> {
+    sides: Option<&Sides>,
+) -> Result<Combine, Stopped> {
     let starts = common_starts(m, &[from], &[with]);
     if starts.len() > MOST_STARTS {
         return Err(Stopped::Tangled);
@@ -2239,11 +2798,24 @@ fn combined(
     }
     let mut left = MOST_INNER;
     let start = start_from(m, &starts, &mut left)?;
-    let done = merge(m, &start, &ver(m, from), &ver(m, with));
-    if !done.conflicts.is_empty() {
-        return Err(Stopped::Conflicts((done.conflicts, done.rows)));
+    let done = merge(m, &start, &ver(m, from), &ver(m, with), sides, false)?;
+    // Asked for a clean line, the conflicts it would make stop it, and so do those it carries.
+    let held = done.tree.kept.len() as u64;
+    if sides.is_none() && (!done.made.is_empty() || held > 0) {
+        let forward = false;
+        return Err(Stopped::Unclean {
+            made: done.made,
+            held,
+            forward,
+        });
     }
-    Ok((done.tree, starts, done.merged))
+    Ok(Combine {
+        tree: done.tree,
+        starts,
+        merged: done.merged,
+        made: done.made,
+        unsure: !start.unsure.is_empty(),
+    })
 }
 
 /// The version to merge from: one starting point is itself; several are combined first, two at a
@@ -2270,10 +2842,10 @@ fn start_from(m: &Model, starts: &[usize], left: &mut usize) -> Result<Ver, Stop
         let start = start_from(m, &under, left)?;
         // Where the two clash, the start of the next merge holds nothing and is unsure.
         // What the starting points so far were unsure of stays so, whatever the next one holds.
-        let done = merge(m, &start, &acc, &ver(m, next));
+        let done = merge(m, &start, &acc, &ver(m, next), None, true)?;
         let mut tree = done.tree;
         let mut unsure = acc.unsure;
-        unsure.extend(done.conflicts);
+        unsure.extend(done.unsure);
         for c in &unsure {
             tree.remove(c);
         }
@@ -2289,12 +2861,13 @@ fn start_from(m: &Model, starts: &[usize], left: &mut usize) -> Result<Ver, Stop
 
 /// Files that left one path and arrived at another between two trees with the same non-empty
 /// contents, no other file that left and none that arrived holding them; sorted by where they
-/// went.
+/// went. A place in conflict holds something, and is no file that moves.
 fn same_contents(before: &Tree, after: &Tree) -> Vec<(String, String)> {
     let gone = |a: &Tree, b: &Tree| {
         let mut by: BTreeMap<Rc<[u8]>, Vec<String>> = BTreeMap::new();
         for (p, f) in &a.files {
-            if !f.bytes.is_empty() && !b.files.contains_key(p) && !b.folders.contains(p) {
+            let held = b.files.contains_key(p) || b.folders.contains(p) || b.kept.contains_key(p);
+            if !f.bytes.is_empty() && !held {
                 by.entry(f.bytes.clone()).or_default().push(p.clone());
             }
         }
@@ -2328,8 +2901,8 @@ fn noted(m: &Model, start: usize, tip: usize) -> BTreeMap<String, String> {
     // one never left still holds its own, however it was edited, removed or made again.
     let mut from: BTreeMap<String, Option<String>> = BTreeMap::new();
     for &s in path.iter().rev() {
-        let before = &m.saves[m.saves[s].parent.unwrap()].tree;
-        for (left, came) in same_contents(before, &m.saves[s].tree) {
+        let before = &m.saves[m.saves[s].parent.unwrap()].stored;
+        for (left, came) in same_contents(before, &m.saves[s].stored) {
             let file = from
                 .get(&left)
                 .cloned()
@@ -2343,24 +2916,24 @@ fn noted(m: &Model, start: usize, tip: usize) -> BTreeMap<String, String> {
         .collect()
 }
 
-/// Where the start's files went on one side, and the places where the side's notes show another
-/// file arriving that a file still holds at the side's end.
+/// Where the start's files went on one side, and the places where the side's notes show a file
+/// arriving that a file still holds at the side's end.
 struct Went {
     went: BTreeMap<String, String>,
-    /// Each with the start path of the file that came.
-    replaced: BTreeMap<String, String>,
+    /// Each with where the file that came was.
+    arrived: BTreeMap<String, String>,
 }
 
-/// Whether `tree` holds nothing at `path` and no file above it.
+/// Whether `tree` holds nothing at `path`, and no file or conflict above it.
 fn room(tree: &Tree, path: &str) -> bool {
     let mut up = path;
     while let Some((above, _)) = up.rsplit_once('/') {
-        if tree.files.contains_key(above) {
+        if tree.files.contains_key(above) || tree.kept.contains_key(above) {
             return false;
         }
         up = above;
     }
-    !tree.files.contains_key(path) && !tree.folders.contains(path)
+    at(tree, path) == At::Nothing
 }
 
 /// Where the files of `start` went on `side`: by its notes first, then by contents for the files
@@ -2390,12 +2963,11 @@ fn followed(m: &Model, start: &Ver, side: &Ver) -> Went {
             went.insert(from, to);
         }
     }
-    // A place a note brought a file to counts only while a file is still there at the side's end.
-    let replaced = (noted.into_iter())
+    let arrived = (noted.into_iter())
         .filter(|(_, to)| side.tree.files.contains_key(to))
         .map(|(from, to)| (to, from))
         .collect();
-    Went { went, replaced }
+    Went { went, arrived }
 }
 
 /// Moves the file at `from` to `to`.
@@ -2405,107 +2977,112 @@ fn relocate(tree: &mut Tree, from: &str, to: &str) {
     }
 }
 
-/// The paths that conflict, and the row a combine names some of them with, its lines called `O`
-/// (ours) and `T` (theirs).
-type Clashes = (BTreeSet<String>, BTreeMap<String, String>);
-
-/// What a merge gave: the merged tree (a conflict's place holds what the path merge left there),
-/// the files merged line by line, and the paths that conflict with the rows some are named with.
+/// What a merge gave: the merged tree as stored, the files merged line by line, the conflicts it
+/// made, and for an inner merge the places it couldn't settle, which it leaves empty.
 struct Merge {
     tree: Tree,
     merged: Vec<String>,
-    conflicts: BTreeSet<String>,
-    rows: BTreeMap<String, String>,
+    made: Vec<MadeRow>,
+    unsure: BTreeSet<String>,
 }
 
-/// Merges `ours` and `theirs` from `start`, following moves.
-fn merge(m: &Model, start: &Ver, ours: &Ver, theirs: &Ver) -> Merge {
+/// Merges `ours` and `theirs` from `start`, following moves. `sides` are the labels where
+/// conflicts are kept; an `inner` merge, of starting points, keeps none and never stops.
+fn merge(
+    m: &Model,
+    start: &Ver,
+    ours: &Ver,
+    theirs: &Ver,
+    sides: Option<&Sides>,
+    inner: bool,
+) -> Result<Merge, Stopped> {
     let went = [followed(m, start, ours), followed(m, start, theirs)];
     let was = [&start.tree, &ours.tree, &theirs.tree];
     let mut trees = was.map(Tree::clone);
-    let mut conflicts = BTreeSet::new();
-    let mut rows = BTreeMap::new();
-    // The places a start file went two ways, each a conflict where the merge leaves a plain file
-    // under plain folders; one a conflict covers, or holds, is that conflict's.
-    let mut landed: Vec<(&String, String)> = Vec::new();
-    // Where a file went onto something the other line put there: the row, if those two clash.
-    let mut onto: BTreeMap<&String, String> = BTreeMap::new();
     let line = |k: usize| if k == 1 { "O" } else { "T" };
-    let onto_row = |at: &str, from: &str, mover: usize| {
-        let other = line(3 - mover);
-        let mover = line(mover);
+    let file_at = |k: usize, p: &str| was[k].files.get(p).cloned().map(Part::File);
+    // Where a moved file arrived on something the other line put there: two things added.
+    let onto_row = |at: &str, from: &str, k: usize| {
+        let (mover, other) = (line(k), line(3 - k));
         format!("{at}: moved here from {from} on {mover}, where {other} has something else")
     };
-    // The start's own file where it left, gone from the start: it is at its places now.
-    let leave = |trees: &mut [Tree; 3], from: &String| {
-        if trees[0].files.get(from) == was[0].files.get(from) {
-            trees[0].files.remove(from);
-        }
-    };
-    // The table of moves: a start file moved on one side or both.
+    // The conflicts a move makes where it went, kept where the result holds a plain file there:
+    // the start's file is the middle version.
+    let mut landed: Vec<(String, String, [Option<Part>; 3])> = Vec::new();
+    let mut onto: BTreeMap<String, String> = BTreeMap::new();
+    // Each start file moved on one line or both, by who moved it where and what each line holds
+    // at the old and the new places.
     let moved: BTreeSet<&String> = went[0].went.keys().chain(went[1].went.keys()).collect();
     for &from in &moved {
-        match (went[0].went.get(from), went[1].went.get(from)) {
-            (Some(a), Some(b)) if a == b => relocate(&mut trees[0], from, a),
-            (Some(a), Some(b)) => {
+        let start_file = Some(Part::File(was[0].files[from].clone()));
+        let to = [went[0].went.get(from), went[1].went.get(from)];
+        match to {
+            [Some(a), Some(b)] if a == b => relocate(&mut trees[0], from, a),
+            [Some(a), Some(b)] => {
+                // Two places: each holds what its line moved there, unless the other line holds
+                // something there of its own. The merge doesn't see the file where it was.
+                trees[0].files.remove(from);
                 for (at, k, other_to) in [(a, 1, b), (b, 2, a)] {
-                    let (mover, other) = (line(k), line(3 - k));
-                    let row = format!(
-                        "{at}: moved here from {from} on {mover}, and to {other_to} on {other}"
-                    );
-                    landed.push((at, row));
-                    onto.entry(at).or_insert_with(|| onto_row(at, from, k));
+                    if room(was[3 - k], at) {
+                        let (mover, other) = (line(k), line(3 - k));
+                        let row = format!(
+                            "{at}: moved here from {from} on {mover}, and to {other_to} on {other}"
+                        );
+                        let terms = [file_at(1, at), start_file.clone(), file_at(2, at)];
+                        landed.push((at.clone(), row, terms));
+                    } else {
+                        onto.insert(at.clone(), onto_row(at, from, k));
+                    }
                 }
-                leave(&mut trees, from);
             }
-            (Some(to), None) | (None, Some(to)) => {
-                let k = if went[0].went.contains_key(from) {
-                    1
-                } else {
-                    2
-                };
+            [Some(dest), None] | [None, Some(dest)] => {
+                let k = if to[0].is_some() { 1 } else { 2 };
                 let other = 3 - k;
-                // A file the other side's notes brought there isn't the start's.
-                let brought = went[other - 1].replaced.contains_key(from);
-                if !brought && was[other].folders.contains(from) {
-                    // A folder now: the path merge tells of that.
-                } else if brought || !was[other].files.contains_key(from) {
-                    let row = format!(
-                        "{to}: moved here from {from} on {}, removed on {}",
-                        line(k),
-                        line(other)
-                    );
-                    landed.push((to, row));
-                    onto.entry(to).or_insert_with(|| onto_row(to, from, k));
-                    leave(&mut trees, from);
-                } else if room(was[other], to) {
-                    relocate(&mut trees[0], from, to);
-                    relocate(&mut trees[other], from, to);
-                } else {
-                    // The other side has something where it went: the path merge sets the two
-                    // against each other there, and the start's file against the other side's.
-                    onto.insert(to, onto_row(to, from, k));
+                // Gone on the other line: nothing there, or a file its notes brought there.
+                let removed = !was[other].kept.contains_key(from)
+                    && (!was[other].files.contains_key(from)
+                        || went[other - 1].arrived.contains_key(from));
+                let free = room(was[other], dest);
+                if removed {
+                    trees[0].files.remove(from);
+                    if free {
+                        let row = format!(
+                            "{dest}: moved here from {from} on {}, removed on {}",
+                            line(k),
+                            line(other)
+                        );
+                        let terms = [file_at(1, dest), start_file.clone(), file_at(2, dest)];
+                        landed.push((dest.clone(), row, terms));
+                    }
+                } else if free && was[other].files.contains_key(from) {
+                    // Followed: the other line's version goes where the file went.
+                    relocate(&mut trees[0], from, dest);
+                    relocate(&mut trees[other], from, dest);
+                }
+                // Anything else is merged where it is: the start's file at its old place
+                // against each line's, and what each line holds where it went.
+                if !free {
+                    onto.insert(dest.clone(), onto_row(dest, from, k));
                 }
             }
-            (None, None) => unreachable!(),
+            [None, None] => unreachable!(),
         }
     }
-    // Where a side's notes show another file arriving at a start file's place, the start's file
-    // is gone on that side, unless both sides hold the same there; against the other side's
-    // change to it, the file that came always clashes, named a move onto it.
-    let arrived: BTreeSet<&String> = went[0]
-        .replaced
-        .keys()
-        .chain(went[1].replaced.keys())
+    // A file a line's notes brought to a start file's place: the start's file is gone on that
+    // line. Where the other line changed it, the two clash as one moved onto something else,
+    // the start's file in the middle; else the file that came is taken.
+    let mut arrived: BTreeMap<String, (String, [Option<Part>; 3])> = BTreeMap::new();
+    let places: BTreeSet<&String> = (went[0].arrived.keys())
+        .chain(went[1].arrived.keys())
         .collect();
-    for at in arrived {
+    for at in places {
         let Some(start_file) = was[0].files.get(at) else {
             continue;
         };
-        if moved.contains(&at) || was[1].files.get(at) == was[2].files.get(at) {
+        if moved.contains(at) || alike(was[1], was[2], at) {
             continue;
         }
-        let came = [0, 1].map(|k| went[k].replaced.get(at));
+        let came = [went[0].arrived.get(at), went[1].arrived.get(at)];
         let (k, from) = match came {
             [Some(from), None] => (1, from),
             [None, Some(from)] => (2, from),
@@ -2514,19 +3091,20 @@ fn merge(m: &Model, start: &Ver, ours: &Ver, theirs: &Ver) -> Merge {
                 continue;
             }
         };
-        match was[3 - k].files.get(at) {
-            None => drop(trees[0].files.remove(at)),
-            Some(f) if f == start_file => {}
-            Some(_) => {
-                conflicts.insert(at.clone());
-                rows.insert(at.clone(), onto_row(at, from, k));
-                for t in &mut trees {
-                    t.files.remove(at);
-                }
+        match self::at(was[3 - k], at) {
+            At::Nothing => drop(trees[0].files.remove(at)),
+            At::File(f) if f != start_file => {
+                let terms = [
+                    file_at(1, at),
+                    Some(Part::File(start_file.clone())),
+                    file_at(2, at),
+                ];
+                arrived.insert(at.clone(), (onto_row(at, from, k), terms));
             }
+            _ => {}
         }
     }
-    // A folder the moves or a conflict left empty is no version's own.
+    // A folder the moves left empty is no version's own.
     for (tree, before) in trees.iter_mut().zip(was) {
         loop {
             let emptied: Vec<String> = (tree.folders.iter())
@@ -2544,51 +3122,72 @@ fn merge(m: &Model, start: &Ver, ours: &Ver, theirs: &Ver) -> Merge {
     let [s, o, t] = &trees;
     let mut paths = PathMerge {
         three: [s, o, t],
-        unsure: &start.unsure,
+        unsure: start.unsure.clone(),
         ours_unsure: &ours.unsure,
         out: Tree::default(),
-        conflicts,
-        unsure_clashes: Vec::new(),
+        made: BTreeMap::new(),
+        clashes: BTreeSet::new(),
         merged: Vec::new(),
+        sides,
+        inner,
+        arrived: &arrived,
+        stop: None,
     };
     for c in paths.children("") {
         paths.merge_at(&c);
     }
-    for at in &paths.unsure_clashes {
-        let row = format!(
-            "{at}: changed on both lines, and Opalro can't tell what it held where they parted"
-        );
-        rows.insert(at.clone(), row);
+    if let Some(stop) = paths.stop {
+        return Err(stop);
     }
-    // Two files added where a file went, which the path merge found clashing.
+    // Where a moved file met something the other line put there, the two added things clash
+    // under the move's row.
     for (at, row) in onto {
-        let added = |t: &Tree| t.files.contains_key(at);
-        let two = !s.files.contains_key(at) && !s.folders.contains(at) && added(o) && added(t);
-        // A place the start is unsure of keeps its own row.
-        if two && paths.conflicts.contains(at) && !paths.unsure_clashes.contains(at) {
-            rows.insert(at.clone(), row);
+        let both_added = |(r, _): &(String, Option<Stands>)| clash_kind(r) == "added on both";
+        if paths.made.get(&at).is_some_and(both_added) {
+            paths.made.get_mut(&at).unwrap().0 = row;
         }
     }
-    for (at, row) in landed {
+    for (at, row, terms) in landed {
+        // A place below another conflict's is held by it, and a place met twice keeps its first.
         let mut up = at.as_str();
-        let mut plain = paths.out.files.contains_key(at);
+        let mut plain = paths.out.files.contains_key(&at) && !paths.made.contains_key(&at);
         while let Some((above, _)) = up.rsplit_once('/') {
-            plain &= paths.out.folders.contains(above);
+            plain &= paths.out.folders.contains(above) && !paths.out.kept.contains_key(above);
             up = above;
         }
-        if plain {
-            paths.conflicts.insert(at.clone());
-            // Two rows for one place: the first is the one named.
-            rows.entry(at.clone()).or_insert(row);
+        if !plain {
+            continue;
         }
+        if inner {
+            paths.out.remove(&at);
+            paths.clashes.insert(at);
+            continue;
+        }
+        let stands = paths.sides.map(|_| {
+            if terms[0].is_some() {
+                Stands::Yours
+            } else {
+                Stands::Nothing
+            }
+        });
+        if paths.sides.is_some() {
+            let own = None;
+            paths.out.keep(&at, Kept { terms, own });
+        } else {
+            paths.out.remove(&at);
+        }
+        paths.made.insert(at, (row, stands));
     }
     paths.merged.sort();
-    Merge {
+    let made = (paths.made.into_iter())
+        .map(|(p, (row, stands))| (p, row, stands))
+        .collect();
+    Ok(Merge {
         tree: paths.out,
         merged: paths.merged,
-        conflicts: paths.conflicts,
-        rows,
-    }
+        made,
+        unsure: paths.clashes,
+    })
 }
 
 /// What a tree holds at one path.
@@ -2597,9 +3196,13 @@ enum At<'a> {
     Nothing,
     File(&'a File),
     Folder,
+    Kept(&'a Kept),
 }
 
 fn at<'a>(tree: &'a Tree, path: &str) -> At<'a> {
+    if let Some(k) = tree.kept.get(path) {
+        return At::Kept(k);
+    }
     match tree.files.get(path) {
         Some(f) => At::File(f),
         None if tree.folders.contains(path) => At::Folder,
@@ -2607,18 +3210,36 @@ fn at<'a>(tree: &'a Tree, path: &str) -> At<'a> {
     }
 }
 
+/// What `tree` holds at `path` as one version a conflict can hold.
+fn part_at(tree: &Tree, path: &str) -> Option<Part> {
+    match at(tree, path) {
+        At::File(f) => Some(Part::File(f.clone())),
+        At::Folder => Some(Part::Folder(tree.below(path))),
+        At::Nothing => None,
+        At::Kept(_) => panic!("a conflict at {path} isn't one version"),
+    }
+}
+
 /// Whether nothing is below the folder `path` in `tree`.
 fn holds_nothing(tree: &Tree, path: &str) -> bool {
     let below = |p: &&String| within(p, path) && *p != path;
-    !tree.files.keys().any(|p| below(&p)) && !tree.folders.iter().any(|p| below(&p))
+    !tree.files.keys().any(|p| below(&p))
+        && !tree.folders.iter().any(|p| below(&p))
+        && !tree.kept.keys().any(|p| below(&p))
 }
 
-/// Whether two trees hold the same at `path` and below it.
+/// Whether two trees hold the same at `path` and below it, conflicts as stored.
 fn alike(a: &Tree, b: &Tree, path: &str) -> bool {
-    fn below<'t>(t: &'t Tree, path: &str) -> (Vec<(&'t String, &'t File)>, Vec<&'t String>) {
+    type Below<'t> = (
+        Vec<(&'t String, &'t File)>,
+        Vec<&'t String>,
+        Vec<(&'t String, &'t Kept)>,
+    );
+    fn below<'t>(t: &'t Tree, path: &str) -> Below<'t> {
         let files = t.files.iter().filter(|(p, _)| within(p, path)).collect();
         let folders = t.folders.iter().filter(|p| within(p, path)).collect();
-        (files, folders)
+        let kept = t.kept.iter().filter(|(p, _)| within(p, path)).collect();
+        (files, folders, kept)
     }
     below(a, path) == below(b, path)
 }
@@ -2626,15 +3247,21 @@ fn alike(a: &Tree, b: &Tree, path: &str) -> bool {
 /// The merge of the start, ours and theirs, path by path, after the moves.
 struct PathMerge<'a> {
     three: [&'a Tree; 3],
-    /// Where the start knows nothing.
-    unsure: &'a BTreeSet<String>,
+    /// Where the start knows nothing; a start in conflict that each line made a folder of is
+    /// added as it is met.
+    unsure: BTreeSet<String>,
     /// Where ours, made up from starting points, is unsure: nothing there is decided.
     ours_unsure: &'a BTreeSet<String>,
     out: Tree,
-    conflicts: BTreeSet<String>,
-    /// The conflicts at places the start is unsure of, at them or inside them.
-    unsure_clashes: Vec<String>,
+    made: BTreeMap<String, (String, Option<Stands>)>,
+    /// An inner merge's places that clash.
+    clashes: BTreeSet<String>,
     merged: Vec<String>,
+    sides: Option<&'a Sides>,
+    inner: bool,
+    /// Places where a file arrived and the other line changed the file that was there.
+    arrived: &'a BTreeMap<String, (String, [Option<Part>; 3])>,
+    stop: Option<Stopped>,
 }
 
 impl PathMerge<'_> {
@@ -2642,7 +3269,7 @@ impl PathMerge<'_> {
     fn children(&self, path: &str) -> BTreeSet<String> {
         let mut names = BTreeSet::new();
         for t in self.three {
-            for p in t.files.keys().chain(&t.folders) {
+            for p in t.files.keys().chain(&t.folders).chain(t.kept.keys()) {
                 let rest = if path.is_empty() {
                     Some(p.as_str())
                 } else {
@@ -2662,15 +3289,29 @@ impl PathMerge<'_> {
     }
 
     fn merge_at(&mut self, path: &str) {
+        if self.stop.is_some() {
+            return;
+        }
         let [s, o, t] = self.three;
-        // Where the start is unsure, at the path or inside it, nothing counts as unchanged: the
-        // two sides alike are the result; two folders, or a folder against nothing when only
-        // something inside is unsure, are merged inside; anything else conflicts.
         if unsure_at(self.ours_unsure, path) {
             return;
         }
-        let here = unsure_at(self.unsure, path);
-        if here || unsure_inside(self.unsure, path) || unsure_inside(self.ours_unsure, path) {
+        if let Some((row, terms)) = self.arrived.get(path) {
+            return self.arrival(path, row.clone(), terms.clone());
+        }
+        // A place in conflict where the lines parted, that each line made a folder of: what was
+        // there is unknown, and everything below.
+        if matches!(at(s, path), At::Kept(_))
+            && at(o, path) == At::Folder
+            && at(t, path) == At::Folder
+        {
+            self.unsure.insert(path.to_owned());
+        }
+        // Where the start is unsure, at the path or inside it, nothing counts as unchanged: the
+        // two sides alike are the result; two folders, or a folder against nothing when only
+        // something inside is unsure, are merged inside; anything else conflicts.
+        let here = unsure_at(&self.unsure, path);
+        if here || unsure_inside(&self.unsure, path) || unsure_inside(self.ours_unsure, path) {
             if alike(o, t, path) {
                 return self.out.take(path, o);
             }
@@ -2680,18 +3321,9 @@ impl PathMerge<'_> {
                 _ => false,
             };
             if !inside {
-                self.conflicts.insert(path.to_owned());
-                self.unsure_clashes.push(path.to_owned());
-                return;
+                return self.decide(path, true);
             }
-            for c in self.children(path) {
-                self.merge_at(&c);
-            }
-            let both = at(o, path) == At::Folder && at(t, path) == At::Folder;
-            if both && (holds_nothing(o, path) || holds_nothing(t, path)) {
-                self.out.add_folder(path);
-            }
-            return;
+            return self.inside(path);
         }
         // Equal sides are the result; else the side that changed it.
         if alike(o, t, path) || alike(s, t, path) {
@@ -2701,25 +3333,166 @@ impl PathMerge<'_> {
             return self.out.take(path, t);
         }
         match (at(s, path), at(o, path), at(t, path)) {
-            // Two folders, or a folder against its removal, merge inside: what is left there keeps
-            // the folder. Left with nothing, two folders stay when a side holds its own empty;
-            // else the folder is gone.
+            // Two folders, or a folder against its removal, merge inside.
             (_, At::Folder, At::Folder)
             | (At::Folder, At::Folder, At::Nothing)
-            | (At::Folder, At::Nothing, At::Folder) => {
-                for c in self.children(path) {
-                    self.merge_at(&c);
-                }
-                let both = at(o, path) == At::Folder && at(t, path) == At::Folder;
-                if both && (holds_nothing(o, path) || holds_nothing(t, path)) {
-                    self.out.add_folder(path);
-                }
+            | (At::Folder, At::Nothing, At::Folder) => self.inside(path),
+            _ => self.decide(path, false),
+        }
+    }
+
+    /// Merges what is inside the folder `path`: what is left there keeps the folder. Left with
+    /// nothing, two folders stay when a side holds its own empty; else the folder is gone.
+    fn inside(&mut self, path: &str) {
+        let [_, o, t] = self.three;
+        for c in self.children(path) {
+            self.merge_at(&c);
+        }
+        let both = at(o, path) == At::Folder && at(t, path) == At::Folder;
+        if both && (holds_nothing(o, path) || holds_nothing(t, path)) {
+            self.out.add_folder(path);
+        }
+    }
+
+    /// A place both lines changed, in ways that aren't both folders; `unknown`: where the lines
+    /// parted can't tell what it held.
+    fn decide(&mut self, path: &str, unknown: bool) {
+        let [s, o, t] = self.three.map(|tree| at(tree, path));
+        // A conflict is never made inside another: the line holding it fixes it first.
+        let on = match (matches!(o, At::Kept(_)), matches!(t, At::Kept(_))) {
+            _ if self.inner => None,
+            (true, true) => Some(Held::Both),
+            (true, false) => Some(Held::Ours),
+            (false, true) => Some(Held::Theirs),
+            (false, false) => None,
+        };
+        if let Some(on) = on {
+            let (path, at) = (path.to_owned(), path.to_owned());
+            self.stop = Some(Stopped::Held { path, at, on });
+            return;
+        }
+        // Starting points' own combine only learns that they clash here.
+        if self.inner && [&s, &o, &t].iter().any(|a| matches!(a, At::Kept(_))) {
+            self.clashes.insert(path.to_owned());
+            return;
+        }
+        let both = "changed on both lines";
+        // Where the lines parted it was in conflict, and each changed it since: unknown too.
+        if unknown || matches!(s, At::Kept(_)) {
+            if !unknown && self.sides.is_none() && !self.inner {
+                met("a start in conflict, asked for a clean line");
             }
-            (At::File(s), At::File(o), At::File(t)) => self.file(path, s, o, t),
-            _ => {
-                self.conflicts.insert(path.to_owned());
+            let row =
+                format!("{path}: {both}, and Opalro can't tell what it held where they parted");
+            return self.no_start(path, row, Middle::Unknown);
+        }
+        let [ps, po, pt] = self.three.map(|tree| part_at(tree, path));
+        let row = match (&s, &o, &t) {
+            (_, At::Folder, At::File(_)) => format!("{path}: a file on T, a folder on O"),
+            (_, At::File(_), At::Folder) => format!("{path}: a file on O, a folder on T"),
+            (_, _, At::Nothing) => format!("{path}: changed on O, removed on T"),
+            (_, At::Nothing, _) => format!("{path}: changed on T, removed on O"),
+            (At::Nothing, _, _) => {
+                let row = format!("{path}: added on both lines, differently");
+                return self.no_start(path, row, Middle::Nothing);
+            }
+            (At::File(s), At::File(o), At::File(t)) => {
+                let (s, o, t) = ((*s).clone(), (*o).clone(), (*t).clone());
+                return self.file(path, &s, &o, &t);
+            }
+            _ => format!("{path}: {both}, and only files are merged line by line"),
+        };
+        self.clashed(path, row, [po, ps, pt]);
+    }
+
+    /// A clash kept standing as yours, or nothing; named only where conflicts aren't kept.
+    fn clashed(&mut self, path: &str, row: String, terms: [Option<Part>; 3]) {
+        if self.inner {
+            self.clashes.insert(path.to_owned());
+            return;
+        }
+        let Some(_) = self.sides else {
+            self.made.insert(path.to_owned(), (row, None));
+            return;
+        };
+        // A folder kept whole as yours or theirs may hold no conflict of its own.
+        for (k, on) in [(0, Held::Ours), (2, Held::Theirs)] {
+            if let Some(Part::Folder(f)) = &terms[k]
+                && let Some(below) = f.kept.keys().next()
+            {
+                let (path, at) = (path.to_owned(), format!("{path}/{below}"));
+                self.stop = Some(Stopped::Held { path, at, on });
+                return;
             }
         }
+        let stands = if terms[0].is_some() {
+            Stands::Yours
+        } else {
+            Stands::Nothing
+        };
+        self.out.keep(path, Kept { terms, own: None });
+        self.made.insert(path.to_owned(), (row, Some(stands)));
+    }
+
+    /// Kept with `own`, a text marked with `marker`-long markers at `places` places.
+    fn marked_at(
+        &mut self,
+        path: &str,
+        row: String,
+        terms: [Option<Part>; 3],
+        own: (File, u8, u64),
+    ) {
+        let (file, marker, places) = own;
+        let own = Some((Some(Part::File(file)), marker));
+        self.out.keep(path, Kept { terms, own });
+        let stands = Some(Stands::Markers { places });
+        self.made.insert(path.to_owned(), (row, stands));
+    }
+
+    /// Two versions with nothing known between them (added on both lines, or unknown): two texts
+    /// are marked as one place; anything else stands as yours.
+    fn no_start(&mut self, path: &str, row: String, middle: Middle) {
+        let [_, o, t] = self.three;
+        let terms = [part_at(o, path), None, part_at(t, path)];
+        if let (Some(sides), [Some(Part::File(o)), _, Some(Part::File(t))]) = (self.sides, &terms)
+            && let Some((bytes, marker, places)) =
+                marked(b"", &o.bytes, &t.bytes, &sides.labels(middle), false)
+        {
+            let file = File {
+                bytes: bytes.into(),
+                exec: o.exec,
+            };
+            return self.marked_at(path, row, terms.clone(), (file, marker, places));
+        }
+        self.clashed(path, row, terms);
+    }
+
+    /// A file arrived where the other line changed the file that was there: both are shown whole.
+    fn arrival(&mut self, path: &str, row: String, terms: [Option<Part>; 3]) {
+        if let (
+            Some(sides),
+            [
+                Some(Part::File(o)),
+                Some(Part::File(s)),
+                Some(Part::File(t)),
+            ],
+        ) = (self.sides, &terms)
+            && let Some((bytes, marker, places)) = marked(
+                &s.bytes,
+                &o.bytes,
+                &t.bytes,
+                &sides.labels(Middle::Parted),
+                true,
+            )
+        {
+            let exec = if o.exec == s.exec { t.exec } else { o.exec };
+            let file = File {
+                bytes: bytes.into(),
+                exec,
+            };
+            return self.marked_at(path, row, terms.clone(), (file, marker, places));
+        }
+        self.clashed(path, row, terms);
     }
 
     /// Two files both sides changed: the executable mark and the contents merged apart.
@@ -2733,10 +3506,40 @@ impl PathMerge<'_> {
             self.merged.push(path.to_owned());
             merged.into()
         } else {
-            self.conflicts.insert(path.to_owned());
-            return;
+            let terms = [o, s, t].map(|f| Some(Part::File(f.clone())));
+            let labels = self.sides.map(|sides| sides.labels(Middle::Parted));
+            if let Some(labels) = labels
+                && !self.inner
+                && let Some((bytes, marker, places)) =
+                    marked(&s.bytes, &o.bytes, &t.bytes, &labels, false)
+            {
+                let row = format!("{path}: changed on both lines, in the same place");
+                let file = File {
+                    bytes: bytes.into(),
+                    exec,
+                };
+                return self.marked_at(path, row, terms, (file, marker, places));
+            }
+            let row = format!("{path}: {}", not_merged([s, o, t].map(|f| &*f.bytes)));
+            return self.clashed(path, row, terms);
         };
         self.out.put(path, File { bytes, exec });
+    }
+}
+
+/// Why three versions of a file both lines changed aren't merged, as a row says it.
+fn not_merged(texts: [&[u8]; 3]) -> String {
+    let both = "changed on both lines";
+    if texts.iter().any(|t| t.len() > 64 << 20) {
+        format!("{both}, and is over 64 MiB, too big to merge line by line")
+    } else if texts.iter().any(|t| t[..t.len().min(8000)].contains(&0)) {
+        format!("{both}, and isn't text, so it can't be merged line by line")
+    } else if texts.iter().any(|t| lines_of(t).len() > 1_000_000) {
+        format!("{both}, and has over 1,000,000 lines, too many to merge line by line")
+    } else if endings_only(texts[1], texts[2]) {
+        format!("{both}, in the same place; the two differ only in line endings")
+    } else {
+        format!("{both}, in the same place")
     }
 }
 
@@ -2749,6 +3552,18 @@ fn text_lines(bytes: &[u8]) -> Option<Vec<&[u8]>> {
         return None;
     }
     Some(lines_of(bytes)).filter(|l| l.len() <= 1_000_000)
+}
+
+/// Whether two texts differ, and only in some lines ending `\r\n` on one and `\n` on the other.
+fn endings_only(a: &[u8], b: &[u8]) -> bool {
+    let plain = |l: &[u8]| -> Vec<u8> {
+        match l.strip_suffix(b"\r\n") {
+            Some(rest) => [rest, b"\n"].concat(),
+            None => l.to_vec(),
+        }
+    };
+    let (a, b) = (lines_of(a), lines_of(b));
+    a != b && a.len() == b.len() && a.iter().zip(&b).all(|(x, y)| plain(x) == plain(y))
 }
 
 /// A stretch of the start, `lo..hi` in lines, that one side changed to `lines`.
@@ -2801,16 +3616,21 @@ fn hunks<'a>(a: &[&[u8]], b: &[&'a [u8]], side: usize) -> Vec<Hunk<'a>> {
     out
 }
 
-/// The text merge: stretches the two sides changed that overlap or touch are one region, settled
-/// when only one side changed it or both wrote the same lines; `None` if any isn't.
-fn merge_text(start: &[u8], ours: &[u8], theirs: &[u8]) -> Option<Vec<u8>> {
-    let s = text_lines(start)?;
-    let (o, t) = (text_lines(ours)?, text_lines(theirs)?);
-    let mut all = hunks(&s, &o, 0);
-    all.extend(hunks(&s, &t, 1));
+/// A stretch of the start, `lo..hi` in lines, that a side or both changed: what each side made
+/// of it, `None` for a side that left it alone.
+struct Region<'a> {
+    lo: usize,
+    hi: usize,
+    made: [Option<Vec<&'a [u8]>>; 2],
+}
+
+/// The text merge's regions: stretches the two sides changed that overlap or touch are one.
+fn regions<'a>(s: &[&'a [u8]], o: &[&'a [u8]], t: &[&'a [u8]]) -> Vec<Region<'a>> {
+    let mut all = hunks(s, o, 0);
+    all.extend(hunks(s, t, 1));
     all.sort_by_key(|h| (h.lo, h.hi));
-    let mut out: Vec<&[u8]> = Vec::new();
-    let (mut done, mut k) = (0, 0);
+    let mut out = Vec::new();
+    let mut k = 0;
     while k < all.len() {
         let (lo, mut hi, mut end) = (all[k].lo, all[k].hi, k + 1);
         while end < all.len() && all[end].lo <= hi {
@@ -2830,17 +3650,460 @@ fn merge_text(start: &[u8], ours: &[u8], theirs: &[u8]) -> Option<Vec<u8>> {
             lines.extend(&s[at..hi]);
             region.iter().any(|h| h.side == side).then_some(lines)
         };
-        let lines = match (made(0), made(1)) {
-            (Some(a), Some(b)) if a != b => return None,
-            (Some(a), _) | (None, Some(a)) => a,
-            (None, None) => unreachable!(),
+        out.push(Region {
+            lo,
+            hi,
+            made: [made(0), made(1)],
+        });
+        k = end;
+    }
+    out
+}
+
+/// The text merge: settled when in each region only one side changed it or both wrote the same
+/// lines; `None` if any isn't.
+fn merge_text(start: &[u8], ours: &[u8], theirs: &[u8]) -> Option<Vec<u8>> {
+    let s = text_lines(start)?;
+    let (o, t) = (text_lines(ours)?, text_lines(theirs)?);
+    let mut out: Vec<&[u8]> = Vec::new();
+    let mut done = 0;
+    for r in regions(&s, &o, &t) {
+        let lines = match r.made {
+            [Some(a), Some(b)] if a != b => return None,
+            [Some(a), _] | [None, Some(a)] => a,
+            [None, None] => unreachable!(),
         };
-        out.extend(&s[done..lo]);
+        out.extend(&s[done..r.lo]);
         out.extend(lines);
-        (done, k) = (hi, end);
+        done = r.hi;
     }
     out.extend(&s[done..]);
     Some(out.concat())
+}
+
+/// How a line ends where a text's first line break is, if it has one.
+fn first_ending(text: &[u8]) -> Option<&'static [u8]> {
+    let at = text.iter().position(|&b| b == b'\n')?;
+    Some(if at > 0 && text[at - 1] == b'\r' {
+        b"\r\n"
+    } else {
+        b"\n"
+    })
+}
+
+/// The marker length for three versions: 7, or one more than the longest run of `<`, `|`, `=`
+/// or `>` that starts a line in any of them; `None` past 255.
+fn marker_length(texts: [&[u8]; 3]) -> Option<u8> {
+    let run = |line: &[u8]| {
+        let c = *line.first()?;
+        b"<|=>"
+            .contains(&c)
+            .then(|| line.iter().take_while(|&&b| b == c).count())
+    };
+    let longest = (texts.iter())
+        .flat_map(|t| t.split(|&b| b == b'\n'))
+        .filter_map(run)
+        .max()
+        .unwrap_or(0);
+    u8::try_from((longest + 1).max(7)).ok()
+}
+
+/// The text the person sees for a conflict shown with markers: each region the two sides changed
+/// differently (with `whole`, all of each side, as one) written between marker lines labelled
+/// `labels`. `None` when it isn't shown with markers: a version isn't text, the two differ only
+/// in line endings, the markers would pass 255, the text 64 MiB, or nothing clashes.
+fn marked(
+    base: &[u8],
+    ours: &[u8],
+    theirs: &[u8],
+    labels: &[String; 3],
+    whole: bool,
+) -> Option<(Vec<u8>, u8, u64)> {
+    let (s, o, t) = (text_lines(base)?, text_lines(ours)?, text_lines(theirs)?);
+    if endings_only(ours, theirs) {
+        return None;
+    }
+    let len = usize::from(marker_length([base, ours, theirs])?);
+    let end = (first_ending(ours).or_else(|| first_ending(theirs)))
+        .or_else(|| first_ending(base))
+        .unwrap_or(b"\n");
+    let all = if whole {
+        let made = [Some(o.clone()), Some(t.clone())];
+        vec![Region {
+            lo: 0,
+            hi: s.len(),
+            made,
+        }]
+    } else {
+        regions(&s, &o, &t)
+    };
+    let mut out: Vec<u8> = Vec::new();
+    let line = |out: &mut Vec<u8>, c: u8, label: Option<&str>| {
+        out.extend(std::iter::repeat_n(c, len));
+        if let Some(label) = label {
+            out.push(b' ');
+            out.extend(label.as_bytes());
+        }
+        out.extend(end);
+    };
+    let part = |out: &mut Vec<u8>, lines: &[&[u8]]| {
+        out.extend(lines.concat());
+        if lines.last().is_some_and(|l| !l.ends_with(b"\n")) {
+            out.extend(end);
+        }
+    };
+    let (mut done, mut places) = (0, 0);
+    for r in all {
+        out.extend(s[done..r.lo].concat());
+        match r.made {
+            [Some(a), Some(b)] if a != b => {
+                line(&mut out, b'<', Some(&labels[0]));
+                part(&mut out, &a);
+                line(&mut out, b'|', Some(&labels[1]));
+                part(&mut out, &s[r.lo..r.hi]);
+                line(&mut out, b'=', None);
+                part(&mut out, &b);
+                line(&mut out, b'>', Some(&labels[2]));
+                places += 1;
+            }
+            [Some(a), _] | [None, Some(a)] => out.extend(a.concat()),
+            [None, None] => unreachable!(),
+        }
+        done = r.hi;
+    }
+    out.extend(s[done..].concat());
+    (places > 0 && out.len() <= 64 << 20).then_some((out, len as u8, places))
+}
+
+/// Whether `line`, with its ending, is a marker line of `len` `c`s: exactly that many at its
+/// start, then a space or the line's end.
+fn is_marker(line: &[u8], c: u8, len: u8) -> bool {
+    let len = usize::from(len);
+    line.len() >= len
+        && line[..len].iter().all(|&b| b == c)
+        && matches!(&line[len..], [] | [b' ', ..] | b"\n" | b"\r\n")
+}
+
+/// How many opening and closing marker lines of `len` a text holds.
+fn marker_lines(bytes: &[u8], len: u8) -> (u64, u64) {
+    let lines = lines_of(bytes);
+    let count = |c| lines.iter().filter(|l| is_marker(l, c, len)).count() as u64;
+    (count(b'<'), count(b'>'))
+}
+
+/// How a place in conflict stands, the folder holding `now` there: as it was left, with markers
+/// left or none, as yours, or changed in place.
+fn standing_of(k: &Kept, now: Option<&Part>) -> Standing {
+    let marker = k.marker();
+    let left = |now: Option<&Part>| match now {
+        Some(Part::File(f)) => match marker_lines(&f.bytes, marker) {
+            (0, 0) => None,
+            (opening, _) => Some(opening),
+        },
+        _ => None,
+    };
+    if now == k.stands() {
+        return match (marker, &k.own, &k.terms[0]) {
+            (1.., _, _) => left(now).map_or(Standing::Fixed, |left| Standing::Marked { left }),
+            (0, Some(_), _) => Standing::ChangedInPlace,
+            (0, None, None) => Standing::NotInFolder,
+            (0, None, Some(_)) => Standing::Yours,
+        };
+    }
+    if marker == 0 {
+        return Standing::ChangedInPlace;
+    }
+    left(now).map_or(Standing::Fixed, |left| Standing::Marked { left })
+}
+
+/// What `status` lists as in conflict: every place the save the project is on holds in
+/// conflict, with how it stands in the folder.
+fn conflicts_listed(m: &Model) -> Vec<(String, Standing)> {
+    (m.kept().iter())
+        .map(|(p, k)| (p.clone(), standing_of(k, part_at(&m.folder, p).as_ref())))
+        .collect()
+}
+
+/// `resolve`, at `given` (a place, or `""` for the whole project), or without one at every
+/// place the folder shows fixed; `yes` answers whether to record a file with markers left.
+fn resolve_at(
+    repo: &mut Repository,
+    m: &mut Model,
+    given: Option<String>,
+    how: ResolveHow,
+    yes: bool,
+) {
+    let who = who();
+    let paths: Option<Vec<Given>> = given.clone().map(|p| vec![Given::Path(p)]);
+    let keep = match how {
+        ResolveHow::KeepMine => Some(resolve::Side::Mine),
+        ResolveHow::KeepTheirs => Some(resolve::Side::Theirs),
+        _ => None,
+    };
+    let req = ResolveRequest {
+        paths: paths.as_deref(),
+        keep,
+        who: &who,
+        command: "resolve",
+        accept_crlf: false,
+        git_excludes: None,
+    };
+    let mut asked = Vec::new();
+    let done = resolve::resolve(repo, &req, &mut |_| {}, &mut |ask| match ask {
+        resolve::Ask::MarkersLeft { path, left } => {
+            asked.push((path.to_string(), *left));
+            yes
+        }
+        resolve::Ask::Large(_) => true,
+    });
+    let refused = |done: &Result<ResolveOutcome, ResolveError>, want: &str| {
+        let got = match done {
+            Ok(_) => "recorded",
+            Err(ResolveError::NotOnALine) => "not on a line",
+            Err(ResolveError::NotInConflict { .. }) => "not in conflict",
+            Err(ResolveError::StillYours { .. }) => "still yours",
+            Err(ResolveError::MarkersLeft { .. }) => "markers left",
+            Err(_) => "another error",
+        };
+        assert_eq!(got, want, "{done:?}");
+    };
+    let Some(line) = m.state.line.clone() else {
+        refused(&done, "not on a line");
+        return drop(settle(repo, m, Vec::new()));
+    };
+    let on = m.state.on;
+    if m.kept().is_empty() {
+        let done = done.unwrap();
+        assert!(
+            matches!(done, ResolveOutcome::NoConflicts { save_id } if save_id == m.saves[on].id),
+            "{done:?}"
+        );
+        return drop(settle(repo, m, Vec::new()));
+    }
+    let listed = conflicts_listed(m);
+    // The places named, or those the folder shows fixed.
+    let chosen: Vec<&(String, Standing)> = match &given {
+        None => listed
+            .iter()
+            .filter(|(_, s)| *s == Standing::Fixed)
+            .collect(),
+        Some(top) => listed
+            .iter()
+            .filter(|(p, _)| top.is_empty() || within(p, top))
+            .collect(),
+    };
+    if given.is_some() && chosen.is_empty() {
+        refused(&done, "not in conflict");
+        return drop(settle(repo, m, Vec::new()));
+    }
+    if keep.is_none() {
+        // Without a side named, only what the folder shows decides: a version standing as the
+        // combine left it is refused, and markers left are asked about, one place at a time.
+        let still = |s: &Standing| matches!(s, Standing::Yours | Standing::NotInFolder);
+        if chosen.iter().any(|(_, s)| still(s)) {
+            refused(&done, "still yours");
+            met("resolve refused: still yours");
+            return drop(settle(repo, m, Vec::new()));
+        }
+        let marked: Vec<(String, u64)> = (chosen.iter())
+            .filter_map(|(p, s)| match s {
+                Standing::Marked { left } => Some((p.clone(), *left)),
+                _ => None,
+            })
+            .collect();
+        let want_asked = if yes {
+            &marked[..]
+        } else {
+            &marked[..marked.len().min(1)]
+        };
+        assert_eq!(asked, want_asked, "what resolve asked");
+        if !yes && !marked.is_empty() {
+            refused(&done, "markers left");
+            return drop(settle(repo, m, Vec::new()));
+        }
+    }
+    let places: Vec<String> = chosen.iter().map(|(p, _)| p.clone()).collect();
+    let left_count = (listed.len() - places.len()) as u64;
+    let done = done.unwrap();
+    if places.is_empty() {
+        let ResolveOutcome::Nothing {
+            left_count: got, ..
+        } = done
+        else {
+            panic!("the model records nothing, the engine {done:?}");
+        };
+        assert_eq!(got, left_count);
+        return drop(settle(repo, m, Vec::new()));
+    }
+    let ResolveOutcome::Recorded {
+        save_id,
+        replaced,
+        recorded,
+        left_count: got_left,
+        ..
+    } = done
+    else {
+        panic!("the model records {places:?}, the engine {done:?}");
+    };
+    assert_eq!((&recorded, got_left), (&places, left_count));
+    // Into the combined save where nothing else shows it, else a save of its own on top.
+    let amend = !m.saves[on].others.is_empty() && !shown_elsewhere(m, &line, on);
+    assert_eq!(
+        replaced,
+        amend.then_some(m.saves[on].id),
+        "what resolve replaced"
+    );
+    let mut stored = m.saves[on].stored.clone();
+    let mut folder = m.folder.clone();
+    for p in &places {
+        let k = &m.kept()[p];
+        match keep {
+            Some(side) => {
+                let t = if side == resolve::Side::Mine { 0 } else { 2 };
+                stored.place(p, k.terms[t].as_ref());
+                folder.place(p, k.terms[t].as_ref());
+            }
+            None => stored.place(p, part_at(&m.folder, p).as_ref()),
+        }
+    }
+    assert_eq!(
+        saved_tree(repo.store(), save_id),
+        stored,
+        "what resolve saved"
+    );
+    let (parent, others, change, message) = if amend {
+        let s = &m.saves[on];
+        (s.parent, s.others.clone(), s.change, s.message.clone())
+    } else {
+        let message = match &places[..] {
+            [one] => format!("Fixed conflicts in {one}"),
+            many => format!("Fixed conflicts in {} places", many.len()),
+        };
+        (Some(on), Vec::new(), m.saves.len(), message)
+    };
+    met(if keep.is_some() {
+        "resolve kept a side"
+    } else {
+        "resolve recorded the folder"
+    });
+    if amend {
+        met("resolve replaced the combined save");
+    }
+    let was = m.state.clone();
+    m.saves.push(Saved {
+        id: save_id,
+        tree: stored.standing(),
+        stored,
+        parent,
+        others,
+        change,
+        message,
+        shelf: false,
+    });
+    m.state.on = m.saves.len() - 1;
+    m.state.lines.insert(line, m.state.on);
+    let held = std::mem::replace(&mut m.folder, folder);
+    stepped(repo, m, "resolve", was, held);
+}
+
+/// Writes a file shown with markers, that still has them, with each marked place made into
+/// your lines then theirs; one place is left as it is when `pick` says so.
+fn fix_file(m: &mut Model, root: &Path, pick: usize) -> Option<String> {
+    let marked: Vec<(String, u8)> = (m.kept().iter())
+        .filter(|(_, k)| k.marker() > 0)
+        .filter_map(|(p, k)| match m.folder.files.get(p) {
+            Some(f) if marker_lines(&f.bytes, k.marker()).0 > 0 => Some((p.clone(), k.marker())),
+            _ => None,
+        })
+        .collect();
+    let (path, len) = marked.get(pick % marked.len().max(1))?.clone();
+    let was = m.folder.files[&path].bytes.clone();
+    let mut leave = usize::from((pick / 3).is_multiple_of(2) && marker_lines(&was, len).0 > 1);
+    let mut out: Vec<u8> = Vec::new();
+    // 0 outside a marked place; 1 in yours, 2 where they parted, 3 in theirs.
+    let (mut part, mut kept): (u8, Vec<u8>) = (0, Vec::new());
+    let mut held: Vec<u8> = Vec::new();
+    for l in lines_of(&was) {
+        let is = |c| is_marker(l, c, len);
+        match part {
+            0 if is(b'<') => {
+                part = 1;
+                held = l.to_vec();
+            }
+            0 => out.extend(l),
+            _ => {
+                held.extend(l);
+                if part == 1 && is(b'|') {
+                    part = 2;
+                } else if part == 2 && is(b'=') {
+                    part = 3;
+                } else if is(b'>') {
+                    part = 0;
+                    if leave > 0 {
+                        leave -= 1;
+                        out.extend(&held);
+                    } else {
+                        out.extend(&kept);
+                    }
+                    kept.clear();
+                } else if part != 2 {
+                    kept.extend(l);
+                }
+            }
+        }
+    }
+    // An unclosed place keeps its lines.
+    if part != 0 {
+        out.extend(&held);
+    }
+    if *out == *was {
+        return None;
+    }
+    met("a marked file fixed by hand");
+    put(m, root, &path, out, When::Now)
+}
+
+/// Changes what the folder holds at a place in conflict that stands as a version: a file's text
+/// edited, or a new text where nothing stands.
+fn change_in_place(m: &mut Model, root: &Path, pick: usize) -> Option<String> {
+    let places: Vec<String> = (m.kept().iter())
+        .filter(|(p, k)| {
+            let above_free = !m.folder.files.keys().any(|f| within(p, f) && f != *p);
+            k.marker() == 0 && above_free && !m.folder.folders.contains(*p)
+        })
+        .map(|(p, _)| p.clone())
+        .collect();
+    let path = places.get(pick % places.len().max(1))?.clone();
+    edit_text(m, root, &path, pick, (pick % 3) as u8)
+}
+
+/// `tidy`, two days on so that every pack counts as old, keeping every step: every version a
+/// kept save's conflicts name must still read back, and nothing else changes.
+fn tidy_and_check(repo: &mut Repository, m: &mut Model) {
+    let now = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let later = now + 2 * 86_400_000;
+    opal_core::tidy::tidy(repo, 36_500, later, &mut |_| {}, &mut |_| {}).unwrap();
+    no_version_a_kept_conflict_names_is_freed(repo, m);
+    if m.saves.iter().any(|s| !s.stored.kept.is_empty()) {
+        met("tidy with conflicts kept");
+    }
+    settle(repo, m, Vec::new());
+}
+
+/// Every save the model knows is kept (every step is), and every version its conflicts name, as
+/// a term or as its own, reads back whole.
+fn no_version_a_kept_conflict_names_is_freed(repo: &Repository, m: &Model) {
+    for s in &m.saves {
+        let stored = saved_tree(repo.store(), s.id);
+        if s.shelf {
+            assert_eq!(stored.standing(), s.tree, "shelf {:?} after tidy", s.id);
+        } else {
+            assert_eq!(stored, s.stored, "save {:?} after tidy", s.id);
+        }
+    }
 }
 
 /// Settles what a command did: a step if it changed the state or the folder, else no entry.
@@ -2860,7 +4123,8 @@ fn stepped(repo: &Repository, m: &mut Model, command: &'static str, was: State, 
     );
     if let Some(FolderChange { from, to }) = change {
         // Its two saves differ exactly where the step changed the folder.
-        let (from, to) = (saved_tree(repo.store(), from), saved_tree(repo.store(), to));
+        let stands = |save| saved_tree(repo.store(), save).standing();
+        let (from, to) = (stands(from), stands(to));
         let want = differences(&held, &m.folder);
         assert_eq!(differences(&from, &to), want, "{command} records");
     }
@@ -2951,11 +4215,37 @@ fn check(
     if on_disk != m.folder {
         return Err(format!("the folder holds {on_disk:?}, not {:?}", m.folder));
     }
-    let want = changes(&m.folder, m.tip());
+    // A place in conflict is listed as one, not again among the changes.
+    let in_conflict = |p: &str| m.kept().keys().any(|k| within(p, k));
+    let mut want = changes(&m.folder, m.tip());
+    want.retain(|(p, _)| !in_conflict(p));
+    let conflicts = conflicts_listed(m);
+    for (_, standing) in &conflicts {
+        met(match standing {
+            Standing::Marked { .. } => "status: markers left",
+            Standing::Fixed => "status: fixed",
+            Standing::Yours => "status: yours",
+            Standing::ChangedInPlace => "status: changed in place",
+            Standing::NotInFolder => "status: not in the folder",
+            Standing::NotHere => "status: not here",
+        });
+    }
     let listed = |full: bool| -> Result<Vec<(String, ChangeKind)>, String> {
         let st = status(repo, full, None).map_err(|e| e.to_string())?;
         if st.save_id != m.saves[m.state.on].id {
             return Err("status compared with the wrong save".into());
+        }
+        let got: Vec<(String, Standing)> = (st.conflicts.iter())
+            .map(|c| (c.path.clone(), c.standing))
+            .collect();
+        // A change the file cache may miss may leave a place's standing as it was.
+        let missed = |(p, _): &&(String, Standing)| Some(p.as_str()) != missable || full;
+        let (got, wanted): (Vec<_>, Vec<_>) = (
+            got.iter().filter(missed).collect(),
+            conflicts.iter().filter(missed).collect(),
+        );
+        if got != wanted {
+            return Err(format!("status lists in conflict {got:?}, not {wanted:?}"));
         }
         Ok(st
             .changes
@@ -3142,31 +4432,71 @@ fn folder_tree(root: &Path) -> Tree {
     tree
 }
 
-/// What a save holds, read from the store.
+/// What a save holds as stored, read from the store, every version of its conflicts read whole.
 fn saved_tree(store: &Store, save: Id) -> Tree {
+    listed_tree(store, store.save(&save, false).unwrap().root)
+}
+
+/// What the folder listing `root` holds, as stored.
+fn listed_tree(store: &Store, root: Id) -> Tree {
     let mut tree = Tree::default();
-    let root = store.save(&save, false).unwrap().root;
     let mut todo = vec![(root, String::new())];
     while let Some((id, prefix)) = todo.pop() {
         for e in store.listing(&id).unwrap().entries() {
             let path = format!("{prefix}{}", e.name);
-            let exec = match e.kind {
+            match e.kind {
                 EntryKind::Folder => {
                     tree.folders.insert(path.clone());
                     todo.push((e.id, format!("{path}/")));
-                    continue;
                 }
-                EntryKind::File => false,
-                EntryKind::Executable => true,
-                other => panic!("{path} saved as {other:?}"),
-            };
-            let mut bytes = Vec::new();
-            store.copy_content(&e.id, &mut bytes).unwrap();
-            let bytes = bytes.into();
-            tree.files.insert(path, File { bytes, exec });
+                EntryKind::Conflict => {
+                    let record = store.conflict(&e.id).unwrap();
+                    let part = |t: &Option<Term>| t.map(|t| read_part(store, t));
+                    let [mine, before, theirs] = &record.terms[..] else {
+                        panic!("{path} holds a conflict of {} versions", record.terms.len());
+                    };
+                    let terms = [part(mine), part(before), part(theirs)];
+                    let own = record.own.map(|own| (part(&own.version), own.marker));
+                    tree.kept.insert(path, Kept { terms, own });
+                }
+                kind => {
+                    let term = Term {
+                        kind,
+                        id: e.id,
+                        size: e.size,
+                    };
+                    let Part::File(f) = read_part(store, term) else {
+                        unreachable!()
+                    };
+                    tree.files.insert(path, f);
+                }
+            }
         }
     }
     tree
+}
+
+/// One version, read whole.
+fn read_part(store: &Store, t: Term) -> Part {
+    let exec = match t.kind {
+        EntryKind::Folder => return Part::Folder(listed_tree(store, t.id)),
+        EntryKind::File => false,
+        EntryKind::Executable => true,
+        other => panic!("a version saved as {other:?}"),
+    };
+    let mut bytes = Vec::new();
+    store.copy_content(&t.id, &mut bytes).unwrap();
+    let bytes = bytes.into();
+    Part::File(File { bytes, exec })
+}
+
+thread_local! {
+    /// How many cases of each kind this thread's runs compared.
+    static MET: RefCell<BTreeMap<&'static str, usize>> = const { RefCell::new(BTreeMap::new()) };
+}
+
+fn met(kind: &'static str) {
+    MET.with(|m| *m.borrow_mut().entry(kind).or_default() += 1);
 }
 
 /// 64 cases on every push; nightly sets `PROPTEST_CASES` higher.
@@ -3177,13 +4507,143 @@ fn cases() -> u32 {
         .unwrap_or(64)
 }
 
-proptest! {
-    #![proptest_config(ProptestConfig { cases: cases(), ..ProptestConfig::default() })]
+/// The kinds of case a run of 64 must meet at least 3 times each: every clash a combine keeps
+/// that the model's files can make (two kinds at one place, a link, a rule against markers and
+/// files past the text limits they can't), the starting points that disagree, and a line's
+/// conflict that stops a combine.
+const MUST_MEET: [&str; 10] = [
+    "changed on both, in the same place",
+    "changed on both, not text",
+    "changed, removed",
+    "added on both",
+    "moved apart",
+    "moved, removed",
+    "moved onto",
+    "start unknown",
+    "starting points that disagree",
+    "stopped at a conflict a line holds",
+];
 
-    #[test]
-    fn edits_saves_switches_shelves_and_undos_match_the_model(
-        acts in prop::collection::vec(act(), 1..=30)
-    ) {
+#[test]
+fn edits_saves_switches_shelves_and_undos_match_the_model() {
+    let config = ProptestConfig {
+        cases: cases(),
+        source_file: Some(file!()),
+        ..ProptestConfig::default()
+    };
+    let acts = prop::collection::vec(act(), 1..=30);
+    let done = TestRunner::new(config).run(&acts, |acts| {
         run(&acts);
+        Ok(())
+    });
+    if let Err(e) = done {
+        panic!("{e}");
     }
+    let met = MET.with(|m| m.borrow().clone());
+    println!("met: {met:#?}");
+    for kind in MUST_MEET {
+        let n = met.get(kind).copied().unwrap_or(0);
+        assert!(n >= 3, "{kind}: met {n} times, at least 3 needed");
+    }
+}
+
+/// A combine whose lines parted at a save holding a conflict that each line fixed its own way:
+/// one line kept theirs, the other fixed the markers by hand. `clean` asks for a clean line.
+fn parted_in_conflict(clean: bool) -> Vec<Act> {
+    let fork = Act::Fork {
+        pick: 1,
+        path: "a",
+        at: 0,
+        edit: 2,
+        back: true,
+        changes: (Change::Edit, Change::Edit),
+    };
+    let to_line_0 = Act::Goto {
+        pick: 0,
+        by_line: true,
+        unsaved: Unsaved::Save,
+    };
+    let keep_theirs = Act::Resolve {
+        pick: 0,
+        how: ResolveHow::KeepTheirs,
+    };
+    let combine_side = Act::Combine {
+        pick: 0,
+        message: false,
+        clean,
+    };
+    vec![
+        fork,
+        Act::LineNew("side"),
+        Act::FixFile { pick: 1 },
+        Act::Save,
+        to_line_0,
+        keep_theirs,
+        combine_side,
+    ]
+}
+
+#[test]
+fn a_start_in_conflict_that_both_lines_fixed_is_unknown() {
+    run(&parted_in_conflict(false));
+    let met = MET.with(|m| m.borrow().get("start unknown").copied());
+    assert_eq!(met, Some(1));
+}
+
+#[test]
+#[ignore = "the engine names this place \"only files are merged line by line\" under --only-if-clean"]
+fn a_start_in_conflict_that_both_lines_fixed_is_unknown_when_asked_for_a_clean_line() {
+    run(&parted_in_conflict(true));
+}
+
+/// The seed's history: a file moved to two places where both lines hold it alike at one of them.
+#[test]
+#[ignore = "F2: a file moved to two places keeps a conflict where both lines hold the very same file"]
+fn a_file_moved_to_two_places_held_alike_at_one_is_no_conflict_there() {
+    run(&[
+        Act::Big("d/a", 0, 1_048_576),
+        Act::Fork {
+            pick: 4_915_421_869_871_524_073,
+            path: "a",
+            at: 0,
+            edit: 3,
+            back: true,
+            changes: (Change::EditEnd, Change::Edit),
+        },
+        Act::Goto {
+            pick: 13_901_229_420_598_900_031,
+            by_line: false,
+            unsaved: Unsaved::Save,
+        },
+        Act::Moved {
+            pick: 7_925_481_868_113_665_007,
+            to: "e/a",
+            remake: true,
+        },
+        Act::Fork {
+            pick: 13_567_937_977_859_821_551,
+            path: "a",
+            at: 14_330_216_744_520_979_105,
+            edit: 39,
+            back: true,
+            changes: (
+                Change::Add(10_411_058_395_405_241_676),
+                Change::Move(10_411_058_395_405_241_676, false),
+            ),
+        },
+        Act::UndoTo {
+            pick: 567_419_809_342_993_382,
+            shelve: true,
+        },
+        Act::CrissCross {
+            pick: 14_366_835_740_253_199_054,
+            fix: true,
+        },
+        Act::Undo { n: 1, shelve: true },
+        Act::Combine {
+            pick: 774_662_330_187_787_330,
+            message: true,
+            clean: true,
+        },
+    ]);
 }

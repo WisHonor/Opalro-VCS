@@ -660,11 +660,14 @@ fn branch_named(name: &str) -> usize {
 }
 
 /// Generated histories of two branches, combined by both programs. Where both combine cleanly,
-/// they leave the same files, folders and marks, on disk and in the saves. Where Opalro stops, it
-/// stopped for conflicts and changed nothing. Git pairs a file moved and edited with its old self
-/// by likeness, which Opalro never guesses: so Git alone may merge (Opalro's reasons then name
-/// moved files), and where the other branch removed the file, Opalro alone keeps it where Git
-/// reports exactly that pair of conflicts. The seed is fixed; counts sit between floors and
+/// they leave the same files, folders and marks, on disk and in the saves. Where Opalro asked for
+/// a clean line stops, it stopped for conflicts and changed nothing; kept, they are at the places
+/// Git reports unmerged, and taking one side everywhere gives what Git's `checkout --ours` or
+/// `--theirs` gives. Git pairs a file moved and edited with its old self by likeness, which
+/// Opalro never guesses: so Git alone may merge (Opalro's reasons then name moved files), where
+/// the other branch removed the file Opalro alone keeps it where Git reports exactly that pair of
+/// conflicts, and where both conflict only moved files may tell their places apart (such a case
+/// is counted and printed, not compared). The seed is fixed; counts sit between floors and
 /// ceilings.
 #[test]
 fn combine_matches_git_merge() {
@@ -679,10 +682,12 @@ fn combine_matches_git_merge() {
     let followed = RefCell::new(0);
     let git_only = RefCell::new(Vec::new());
     let opalro_only = RefCell::new(Vec::new());
+    let compared = RefCell::new(0);
+    let skipped = RefCell::new(Vec::new());
     let started = Instant::now();
     let rng = TestRng::deterministic_rng(RngAlgorithm::ChaCha);
     let config = Config {
-        cases: 64,
+        cases: 96,
         failure_persistence: None,
         ..Config::default()
     };
@@ -772,6 +777,36 @@ fn combine_matches_git_merge() {
                     prop_assert_eq!(&disk_marks(clone.path()), &marks, "{}", fast_import);
                 }
                 *followed.borrow_mut() += made.moves[0].1;
+            }
+            if kind == 1 {
+                // Opalro keeps a conflict at each place it named; where Git reports one, at the
+                // same places, unless moves the two follow differently explain every difference.
+                opalro(&env, &["combine", "side"], 0);
+                let places = conflict_places(env.root());
+                let named: BTreeSet<String> = (why.iter())
+                    .map(|l| l.trim_start().split_once(": ").unwrap().0.to_owned())
+                    .collect();
+                prop_assert_eq!(&named, &places, "{}\n{}", said, fast_import);
+                let unmerged: BTreeSet<String> = (text(&git(
+                    clone.path(),
+                    &["diff", "--name-only", "--diff-filter=U"],
+                ))
+                .lines())
+                .map(str::to_owned)
+                .collect();
+                if unmerged == places {
+                    keep_sides_match_git(&env, clone.path(), fast_import)?;
+                    *compared.borrow_mut() += 1;
+                } else {
+                    let apart: Vec<&String> = unmerged.symmetric_difference(&places).collect();
+                    prop_assert!(
+                        apart.iter().all(|p| made.moved(p)),
+                        "Git: {unmerged:?}, Opalro: {places:?}\n{fast_import}"
+                    );
+                    skipped
+                        .borrow_mut()
+                        .push(format!("Git {unmerged:?}, Opalro {places:?}"));
+                }
             }
             if kind == 2 {
                 // Only a file moved and edited on one branch and removed on the other, which Git
@@ -864,12 +899,26 @@ fn combine_matches_git_merge() {
     for why in git_only.into_inner() {
         println!("Git clean only: {why}");
     }
+    let skipped = skipped.into_inner();
+    for why in &skipped {
+        println!("both conflict, at places moves explain: {why}");
+    }
+    let compared = compared.into_inner();
+    println!(
+        "both conflict: {compared} compared, {} skipped for moves",
+        skipped.len()
+    );
     println!("took {:.1?}", started.elapsed());
-    // Measured with Git 2.50.1: 36 both clean, 1 Opalro clean only, 4 Git clean only, 8 moves
-    // followed into a file the other branch edited, 3 files edited before their move and on the
-    // other branch. Another Git can pair a few files its own way, so each bound has some room.
     assert!(
-        counts[0] >= 24 && counts[2] <= 3 && counts[3] <= 8,
+        compared >= 16,
+        "{compared} cases where both conflict compared"
+    );
+    // Measured with Git 2.50.1: 57 both clean, 34 both conflict (20 compared, 14 told apart by
+    // moves), 1 Opalro clean only, 4 Git clean only, 12 moves followed into a file the other
+    // branch edited, 5 files edited before their move and on the other branch. Another Git can
+    // pair a few files its own way, so each bound has some room.
+    assert!(
+        counts[0] >= 40 && counts[2] <= 3 && counts[3] <= 8,
         "{KINDS:?}: {counts:?}"
     );
     assert!(
@@ -880,6 +929,74 @@ fn combine_matches_git_merge() {
         before.1 >= 1,
         "no file edited before its move and on the other branch"
     );
+}
+
+/// The places in conflict in the save the project in `root` is on.
+fn conflict_places(root: &Path) -> BTreeSet<String> {
+    let repo = Repository::open(root).unwrap();
+    let st = opal_core::status::status(&repo, true, None).unwrap();
+    st.conflicts.into_iter().map(|c| c.path).collect()
+}
+
+/// What Git's index in `dir` holds: each path's stages, with whether each is executable.
+fn stages(dir: &Path) -> BTreeMap<String, BTreeMap<u8, bool>> {
+    let listed = git(dir, &["ls-files", "-s", "-z"]);
+    let mut found: BTreeMap<String, BTreeMap<u8, bool>> = BTreeMap::new();
+    for entry in listed.split(|&b| b == 0).filter(|e| !e.is_empty()) {
+        let entry = text(entry);
+        let (head, path) = entry.split_once('\t').unwrap();
+        // `<mode> <id> <stage>`
+        let stage = head.rsplit_once(' ').unwrap().1.parse().unwrap();
+        let exec = head.starts_with("100755");
+        found
+            .entry(path.to_owned())
+            .or_default()
+            .insert(stage, exec);
+    }
+    found
+}
+
+/// `resolve . --keep mine`, then (after `undo`) `--keep theirs`, against Git's stopped merge in
+/// `clone` taking the same side everywhere (`git checkout --ours` or `--theirs` at each path in
+/// conflict, and the path removed where that side has none): the same files, contents and
+/// executable marks.
+fn keep_sides_match_git(env: &Env, clone: &Path, history: &str) -> Result<(), TestCaseError> {
+    let index = stages(clone);
+    let theirs_clone = tempfile::tempdir().unwrap();
+    support::copy_dir(clone, theirs_clone.path());
+    for (stage, dir, side) in [(2, clone, "mine"), (3, theirs_clone.path(), "theirs")] {
+        let mut marks = BTreeMap::new();
+        for (path, held) in &index {
+            if let Some(&exec) = held.get(&0) {
+                marks.insert(path.clone(), exec);
+                continue;
+            }
+            match held.get(&stage) {
+                Some(&exec) => {
+                    let which = if stage == 2 { "--ours" } else { "--theirs" };
+                    git(dir, &["checkout", which, "--", path]);
+                    marks.insert(path.clone(), exec);
+                }
+                None if dir.join(path).exists() => std::fs::remove_file(dir.join(path)).unwrap(),
+                None => {}
+            }
+        }
+        if side == "theirs" {
+            opalro(env, &["undo"], 0);
+        }
+        opalro(env, &["resolve", ".", "--keep", side], 0);
+        prop_assert_eq!(files(env.root()), files(dir), "{}: {}", side, history);
+        prop_assert_eq!(
+            opalro_marks(env.root()),
+            marks.clone(),
+            "{}: {}",
+            side,
+            history
+        );
+        #[cfg(unix)]
+        prop_assert_eq!(disk_marks(env.root()), marks, "{}: {}", side, history);
+    }
+    Ok(())
 }
 
 /// Every file Git's stopped merge in `dir` left in its folder, with whether it is executable: the

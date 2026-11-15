@@ -7411,6 +7411,36 @@ fn moved_apart_keeps_two_conflicts() {
     );
 }
 
+/// Ours moved `Player.cs` to `A`; theirs moved it to `B` and holds the very same file at `A` too,
+/// where ours has something of its own at `B`. At `A` both lines hold the same file: it is taken
+/// once, and only `B` clashes, as two added things.
+#[test]
+#[ignore = "F2: a file moved to two places keeps a conflict where both lines hold the very same file"]
+fn moved_apart_where_both_lines_hold_the_same_file_at_one_place_keeps_no_conflict_there() {
+    let mut h = Hist::new();
+    let s = player(&mut h);
+    let mut ours = moved_to("A/Player.cs", f(BODY));
+    ours.insert("B/Player.cs".to_owned(), f("mine\n"));
+    let o = h.save("main", s, &ours);
+    let t = h.save("side", s, &moved_to("B/Player.cs", f(BODY)));
+    let mut copied = moved_to("B/Player.cs", f(BODY));
+    copied.insert("A/Player.cs".to_owned(), f(BODY));
+    let t = h.save("side", t, &copied);
+    let m = h.kept(s, o, t, &no_rules());
+    let onto = Clash::MovedOnto {
+        moved_on: Side::Theirs,
+        from: "Player.cs".into(),
+    };
+    let places: Vec<(&str, &Clash)> = (m.conflicts.iter())
+        .map(|c| (c.path.as_str(), &c.clash))
+        .collect();
+    assert_eq!(places, [("B/Player.cs", &onto)]);
+    let merged = read_tree(h.repo.store(), m.root, &HashMap::new());
+    assert_eq!(merged["A/Player.cs"], f(BODY));
+    let (_, terms) = record_in(&h, m.root, "B/Player.cs");
+    assert_eq!(terms, [Some(f("mine\n")), None, Some(f(BODY))]);
+}
+
 #[test]
 fn moved_and_removed_keeps_the_moved_file_where_it_went() {
     let mut h = Hist::new();
