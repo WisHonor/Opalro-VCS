@@ -7,6 +7,7 @@ pub mod changes;
 pub mod chunks;
 pub mod combine;
 pub mod config;
+pub mod conflict;
 pub mod diary;
 pub mod diff;
 pub mod drive;

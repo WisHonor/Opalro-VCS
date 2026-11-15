@@ -168,28 +168,42 @@ bytes   commit ID in that system (20 or 32 bytes for Git)
 
 A Git submodule's link has an empty `url`: its address stays in `.gitmodules`, which comes in as an ordinary file (decision 036). Readers reject any system but `git`, and a commit ID of any other length.
 
-## 8. Conflict record (reserved for v0.2)
+## 8. Conflict record
 
-Drafted now so the format can hold it (decision 007); finalised before v0.2.
+When a combine keeps a place where two lines clash, the combined save holds there, instead of the file or folder, a conflict record that names every version ([decision 007](decisions/007-conflicts.md); layout fixed by [decision 174](decisions/174-the-conflict-record.md)).
 
 ```text
 u8      version = 1
-varint  term count (odd, at least 3)
-terms, alternating side, ancestor, side, …, side:
-  bool    present (false = absent: deleted, or never existed)
+varint  term count (odd, from 3 to 255)
+terms, in the order side, ancestor, side, …, side:
+  bool    present (false = absent: removed there, or never there)
   if present:
-    u8      kind (as in §3)
+    u8      kind (1 to 5, as in §3; never 6)
+    id      id
+    varint  size (as §3 says for that kind)
+bool    the folder holds a version of its own
+if true:
+  bool    present (false = the person removed it)
+  if present:
+    u8      kind (1 to 5)
     id      id
     varint  size
-bool    has an in-progress version
-if true:
-  id      file ID
-  varint  size
+  u8      marker length (0, or from 7 to 255)
 ```
+
+- **The terms.** The first term is the side of the line the combine was made on (yours), the last the side that was combined in (theirs), and between two sides stands the version both started from. A term may be absent, and terms may be of different kinds (a file against a folder). Each present term is what a listing entry of its kind, ID and size names (§3).
+- **What a conflict stands as** in the folder: its own version if the record has one, otherwise its first term; when that is absent, the folder holds nothing there.
+- **The marker length** is 0 when the conflict is not shown with markers (the folder holds a version as it is), and from 7 to 255 when its own version is a text written with conflict markers of that many characters.
+- **No conflict inside a conflict.** A record never names another conflict (kind 6). Opalro 0.2 never writes a conflict one of whose sides is a folder that holds a conflict somewhere below it; meeting, in the folder, a conflict below a folder that another conflict stands as is refused as damage. `opalro tidy` and `opalro verify` still follow everything such a record names.
+- **Size.** A record is at most 16 KiB (three terms take under 200 bytes, 255 about 11.3 KiB). A reader refuses a larger one from its pack index entry's size, before it is unpacked.
+- **Term count.** Opalro 0.2 writes records of three terms, and reads any count this layout allows.
+- **A reader refuses** a record with: another version byte; a term count that is even or outside 3 to 255; a kind outside 1 to 5; a size other than 0 for a folder or a project link; a marker length from 1 to 6; a marker length other than 0 when the own version is absent or not a file (kinds 1 and 2); a `bool` that is neither 0 nor 1; bytes left over.
+- **Where it is stored.** The listing entry is kind 6, with the record's ID and size 0 (§3). The record is pack object kind 19 (§11), fingerprinted with the context string `opal-vcs 2026-10-31 conflict v1` (§2).
+- **`opalro tidy` keeps** what a kept record names: every present term and the own version, each followed as a listing entry of that kind is (a folder's listing and everything below it, a big file's chunk list). **`opalro verify` decodes** every record and checks that what it names is there, of the kind and size it says.
 
 A repository that contains any conflict record must list the `conflicts` feature in `.opalro/format` (§10).
 
-**What freezes with format 1.** The layout above does not: it is a draft, and it arrives with the `conflicts` feature. What freezes is the reservation (listing entry kind 6, pack object kind 19, and §2's context string `opal-vcs 2026-10-31 conflict v1`) and what v0.1 does on meeting them in a repository without the feature. It refuses a repository whose `.opalro/format` lists `feature conflicts`, as newer than it. Otherwise it decodes a listing holding a kind-6 entry, takes a kind-19 object in a pack, checks its fingerprint and never decodes it. Write-out leaves a kind-6 entry unwritten, as it leaves a project link. `opalro tidy` stops when any pack holds a kind-19 object, and when a listing it must keep holds a kind-6 entry. `opalro verify` checks a kind-19 object by its fingerprint only, and reports a listing it needs that holds a kind-6 entry as damaged, since this version can't follow it.
+**Without the `conflicts` feature.** The layout above arrived with the `conflicts` feature, after format 1 froze. What froze with format 1 is the reservation (listing entry kind 6, pack object kind 19, and §2's context string `opal-vcs 2026-10-31 conflict v1`) and what v0.1 does on meeting them in a repository without the feature. It refuses a repository whose `.opalro/format` lists `feature conflicts`, as newer than it. Otherwise it decodes a listing holding a kind-6 entry, takes a kind-19 object in a pack, checks its fingerprint and never decodes it. Write-out leaves a kind-6 entry unwritten, as it leaves a project link. `opalro tidy` stops when any pack holds a kind-19 object, and when a listing it must keep holds a kind-6 entry. `opalro verify` checks a kind-19 object by its fingerprint only, and reports a listing it needs that holds a kind-6 entry as damaged, since this version can't follow it.
 
 ## 9. Diary entry
 
@@ -730,11 +744,14 @@ Vectors are added milestone by milestone, for the records each milestone builds;
   - Change IDs keep their bytes; only their letters change ([decision 122](decisions/122-change-ids-in-jujutsus-letters.md)), which no vector pins.
   - `other_lines.json`, written from §10's text before the code ([decision 112](decisions/112-rulings-after-the-second-red-team-session-on-the-speed-work.md)): a sealed `cache/other-lines` with two runs, one of two saves that stops at a third, and one of a single save that has no first parent; its key, its body and the sealed bytes.
 - **The name** ([decision 150](decisions/150-the-name-is-opalro.md), 2026-11-12): every vector was printed again. The magic bytes and the context strings took the new name (`OPAL…`, `opal-vcs`), so every record's ID, seal and checksum changed (a file's content ID uses no context string, and stayed), and so did the cutter's table, which cuts `chunking.json`'s noise into 41 chunks where it made 40. A record that holds no magic and no other record's ID kept its bytes; only its ID changed. `presets.json` and `rules.json` hold the new file names. `pack.json`, `chunking.json` and `chunk_list.json` got printers of their own, so that every vector file can be printed again.
+- **Milestone 9** (written from §8's text before the code, [decision 174](decisions/174-the-conflict-record.md)):
+  - `conflict.json`: conflict records (§8). Six that a reader takes, each with its bytes and ID: `markers` (three file terms, the own version a file, marker length 7); `yours` (a file, an absent term, an executable file; no own version); `kinds` (a folder against a file, a symlink with its size, a project link); `half-fixed` (the own version an executable file, marker length 9); `removed-own` (an own version that is absent, marker length 0); `five-terms` (five terms, which Opalro 0.2 never writes but reads). And nineteen that every reader must refuse, each breaking only the rule it names and given with the error it gets: version 2; term counts 2, 4, 1 and 257; kinds 0, 6 and 7; a folder of size 1; a project link of size 1; marker length 6; marker length 7 on an absent own version, on a folder and on a symlink; a present flag of 2; an own-version flag of 2; a trailing byte; bytes that end in the middle of an ID; a term count written in a longer form than needed.
+  - `crates/opal-vcs-core/tests/vectors.rs` checks each valid record's bytes both ways and its ID, and that each invalid one is refused with its error.
 
 ## 14. Open points
 
 - `opalro.toml`'s move hints (the draft's `moves-with-asset`), with move notes (v0.2).
-- Conflict record details (before v0.2).
+- ~~Conflict record details~~ (decided: §8, [decision 174](decisions/174-the-conflict-record.md)).
 - Delta storage for small files (a later `feature deltas`).
 - Splitting giant folder listings (a later listing version).
 - The signature format (later).

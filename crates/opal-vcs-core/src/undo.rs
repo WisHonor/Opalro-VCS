@@ -1057,7 +1057,10 @@ fn put_back_readable(
         return Ok(());
     };
     let lost = match &e {
-        StoreError::Missing(_) | StoreError::Decode(_) | StoreError::WrongKind { .. } => true,
+        StoreError::Missing(_)
+        | StoreError::Decode(_)
+        | StoreError::WrongKind { .. }
+        | StoreError::RecordTooLarge { .. } => true,
         StoreError::Pack(e) => is_damage(e),
         StoreError::SaveTooLarge { .. } => false,
     };

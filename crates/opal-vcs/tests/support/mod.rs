@@ -19,6 +19,7 @@ use std::time::{Duration, Instant};
 
 use assert_cmd::Command as Opalro;
 use opal_core::chunks::{Chunk, ChunkList, chunk_len, is_cut};
+use opal_core::conflict::Record;
 use opal_core::diary::{Action, DiaryEntry, State, Tag, TagList};
 use opal_core::history::current_save;
 use opal_core::id::{ChangeId, ContentHasher, Id, hash_content};
@@ -742,6 +743,12 @@ pub fn add_file(pack: &mut PackSet, bytes: &[u8]) -> Id {
     } else {
         pack.add_content(bytes).unwrap()
     }
+}
+
+/// Stores a conflict record, for saves planted before a combine can make them; its ID.
+pub fn add_conflict(pack: &mut PackSet, record: &Record) -> Id {
+    pack.add_record(ObjectKind::Conflict, &record.encode())
+        .unwrap()
 }
 
 /// Stores `record` as it is, however it decodes, as a chunk list of the file `file` of `size`

@@ -4,6 +4,7 @@
 use opal_platform::dir::Dir;
 
 use crate::chunks::{self, CHUNK_FROM, ChunkList};
+use crate::conflict;
 use crate::encoding::DecodeError;
 use crate::id::{ContentHasher, Id};
 use crate::listing::Listing;
@@ -42,6 +43,8 @@ pub enum StoreError {
     },
     #[error("this save is too large to read safely: {detail}")]
     SaveTooLarge { detail: String },
+    #[error("record {id} is larger than the {limit} bytes it may take")]
+    RecordTooLarge { id: Id, limit: u64 },
 }
 
 /// A copy of an object: (pack number, its id).
@@ -149,6 +152,8 @@ pub(crate) mod counted {
         static FINDS: Cell<usize> = const { Cell::new(0) };
         static RECORDS: Cell<usize> = const { Cell::new(0) };
         static LISTINGS: Cell<usize> = const { Cell::new(0) };
+        static CONFLICTS: Cell<usize> = const { Cell::new(0) };
+        static UNPACKED: Cell<usize> = const { Cell::new(0) };
     }
 
     pub(super) fn listing() {
@@ -158,6 +163,24 @@ pub(crate) mod counted {
     /// The listings this thread's stores were asked for, read ahead or not.
     pub(crate) fn listings() -> usize {
         LISTINGS.get()
+    }
+
+    pub(super) fn conflict() {
+        CONFLICTS.set(CONFLICTS.get() + 1);
+    }
+
+    /// The conflict records this thread's stores were asked for.
+    pub(crate) fn conflicts() -> usize {
+        CONFLICTS.get()
+    }
+
+    pub(crate) fn unpacking() {
+        UNPACKED.set(UNPACKED.get() + 1);
+    }
+
+    /// The records this thread's packs unpacked.
+    pub(crate) fn unpacked() -> usize {
+        UNPACKED.get()
     }
 
     pub(super) fn find() {
@@ -795,6 +818,28 @@ impl Store {
         )?)
     }
 
+    /// The conflict record `id`, checked against its fingerprint and decoded; a copy whose index
+    /// says it is over `MAX_RECORD_BYTES` is refused before it is unpacked.
+    pub fn conflict(&self, id: &Id) -> Result<conflict::Record, StoreError> {
+        #[cfg(test)]
+        counted::conflict();
+        let bytes = self
+            .first_good(id, ObjectKind::Conflict, false, |pack, entry| {
+                if entry.uncompressed_size > conflict::MAX_RECORD_BYTES {
+                    return Err(PackError::TooLarge);
+                }
+                pack.read_record(entry)
+            })
+            .map_err(|e| match e {
+                StoreError::Pack(PackError::TooLarge) => StoreError::RecordTooLarge {
+                    id: *id,
+                    limit: conflict::MAX_RECORD_BYTES,
+                },
+                e => e,
+            })?;
+        Ok(conflict::Record::decode(&bytes)?)
+    }
+
     /// `listing`, given what a second handle read of `id`: the same read through the same steps,
     /// so this store notes what `listing` would. It is spared only the lookup in the pack asked
     /// first when that is the pack `peeked` came from, and the read of `peeked`'s own copy.
@@ -1338,13 +1383,15 @@ pub(crate) fn is_damage(e: &PackError) -> bool {
 }
 
 /// Whether a record or save couldn't be read for what the store holds as it: missing, another
-/// kind of object, undecodable, or not matching its fingerprint. Any other failure is told as itself.
+/// kind of object, undecodable, too large, or not matching its fingerprint. Any other failure is
+/// told as itself.
 pub(crate) fn is_unreadable_record(e: &StoreError) -> bool {
     matches!(
         e,
         StoreError::Missing(_)
             | StoreError::WrongKind { .. }
             | StoreError::Decode(_)
+            | StoreError::RecordTooLarge { .. }
             | StoreError::Pack(PackError::FingerprintMismatch { .. })
     )
 }
@@ -1441,6 +1488,7 @@ mod tests {
                 found: ObjectKind::ServerLines,
             },
             StoreError::Decode(DecodeError::Invalid("bad")),
+            StoreError::RecordTooLarge { id, limit: 1 },
             StoreError::Pack(PackError::FingerprintMismatch { id }),
         ];
         for e in &unreadable {
@@ -2985,6 +3033,86 @@ mod tests {
             assert_eq!(store.listing_after(&listing.id(), peeked).unwrap(), listing);
             assert_eq!(counted::now().1, records + 1);
         }
+    }
+
+    fn a_conflict() -> conflict::Record {
+        let file = |byte| conflict::Term {
+            kind: crate::listing::EntryKind::File,
+            id: Id([byte; 32]),
+            size: 3,
+        };
+        conflict::Record {
+            terms: vec![Some(file(1)), None, Some(file(2))],
+            own: None,
+        }
+    }
+
+    #[test]
+    fn a_conflict_record_is_read_by_its_id() {
+        let (_root, tmp, packs) = dirs();
+        let record = a_conflict();
+        let mut w = PackWriter::create(&tmp).unwrap();
+        let id = w
+            .add_record(ObjectKind::Conflict, &record.encode())
+            .unwrap();
+        w.finish(&packs).unwrap();
+        assert_eq!(id, record.id());
+        let store = Store::open(&packs).unwrap();
+        let asked = counted::conflicts();
+        assert_eq!(store.conflict(&id).unwrap(), record);
+        assert_eq!(counted::conflicts(), asked + 1);
+        assert!(matches!(
+            store.conflict(&Id([9; 32])),
+            Err(StoreError::Missing(_))
+        ));
+    }
+
+    #[test]
+    fn a_listing_is_not_read_as_a_conflict_record() {
+        let (_root, tmp, packs) = dirs();
+        let mut w = PackWriter::create(&tmp).unwrap();
+        let id = w
+            .add_record(ObjectKind::FolderListing, &Listing::empty().encode())
+            .unwrap();
+        w.finish(&packs).unwrap();
+        let store = Store::open(&packs).unwrap();
+        assert!(matches!(
+            store.conflict(&id),
+            Err(StoreError::WrongKind {
+                expected: ObjectKind::Conflict,
+                found: ObjectKind::FolderListing,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn a_conflict_record_over_16_kib_is_refused_before_it_is_unpacked() {
+        let (_root, tmp, packs) = dirs();
+        // No record the layout allows is this big, so a valid one is padded: what refuses it must
+        // be its size, not the decoder.
+        let mut most = a_conflict();
+        most.terms.resize(255, most.terms[0]);
+        let mut bytes = most.encode();
+        bytes.resize(conflict::MAX_RECORD_BYTES as usize + 1, 0);
+        let mut w = PackWriter::create(&tmp).unwrap();
+        let id = w.add_record(ObjectKind::Conflict, &bytes).unwrap();
+        let fits = w
+            .add_record(ObjectKind::Conflict, &a_conflict().encode())
+            .unwrap();
+        w.finish(&packs).unwrap();
+        let store = Store::open(&packs).unwrap();
+        let unpacked = counted::unpacked();
+        let refused = store.conflict(&id).unwrap_err();
+        assert!(
+            matches!(refused, StoreError::RecordTooLarge { id: named, .. } if named == id),
+            "{refused:?}"
+        );
+        assert!(refused.to_string().contains(&id.to_hex()), "{refused}");
+        assert_eq!(counted::unpacked(), unpacked);
+        // One within the limit is unpacked and read.
+        store.conflict(&fits).unwrap();
+        assert_eq!(counted::unpacked(), unpacked + 1);
     }
 
     #[test]
