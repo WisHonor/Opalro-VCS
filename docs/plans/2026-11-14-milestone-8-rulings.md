@@ -8,7 +8,7 @@ The owner asked for v0.2 to be started while they were away, with Claude working
 
 The decisions themselves are records [164](../decisions/164-where-two-lines-parted.md) to [169](../decisions/169-saves-reached-through-a-combine.md), with [170](../decisions/170-what-building-milestone-8-refined.md) (what building them changed), [171](../decisions/171-red-team-m8-rulings.md) and [172](../decisions/172-red-team-m8-session-2-rulings.md) (the red team's findings), and [173](../decisions/173-the-rules-of-both-lines-decide-what-a-combine-merges.md) (the whole-branch review). Each says "Decided by Claude, at the owner's request while the owner was away. The owner can reverse any part." The plan is [2026-11-14-milestone-8-combine.md](2026-11-14-milestone-8-combine.md).
 
-**Branch:** `milestone-8`, from `v0.2`. Nothing is merged into `main`, which stays what v0.1 is released from.
+**Branch:** `milestone-8`, from `v0.2`, merged into `v0.2` on 2026-11-14 after two red-team sessions and a whole-branch review. Nothing is merged into `main`, which stays what v0.1 is released from.
 
 ## Please confirm
 
@@ -201,6 +201,8 @@ Read in full: the header, Global Constraints, Review Focus, Tasks 1 to 7 and the
 4. [Minor 4, 5, 6, 7, 8 and the fix round found only partly addressed] left as they are, each on the follow-ups: what a hostile `opalro.toml` with a very deep path costs the matcher, and the listings the starting points' combines hold in memory (both for milestone 9's red team); `merge -m`; the bracket reader written twice; move notes not used at a starting point made up from several; the model test never following a move by contents alone. Why: none loses data, and each is named where it will be picked up. Cost if wrong: a planted project can make a combine slow or large.
 5. [Minor 9] the two pinned cases with no pair to compare are added to testing.md.
 6. [The fourteen fix rounds with no review of their own] thirteen read as addressed, one (the model test's write-up) as partly: the count of moves followed by notes and by contents was measured once and is not kept in code.
+7. [The fixes' re-review] all four points addressed, nothing new that blocks. One small thing it found is left for milestone 9, which works on the same code: the other side's rules file is found only under the exact name `opalro.toml`, while on Windows and macOS the folder's own is found under any letter case; why: no data is lost, a side can always leave the file out, and there is one fix wave, not two. Cost if wrong: until then, a save that holds `Opalro.toml` protects its files when it is the folder's and not when it is the other side's.
+8. [The fix wave's own calls, read and kept] when the folder's file can't be read whole and a rule on the other side says no, the row names the other side's rule (the file wouldn't have merged anyway); a passed-over pattern is named `rule[N].files[M]`; a damaged top folder in the save being combined in gives the store's own error before any merge.
 
 ## Deferred
 

@@ -512,6 +512,7 @@ Planned on 2026-11-14 after decisions [164](decisions/164-where-two-lines-parted
 **6. Proof** ✅ (2026-11-14; Tasks 11 and 12)
 - The model test combines lines among its random steps; whole combines are compared with `git merge` on generated histories, which showed one accepted difference (a file moved and changed in one save, and removed on the other line, is kept without a question; decision 170) and a combine that left an emptied folder behind, now fixed.
 
-**7. Docs, red team, review and merge** (Tasks 13 to 15)
-- **Docs** ✅: the design, the guide, [security.md](security.md), [testing.md](testing.md) and [benchmarks.md](benchmarks.md) §12 say what is built; [terminal.md](terminal.md), [json.md](json.md) and [storage-format.md](storage-format.md) were written with the code.
-- *Done when:* every proven finding is fixed or ruled on, every document matches the code, and the branch is merged into `v0.2`.
+**7. Docs, red team, review and merge** ✅ (2026-11-14; Tasks 13 to 15)
+- **Docs** ✅: the design, the guide, [security.md](security.md), [testing.md](testing.md) and [benchmarks.md](benchmarks.md) §12 and §13 say what is built; [terminal.md](terminal.md), [json.md](json.md) and [storage-format.md](storage-format.md) were written with the code.
+- **Red team** ✅ (2026-11-14): two sessions from the sandbox, RT19 (2 Low) and RT20 on its fixes (1 Medium), every finding fixed or ruled on ([decisions 171](decisions/171-red-team-m8-rulings.md) and [172](decisions/172-red-team-m8-session-2-rulings.md); [security.md](security.md) §6). Left for the owner: reading very large saves stays slow.
+- **Review and merge** ✅ (2026-11-14): a whole-branch review found nothing that loses or mixes what a person saved; its one open point became [decision 173](decisions/173-the-rules-of-both-lines-decide-what-a-combine-merges.md) (a combine asks the rules of both lines); the calls made on the way, with twenty-one for the owner to confirm, are in [the rulings](plans/2026-11-14-milestone-8-rulings.md); merged into `v0.2`.
