@@ -746,8 +746,6 @@ struct Saved {
     message: String,
     /// A shelf's save, which no line reaches.
     shelf: bool,
-    /// Made by a combine, not reached by one moving a line forward.
-    made_by_combine: bool,
 }
 
 /// The lines, the tags, where the project is and the shelves, newest first; saves by index.
@@ -770,6 +768,8 @@ struct Step {
     before: Option<State>,
     after: State,
     folder: (Tree, Tree),
+    /// A combine that made places in conflict, not one that moved the line forward.
+    made_conflicts: bool,
 }
 
 impl Step {
@@ -848,6 +848,8 @@ struct Model {
     new_lines: usize,
     /// Text lines made so far: the next is new to every file.
     fresh: usize,
+    /// The step being made is a combine that made places in conflict.
+    made_conflicts: bool,
 }
 
 impl Model {
@@ -869,6 +871,7 @@ impl Model {
             before: None,
             after: state.clone(),
             folder: Default::default(),
+            made_conflicts: false,
         };
         Model {
             folder: Tree::default(),
@@ -881,7 +884,6 @@ impl Model {
                 change: 0,
                 message,
                 shelf: false,
-                made_by_combine: false,
             }],
             done: vec![start],
             undone: Vec::new(),
@@ -891,6 +893,7 @@ impl Model {
             past: 0,
             new_lines: 0,
             fresh: 0,
+            made_conflicts: false,
         }
     }
 
@@ -1869,7 +1872,6 @@ fn save(repo: &mut Repository, m: &mut Model, line: Option<&str>) {
                 change: m.saves.len(),
                 message: "Save".to_owned(),
                 shelf: false,
-                made_by_combine: false,
             });
             m.state.on = m.saves.len() - 1;
             if let Some(name) = new_line {
@@ -1957,7 +1959,6 @@ fn save_only(repo: &mut Repository, m: &mut Model, path: &str) {
                 change: m.saves.len(),
                 message: "Save".to_owned(),
                 shelf: false,
-                made_by_combine: false,
             });
             m.state.on = m.saves.len() - 1;
             m.state.lines.insert(line, m.state.on);
@@ -2061,7 +2062,6 @@ fn amend(repo: &mut Repository, m: &mut Model, new_message: bool) {
                 change,
                 message,
                 shelf: false,
-                made_by_combine: false,
             });
             m.state.on = m.saves.len() - 1;
             m.state.lines.insert(line, m.state.on);
@@ -2491,7 +2491,6 @@ fn new_shelf(
         change: m.saves.len(),
         message: message.to_owned(),
         shelf: true,
-        made_by_combine: false,
     });
     m.saves.len() - 1
 }
@@ -2583,8 +2582,7 @@ fn take(
     m.state = state;
     let entry = step.entry;
     let kept = !m.saves[step.after.on].stored.kept.is_empty();
-    // A combine that made its save, not one that moved the line forward onto a save in conflict.
-    let made_here = m.saves[step.after.on].made_by_combine;
+    let made_here = step.made_conflicts;
 
     match (step.command, kept, again) {
         ("combine", true, false) if made_here => met("undo over a combine that kept conflicts"),
@@ -3055,6 +3053,7 @@ fn combine_into(
             for (_, row, _) in &c.made {
                 met(clash_kind(row));
             }
+            m.made_conflicts = !c.made.is_empty();
             if c.unsure {
                 met("starting points that disagree");
             }
@@ -3074,7 +3073,6 @@ fn combine_into(
                 change: m.saves.len(),
                 message,
                 shelf: false,
-                made_by_combine: true,
             });
             m.saves.len() - 1
         }
@@ -4454,7 +4452,6 @@ fn resolve_at(
         change,
         message,
         shelf: false,
-        made_by_combine: false,
     });
     m.state.on = m.saves.len() - 1;
     m.state.lines.insert(line, m.state.on);
@@ -4585,6 +4582,7 @@ fn no_version_a_kept_conflict_names_is_freed(repo: &Repository, m: &Model) {
 /// Settles what a command did: a step if it changed the state or the folder, else no entry.
 /// The step clears what redo could bring back.
 fn stepped(repo: &Repository, m: &mut Model, command: &'static str, was: State, held: Tree) {
+    let made_conflicts = std::mem::take(&mut m.made_conflicts);
     if recorded(m, &m.state) == recorded(m, &was) && m.folder == held {
         settle(repo, m, Vec::new());
         return;
@@ -4611,6 +4609,7 @@ fn stepped(repo: &Repository, m: &mut Model, command: &'static str, was: State, 
         before: Some(was),
         after: m.state.clone(),
         folder: (held, m.folder.clone()),
+        made_conflicts,
     });
 }
 
@@ -5058,7 +5057,9 @@ fn edits_saves_switches_shelves_and_undos_match_the_model() {
 
 /// The same on cases from a fixed seed, the same on every run, on which every kind the model is
 /// there to exercise must be met at least 3 times. It draws no act whose effect differs between
-/// systems, so its counts are the same on every system as well as every run.
+/// systems, so its counts are the same everywhere and on every run, but where three or more
+/// starting points are combined in an order random change IDs set: that moves only "starting
+/// points that disagree" and "start unknown", both far above their floors.
 #[test]
 fn a_fixed_pass_meets_every_kind_of_case() {
     let config = ProptestConfig {

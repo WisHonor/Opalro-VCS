@@ -1006,6 +1006,9 @@ fn nothing_lost(
             (b, x, counted(&mut text.split_inclusive('\n')))
         })
         .collect();
+    let at: Vec<(&String, bool)> = (results.iter())
+        .flat_map(|(files, marks)| files.keys().map(move |p| (p, marks[p])))
+        .collect();
     for (branch, end) in made.ends.iter().enumerate() {
         for (path, f) in end {
             let lost = |what: &str| {
@@ -1033,13 +1036,25 @@ fn nothing_lost(
                     .all(|(l, n)| lines.get(l).is_some_and(|m| m >= n))
             };
             if !added.is_empty() && !held.iter().any(|(_, _, lines)| holds_added(lines)) {
-                return lost("a line it added");
+                let held_enough = |(l, n): &(&String, &usize)| {
+                    held.iter()
+                        .any(|(_, _, h)| h.get(*l).is_some_and(|m| m >= *n))
+                };
+                let missing = (added.iter().find(|e| !held_enough(e)))
+                    .or_else(|| added.iter().next())
+                    .map(|(l, _)| l.trim_end().to_owned())
+                    .unwrap_or_default();
+                return lost(&format!("the line {missing:?} it added"));
             }
-            // The file there: one holding what it added and a line of its own.
-            let ours = |lines: &BTreeMap<String, usize>| {
+            // The mark is that of the file where it is, or, moved, of the file holding its lines.
+            let marked_here = at.iter().any(|(p, x)| *p == path && *x == f.exec);
+            let moved = |lines: &BTreeMap<String, usize>| {
                 holds_added(lines) && f.lines.iter().any(|l| lines.contains_key(l))
             };
-            if f.exec != was.exec && !held.iter().any(|(_, x, lines)| *x == f.exec && ours(lines)) {
+            let marked_there = held
+                .iter()
+                .any(|(_, x, lines)| *x == f.exec && moved(lines));
+            if f.exec != was.exec && !marked_here && !marked_there {
                 return lost("the executable mark it changed");
             }
         }
@@ -1224,4 +1239,105 @@ fn a_move_saved_by_itself_is_followed_and_one_saved_with_an_edit_is_not() {
             );
         }
     }
+}
+
+/// A file of `three_trees`: its path, its lines, its mark and where it was first.
+type Spec<'a> = (&'a str, &'a [&'a str], bool, Option<&'a str>);
+
+/// A generated history of three trees, with no stream: the first commit's files, then each
+/// branch's end.
+fn three_trees(trees: [&[Spec]; 3]) -> Generated {
+    let tree = |files: &[Spec]| -> Tree {
+        (files.iter())
+            .map(|(path, lines, exec, origin)| {
+                let file = File {
+                    lines: lines.iter().map(|l| format!("{l}\n")).collect(),
+                    exec: *exec,
+                    origin: origin.map(str::to_owned),
+                    moved: false,
+                    edited: [false; 2],
+                };
+                ((*path).to_owned(), file)
+            })
+            .collect()
+    };
+    Generated {
+        stream: String::new(),
+        first: tree(trees[0]),
+        ends: [tree(trees[1]), tree(trees[2])],
+        moves: MoveCounts::default(),
+    }
+}
+
+/// One result: files with their text and executable mark.
+fn result(files: &[(&str, &str, bool)]) -> (Files, BTreeMap<String, bool>) {
+    let bytes = files
+        .iter()
+        .map(|(p, t, _)| ((*p).to_owned(), t.as_bytes().to_vec()));
+    let marks = files.iter().map(|(p, _, x)| ((*p).to_owned(), *x));
+    (bytes.collect(), marks.collect())
+}
+
+#[test]
+fn nothing_lost_names_a_line_a_branch_added_that_is_in_no_result() {
+    let start: &[Spec] = &[("a.txt", &["one", "two"], false, Some("a.txt"))];
+    let added: &[Spec] = &[("a.txt", &["one", "new", "two"], false, Some("a.txt"))];
+    let made = three_trees([start, added, start]);
+    let lost = nothing_lost(&made, &[result(&[("a.txt", "one\ntwo\n", false)])]);
+    assert_eq!(
+        lost,
+        Err(r#"branch 0's a.txt: the line "new" it added is in none of Opalro's results"#.into())
+    );
+    let kept = [result(&[("a.txt", "one\nnew\ntwo\nmore\n", false)])];
+    assert_eq!(nothing_lost(&made, &kept), Ok(()));
+}
+
+#[test]
+fn nothing_lost_names_a_file_a_branch_added_that_is_in_no_result() {
+    let start: &[Spec] = &[("a.txt", &["one"], false, Some("a.txt"))];
+    let added: &[Spec] = &[
+        ("a.txt", &["one"], false, Some("a.txt")),
+        ("b.txt", &["bee"], false, None),
+    ];
+    let made = three_trees([start, start, added]);
+    let lost = nothing_lost(&made, &[result(&[("a.txt", "one\n", false)])]);
+    assert_eq!(
+        lost,
+        Err("branch 1's b.txt: the file it added is in none of Opalro's results".into())
+    );
+}
+
+#[test]
+fn nothing_lost_finds_nothing_lost_where_a_branch_only_took_lines_out() {
+    let start: &[Spec] = &[("a.txt", &["one", "two", "three"], false, Some("a.txt"))];
+    let fewer: &[Spec] = &[("a.txt", &["one", "three"], false, Some("a.txt"))];
+    let other: &[Spec] = &[(
+        "a.txt",
+        &["one", "two", "three", "four"],
+        false,
+        Some("a.txt"),
+    )];
+    let made = three_trees([start, fewer, other]);
+    let merged = [result(&[("a.txt", "one\nthree\nfour\n", false)])];
+    assert_eq!(nothing_lost(&made, &merged), Ok(()));
+}
+
+/// A branch that only turned the mark on, where the other replaced every line: the mark is the
+/// file's in the result, whatever its lines.
+#[test]
+fn nothing_lost_reads_a_mark_from_the_file_where_it_is() {
+    let start: &[Spec] = &[("a.txt", &["one"], false, Some("a.txt"))];
+    let marked: &[Spec] = &[("a.txt", &["one"], true, Some("a.txt"))];
+    let rewritten: &[Spec] = &[("a.txt", &["other"], false, Some("a.txt"))];
+    let made = three_trees([start, marked, rewritten]);
+    let kept = [result(&[("a.txt", "other\n", true)])];
+    assert_eq!(nothing_lost(&made, &kept), Ok(()));
+    let lost = nothing_lost(&made, &[result(&[("a.txt", "other\n", false)])]);
+    assert_eq!(
+        lost,
+        Err(
+            "branch 0's a.txt: the executable mark it changed is in none of Opalro's results"
+                .into()
+        )
+    );
 }
