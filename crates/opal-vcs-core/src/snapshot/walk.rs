@@ -16,7 +16,7 @@ use opal_platform::dir::{Dir, DirEntry, EntryMeta, EntryType, is_link_refusal};
 
 use super::{Child, Folders, Kind, NAMED, SaveError, listed};
 use crate::conflict::standing::as_it_stands;
-use crate::conflict::{self, Record, Settled};
+use crate::conflict::{self, Record, Recording, Settled};
 use crate::drive::Drive;
 use crate::id::Id;
 use crate::ignore::{Decision, InForce, Matcher, Rules};
@@ -454,6 +454,8 @@ pub(super) struct Base<'a> {
     /// Whether the walk is a save's, which keeps a conflict standing as a version in a folder
     /// gone from disk.
     pub(super) settles: bool,
+    /// The places a save records as fixed whatever the folder shows, if any.
+    pub(super) recording: Option<&'a Recording>,
 }
 
 impl<'a> Base<'a> {
@@ -467,6 +469,7 @@ impl<'a> Base<'a> {
             ahead: None,
             conflicts: false,
             settles: false,
+            recording: None,
         }
     }
 
@@ -2213,7 +2216,11 @@ fn rebuild_gone(
                 }
                 let path = path_below(top, &open, &name, &e.name);
                 let record = conflict::record_at(base.store, search.records, &path, &e.id)?;
-                let id = match conflict::settled_gone(record) {
+                let settled = match base.recording {
+                    Some(recording) => recording.settled_gone(&path, record),
+                    None => Recording::default().settled_gone(&path, record),
+                };
+                let id = match settled {
                     Settled::Fixed => continue,
                     Settled::Kept => e.id,
                     Settled::Again(again) => {

@@ -228,12 +228,19 @@ pub(crate) fn settled(
     }
 }
 
-/// What a save puts at the place of `c` with nothing in the folder there.
-pub(crate) fn settled_gone(c: &Record) -> Settled {
-    // With nothing there no file is scanned, so the scan is never asked for.
-    match seen(c, None, |_| Ok(Left::default())) {
-        Ok(seen) => settled(c, seen, None, false),
-        Err(_) => Settled::Kept,
+impl Recording {
+    /// Whether the place at `path` is recorded as fixed, whatever the folder shows.
+    pub(crate) fn fixes(&self, path: &str) -> bool {
+        self.fixed.contains(path)
+    }
+
+    /// What a save puts at `path`, the place of `c`, with nothing in the folder there.
+    pub(crate) fn settled_gone(&self, path: &str, c: &Record) -> Settled {
+        // With nothing there no file is scanned, so the scan is never asked for.
+        match seen(c, None, |_| Ok(Left::default())) {
+            Ok(seen) => settled(c, seen, None, self.fixes(path)),
+            Err(_) => Settled::Kept,
+        }
     }
 }
 

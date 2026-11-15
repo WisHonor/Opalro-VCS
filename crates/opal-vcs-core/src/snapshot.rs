@@ -519,6 +519,7 @@ pub(crate) fn save_recording(
     let mut base = Base::new(repo.store(), parent.root, base_limits());
     base.conflicts = keeps_conflicts;
     base.settles = keeps_conflicts;
+    base.recording = Some(recording);
     let walked = || {
         walk(
             repo.root(),
@@ -575,6 +576,7 @@ pub(crate) fn save_recording(
             keeps_conflicts.then_some(only::Conflicts {
                 records: &mut records,
                 in_conflict,
+                recording,
             }),
         )?;
         only::check_matched(&scope, given, &narrowed, &mut handles)?;
@@ -590,7 +592,7 @@ pub(crate) fn save_recording(
     check_names(
         &folders,
         &old,
-        keeps_conflicts.then_some((repo.store(), &mut records)),
+        keeps_conflicts.then_some((repo.store(), &mut records, recording)),
     )?;
     // Before anything is stored, so that a stop leaves nothing behind (decision 039). Pointers
     // first: saving line endings as they are can't help while pointers stand in for files.
@@ -1216,7 +1218,7 @@ type Folders = BTreeMap<String, Vec<Child>>;
 fn check_names(
     folders: &Folders,
     old: &HashMap<String, Option<Listing>>,
-    mut conflicts: Option<(&Store, &mut HashMap<Id, Record>)>,
+    mut conflicts: Option<(&Store, &mut HashMap<Id, Record>, &Recording)>,
 ) -> Result<(), SaveError> {
     let mut problems = Vec::new();
     for (rel, children) in folders {
@@ -1230,7 +1232,7 @@ fn check_names(
         if kept.len() == names.len() {
             continue;
         }
-        if let (Some(listing), Some((store, records))) = (before, conflicts.as_mut()) {
+        if let (Some(listing), Some((store, records, recording))) = (before, conflicts.as_mut()) {
             for e in listing.entries() {
                 let met = children.binary_search_by(|c| c.name.as_str().cmp(&e.name));
                 if e.kind != EntryKind::Conflict || met.is_ok() {
@@ -1238,7 +1240,7 @@ fn check_names(
                 }
                 let path = walk::path_in(rel, &e.name);
                 let record = conflict::record_at(store, records, &path, &e.id)?;
-                if conflict::settled_gone(record) != Settled::Fixed {
+                if recording.settled_gone(&path, record) != Settled::Fixed {
                     names.push(&e.name);
                     kept.push(&e.name);
                 }
@@ -1440,7 +1442,7 @@ impl Contents for Storing<'_> {
         conflict: &Record,
         built: Option<(EntryKind, Id, u64)>,
     ) -> Result<Option<(EntryKind, Id, u64)>, SaveError> {
-        let fixed = self.recording.fixed.contains(path);
+        let fixed = self.recording.fixes(path);
         let seen = if fixed {
             conflict::Seen::Fixed
         } else {
@@ -5738,6 +5740,159 @@ mod tests {
             held_at(repo.store(), root, "ui"),
             Held::Conflict(owning(ui, None, 0))
         );
+    }
+
+    /// Every place `every_row` holds, and conflicts standing as a folder holding one file
+    /// (`a.txt`): on disk untouched (`ui1`), on disk with the file changed (`uic`), gone from disk
+    /// (`uig`), and in folders gone from disk, alone (`art2/ui`) and beside a file
+    /// (`art3/ui`). The folder laid out as `every_row` lays it out. Gives the planted top listing.
+    fn every_place() -> (tempfile::TempDir, Repository, Id) {
+        let (dir, mut repo) = every_row();
+        let held = plant_save(&mut repo, &[("f/a.txt", EntryKind::File, b"a")]);
+        let stood = versions(Some(folder_term(&held, "f")));
+        let files: &[(&str, EntryKind, &[u8])] = &[
+            ("art3/other.txt", EntryKind::File, b"other"),
+            ("plain.txt", EntryKind::File, b"one"),
+        ];
+        let conflicts = [
+            ("art/notes.txt", marked()),
+            ("art/x.png", picture()),
+            ("art2/ui", stood.clone()),
+            ("art3/ui", stood.clone()),
+            ("fixed.txt", marked()),
+            ("gone.png", picture()),
+            ("gone.txt", marked()),
+            ("half.txt", marked()),
+            ("hero.png", picture()),
+            ("ui1", stood.clone()),
+            ("uic", stood.clone()),
+            ("uig", stood),
+        ];
+        let planted = plant_conflicted(&mut repo, files, &conflicts);
+        write(dir.path(), "ui1/a.txt", b"a");
+        write(dir.path(), "uic/a.txt", b"a, changed");
+        (dir, repo, planted)
+    }
+
+    const PLACES: [&str; 12] = [
+        "art/notes.txt",
+        "art/x.png",
+        "art2/ui",
+        "art3/ui",
+        "fixed.txt",
+        "gone.png",
+        "gone.txt",
+        "half.txt",
+        "hero.png",
+        "ui1",
+        "uic",
+        "uig",
+    ];
+
+    #[test]
+    fn a_save_of_some_paths_agrees_with_a_full_save_at_every_place_it_names() {
+        let (_dir, mut repo, _) = every_place();
+        let (full, _) = saved_with(save_now(&mut repo));
+        let whole: Vec<(&str, Held)> = PLACES
+            .iter()
+            .map(|p| (*p, held_at(repo.store(), full, p)))
+            .collect();
+        let mut cases: Vec<Vec<&str>> = PLACES.iter().map(|p| vec![*p]).collect();
+        // Below a place standing as a folder, its one file; the folder a place sits in; pairs,
+        // one of which empties a gone folder.
+        for below in [
+            "ui1/a.txt",
+            "uic/a.txt",
+            "uig/a.txt",
+            "art2/ui/a.txt",
+            "art3/ui/a.txt",
+        ] {
+            cases.push(vec![below]);
+        }
+        for folder in ["art", "art2", "art3"] {
+            cases.push(vec![folder]);
+        }
+        cases.push(vec!["art2/ui", "art3/ui"]);
+        cases.push(vec!["art3/ui", "art3/other.txt"]);
+        cases.push(vec!["art/notes.txt", "art/x.png"]);
+        cases.push(vec!["half.txt", "uig"]);
+        cases.push(vec!["art2/ui/a.txt", "hero.png"]);
+        for names in cases {
+            let (_dir, mut repo, planted) = every_place();
+            let given: Vec<Given> = names.iter().map(|n| path(n)).collect();
+            // Nothing to save leaves the save as it was.
+            let root = match save_only(&mut repo, &given).unwrap() {
+                SaveOutcome::Saved { save, .. } => save.root,
+                SaveOutcome::NothingChanged { .. } => planted,
+            };
+            let covers = |place: &str| {
+                names.iter().any(|n| {
+                    place == *n
+                        || place.starts_with(&format!("{n}/"))
+                        || n.starts_with(&format!("{place}/"))
+                })
+            };
+            for (place, full) in &whole {
+                let got = held_at(repo.store(), root, place);
+                if covers(place) {
+                    assert_eq!(&got, full, "{names:?}: {place}, as a full save");
+                } else {
+                    let was = held_at(repo.store(), planted, place);
+                    assert_eq!(got, was, "{names:?}: {place}, as it was");
+                }
+            }
+        }
+    }
+
+    /// A save recording `fixed` as fixed, of `only` when given.
+    fn saved_recording(
+        repo: &mut Repository,
+        fixed: &[&str],
+        only: Option<&[Given]>,
+    ) -> Result<SaveOutcome, SaveError> {
+        let who = who();
+        let req = SaveRequest {
+            message: Some("Fixed"),
+            who: &who,
+            command: "resolve",
+            accept_crlf: false,
+            git_excludes: None,
+            new_line: None,
+            only,
+            amend: false,
+        };
+        let recording = Recording {
+            fixed: fixed.iter().map(|p| (*p).to_owned()).collect(),
+        };
+        save_recording(repo, &req, &recording, &mut |_| {}, &mut |_| true)
+    }
+
+    #[test]
+    fn a_place_recorded_as_fixed_with_nothing_there_holds_no_name_and_no_folder() {
+        // A new name clashing only with a place being recorded as fixed is saved.
+        let (dir, mut repo, _) = hero_in_conflict(picture());
+        write(dir.path(), "hero.png", b"another picture");
+        let (root, conflicts) = saved_with(saved_recording(&mut repo, &["Hero.png"], None));
+        assert_eq!(conflicts, 0);
+        assert_eq!(held_at(repo.store(), root, "Hero.png"), Held::Nothing);
+        assert_eq!(
+            held_at(repo.store(), root, "hero.png"),
+            file(b"another picture")
+        );
+        // A gone folder emptied by the fix isn't saved as an empty folder, whole or named.
+        for only in [None, Some(&[path("art/x.png")][..])] {
+            let (dir, mut repo) = with_versions();
+            let files: &[(&str, EntryKind, &[u8])] = &[("plain.txt", EntryKind::File, b"one")];
+            plant_conflicted(&mut repo, files, &[("art/x.png", picture())]);
+            write(dir.path(), "plain.txt", b"one");
+            let (root, conflicts) = saved_with(saved_recording(&mut repo, &["art/x.png"], only));
+            assert_eq!(conflicts, 0, "{only:?}");
+            assert_eq!(
+                held_at(repo.store(), root, "art"),
+                Held::Nothing,
+                "{only:?}"
+            );
+        }
     }
 
     #[test]
