@@ -1034,3 +1034,30 @@ fn a_conflict_kept_in_a_gone_folder_a_file_now_names_stops_the_save_in_its_own_w
     );
     assert_eq!(env.state().1, before);
 }
+
+#[test]
+fn a_new_name_clashing_with_a_conflict_kept_with_nothing_there_stops_the_save() {
+    let env = started();
+    plant(
+        &env,
+        &[("plain.txt", b"one\n")],
+        &[("Hero.png", versions(Some(term(PICTURE))))],
+    );
+    put(&env, "plain.txt", b"one\n");
+    put(&env, "hero.png", b"another picture");
+    let before = env.state().1;
+    let (shown, said) = run(&env, &["save", "Another"], 1);
+    assert_eq!(shown, "");
+    assert!(
+        said.contains(
+            "\"hero.png\" and \"Hero.png\" differ only in upper/lower case, so they clash on \
+             Windows and macOS"
+        ),
+        "{said}"
+    );
+    assert!(
+        said.contains("Nothing was saved. Rename them, or list them in .opalroignore."),
+        "{said}"
+    );
+    assert_eq!(env.state().1, before);
+}

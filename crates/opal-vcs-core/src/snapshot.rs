@@ -587,7 +587,11 @@ pub(crate) fn save_recording(
             .collect();
         rebuilt_records.retain(|r| named.contains(&r.id()));
     }
-    check_names(&folders, &old)?;
+    check_names(
+        &folders,
+        &old,
+        keeps_conflicts.then_some((repo.store(), &mut records)),
+    )?;
     // Before anything is stored, so that a stop leaves nothing behind (decision 039). Pointers
     // first: saving line endings as they are can't help while pointers stand in for files.
     pointers?;
@@ -1207,18 +1211,38 @@ struct Child {
 type Folders = BTreeMap<String, Vec<Child>>;
 
 /// Judges each folder's new names against all of its names (decision 004).
-fn check_names(folders: &Folders, old: &HashMap<String, Option<Listing>>) -> Result<(), SaveError> {
+/// With `conflicts` (the store and the records read), a conflict the save keeps with nothing in the
+/// folder there holds its name too.
+fn check_names(
+    folders: &Folders,
+    old: &HashMap<String, Option<Listing>>,
+    mut conflicts: Option<(&Store, &mut HashMap<Id, Record>)>,
+) -> Result<(), SaveError> {
     let mut problems = Vec::new();
     for (rel, children) in folders {
         let before = old.get(rel).and_then(Option::as_ref);
-        let names: Vec<&str> = children.iter().map(|c| c.name.as_str()).collect();
-        let kept: Vec<&str> = names
+        let mut names: Vec<&str> = children.iter().map(|c| c.name.as_str()).collect();
+        let mut kept: Vec<&str> = names
             .iter()
             .copied()
             .filter(|n| before.is_some_and(|l| l.get(n).is_some()))
             .collect();
         if kept.len() == names.len() {
             continue;
+        }
+        if let (Some(listing), Some((store, records))) = (before, conflicts.as_mut()) {
+            for e in listing.entries() {
+                let met = children.binary_search_by(|c| c.name.as_str().cmp(&e.name));
+                if e.kind != EntryKind::Conflict || met.is_ok() {
+                    continue;
+                }
+                let path = walk::path_in(rel, &e.name);
+                let record = conflict::record_at(store, records, &path, &e.id)?;
+                if conflict::settled_gone(record) != Settled::Fixed {
+                    names.push(&e.name);
+                    kept.push(&e.name);
+                }
+            }
         }
         let known = folder_problems(&kept);
         for p in folder_problems(&names) {
@@ -5774,42 +5798,73 @@ mod tests {
         assert_eq!(held_at(repo.store(), root, "M.txt"), file(MARKED));
     }
 
-    /// What happens today, not yet ruled on: the respelled file is saved beside the conflict, and
-    /// the two names then fold together, so every save after keeps both as they were.
+    /// Saves, which must be refused for `hero.png` clashing with the conflict at `Hero.png`,
+    /// storing nothing.
+    fn refused_beside_hero(repo: &mut Repository) {
+        let head = repo.head().unwrap();
+        let e = save_now(repo).unwrap_err();
+        assert!(matches!(e, SaveError::NotPortable { .. }), "{e:?}");
+        let said = e.to_string();
+        assert!(
+            said.contains("\"hero.png\" and \"Hero.png\" differ only in upper/lower case"),
+            "{said}"
+        );
+        assert_eq!(
+            e.hint().as_deref(),
+            Some("Nothing was saved. Rename them, or list them in .opalroignore.")
+        );
+        assert_eq!(repo.head().unwrap(), head);
+    }
+
+    /// A project holding `plain.txt` and the conflict `record` at `Hero.png`, laid out on disk
+    /// without it.
+    fn hero_in_conflict(record: Record) -> (tempfile::TempDir, Repository, Id) {
+        let (dir, mut repo) = with_versions();
+        let files: &[(&str, EntryKind, &[u8])] = &[("plain.txt", EntryKind::File, b"one")];
+        let planted = plant_conflicted(&mut repo, files, &[("Hero.png", record)]);
+        write(dir.path(), "plain.txt", b"one");
+        (dir, repo, planted)
+    }
+
     #[test]
-    fn a_picture_respelled_in_letter_case_is_saved_beside_its_conflict() {
+    fn a_picture_respelled_in_letter_case_is_refused_beside_its_conflict() {
         if !this_drive().ignores_case {
             println!("Skipped: only a drive that ignores letter case respells a name in place.");
             return;
         }
-        let (dir, mut repo) = with_versions();
-        let files: &[(&str, EntryKind, &[u8])] = &[("plain.txt", EntryKind::File, b"one")];
-        plant_conflicted(&mut repo, files, &[("Hero.png", picture())]);
-        write(dir.path(), "plain.txt", b"one");
+        let (dir, mut repo, _) = hero_in_conflict(picture());
         write(dir.path(), "hero.png", PICTURE);
+        refused_beside_hero(&mut repo);
+        // Spelled back, the save goes as before: untouched, nothing to save.
+        fs::rename(dir.path().join("hero.png"), dir.path().join("Hero.png")).unwrap();
+        nothing_saved(save_now(&mut repo));
+    }
+
+    #[test]
+    fn a_new_name_differing_from_a_conflict_kept_with_nothing_there_only_in_case_is_refused() {
+        // Removed, with another file at a name differing only in case: on a drive that ignores
+        // case this is a respelling, elsewhere two names.
+        let (dir, mut repo, _) = hero_in_conflict(picture());
+        write(dir.path(), "hero.png", b"another picture");
+        refused_beside_hero(&mut repo);
+        // Standing as nothing already, it holds its name all the same.
+        let (dir, mut repo, _) = hero_in_conflict(owning(picture(), None, 0));
+        write(dir.path(), "hero.png", b"another picture");
+        refused_beside_hero(&mut repo);
+    }
+
+    #[test]
+    fn a_new_name_that_doesnt_clash_is_saved_beside_a_conflict_kept_with_nothing_there() {
+        let (dir, mut repo, planted) = hero_in_conflict(owning(picture(), None, 0));
+        write(dir.path(), "villain.png", b"another picture");
         let (root, conflicts) = saved_with(save_now(&mut repo));
         assert_eq!(conflicts, 1);
-        let absent = owning(picture(), None, 0);
+        let kept = entry_at(repo.store(), root, "Hero.png");
+        assert_eq!(kept, entry_at(repo.store(), planted, "Hero.png"));
         assert_eq!(
-            held_at(repo.store(), root, "Hero.png"),
-            Held::Conflict(absent)
+            held_at(repo.store(), root, "villain.png"),
+            file(b"another picture")
         );
-        assert_eq!(held_at(repo.store(), root, "hero.png"), file(PICTURE));
-        let s = status(&repo, false, None).unwrap();
-        assert!(s.changes.is_empty(), "{:?}", s.changes);
-        let rows: Vec<_> = s
-            .conflicts
-            .iter()
-            .map(|c| (c.path.as_str(), c.standing))
-            .collect();
-        assert_eq!(rows, [("Hero.png", Standing::NotHere)]);
-        // Both are now kept as they were: a change to `hero.png` isn't saved.
-        write(dir.path(), "hero.png", b"painted over");
-        let SaveOutcome::NothingChanged { warnings, .. } = save_now(&mut repo).unwrap() else {
-            panic!("saved");
-        };
-        assert_eq!(warnings.len(), 1, "{warnings:?}");
-        assert_eq!(warnings[0].kind, crate::warning::KEPT_AS_THEY_WERE);
     }
 
     #[test]
@@ -5886,6 +5941,15 @@ mod tests {
         let without = save_reads(plain, true);
         assert_eq!(with, without);
         assert_eq!(with.1, 0);
+        // New names are judged against the old ones without reading a record.
+        let new_names = |repo: &mut Repository, root: &Path| {
+            plain(repo, root);
+            write(root, "f1/g2/h/New.txt", b"new");
+            write(root, "fresh.txt", b"new");
+        };
+        let with_new = save_reads(new_names, false);
+        assert_eq!(with_new, save_reads(new_names, true));
+        assert_eq!(with_new.1, 0);
         // One conflict, standing as a file: no more listings, and its record once.
         let conflicted = |repo: &mut Repository, root: &Path| {
             keep(repo, &[PICTURE, b"base", b"theirs"]);

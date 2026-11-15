@@ -2029,7 +2029,8 @@ fn throwing_away_many_unsaved_links_beside_a_conflict_reads_its_record_once() {
         assert_eq!(done.unwrap().removed.len(), 30);
     });
     assert_eq!(read, 1);
-    // Undone, every link is written back, and the record is still read once.
+    // Undone, every link is written back; the step's saves picture `dir` as it stood, holding no
+    // conflict entry, so no record is read.
     let read = records_read(dir.path(), |repo| {
         let req = crate::undo::StepRequest {
             n: 1,
@@ -2039,7 +2040,7 @@ fn throwing_away_many_unsaved_links_beside_a_conflict_reads_its_record_once() {
         };
         crate::undo::undo(repo, &req, &mut |_| {}).unwrap();
     });
-    assert_eq!(read, 1);
+    assert_eq!(read, 0);
     assert_eq!(
         fs::read_link(dir.path().join("dir/new7")).unwrap(),
         Path::new("x.txt")
