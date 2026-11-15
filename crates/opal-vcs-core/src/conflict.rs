@@ -1,8 +1,9 @@
 //! Conflict records: every version a place in conflict holds (docs/storage-format.md section 8).
 
 use std::collections::hash_map::Entry as Slot;
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::io;
+use std::sync::{Mutex, PoisonError};
 
 use crate::encoding::{DecodeError, Reader, Writer};
 use crate::id::{Flavor, Id, hash_record};
@@ -189,6 +190,11 @@ pub(crate) fn seen(
 #[derive(Debug, Default)]
 pub(crate) struct Recording {
     pub fixed: BTreeSet<String>,
+    /// What the folder held at each fixed place when it was decided on (`None`: nothing): a walk
+    /// that finds something else there stops, so nothing is recorded that nobody looked at.
+    pub decided_on: BTreeMap<String, Option<(EntryKind, Id)>>,
+    /// The fixed places the walk found something at.
+    pub met: Mutex<BTreeSet<String>>,
 }
 
 /// What a save puts at a place in conflict.
@@ -232,6 +238,33 @@ impl Recording {
     /// Whether the place at `path` is recorded as fixed, whatever the folder shows.
     pub(crate) fn fixes(&self, path: &str) -> bool {
         self.fixed.contains(path)
+    }
+
+    /// Whether `now`, what the walk found at the fixed place `path`, is what was decided on.
+    pub(crate) fn check(&self, path: &str, now: Option<(EntryKind, Id)>) -> Result<(), SaveError> {
+        if self.decided_on.get(path).is_some_and(|was| *was != now) {
+            return Err(SaveError::ChangedDuringSave {
+                path: path.to_owned(),
+            });
+        }
+        if now.is_some() {
+            let mut met = self.met.lock().unwrap_or_else(PoisonError::into_inner);
+            met.insert(path.to_owned());
+        }
+        Ok(())
+    }
+
+    /// Once the walk is over: a place decided on with something there that it found nothing at.
+    pub(crate) fn check_gone(&self) -> Result<(), SaveError> {
+        let met = self.met.lock().unwrap_or_else(PoisonError::into_inner);
+        match self
+            .decided_on
+            .iter()
+            .find(|(path, was)| was.is_some() && !met.contains(*path))
+        {
+            Some((path, _)) => Err(SaveError::ChangedDuringSave { path: path.clone() }),
+            None => Ok(()),
+        }
     }
 
     /// What a save puts at `path`, the place of `c`, with nothing in the folder there.

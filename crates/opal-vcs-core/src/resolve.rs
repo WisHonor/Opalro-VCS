@@ -2,28 +2,30 @@
 //! writes one version of a file in conflict out to look at.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::ffi::{OsStr, OsString};
 use std::fmt;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
+use opal_platform::dir::Dir;
+
 use crate::changeids::ChangeIds;
 use crate::conflict::{self, Listings, Record, Recording, Seen, Term};
-use crate::diary::{Action, DiaryEntry, Position};
+use crate::diary::Position;
 use crate::drive::Drive;
 use crate::fsio;
 use crate::history::tip_of;
 use crate::id::Id;
 use crate::kept::overlay_with;
 use crate::listing::{Entry, EntryKind, Listing};
-use crate::moves::{self, MAX_LEFT_BYTES, MAX_NOTED_BYTES};
 use crate::names::Given;
 use crate::pack::PackSet;
 use crate::repo::{ChangeLock, RepoError, Repository};
-use crate::save::{MAX_MOVE_NOTES, Person, Save};
+use crate::save::{Person, Save};
 use crate::scope::within;
 use crate::snapshot::{
-    LargeSave, SaveError, SaveRequest, compose, keep_file_cache, read_and_build, shown_elsewhere,
-    store_listing,
+    LargeSave, Made, SaveError, SaveRequest, base_limits, compose, keep_file_cache, notes_against,
+    read_and_build, save_before, shown_elsewhere, store_listing,
 };
 use crate::status::{self, ConflictAt, Standing};
 use crate::store::{Store, StoreError};
@@ -44,11 +46,27 @@ pub enum Pick {
     Before,
 }
 
+/// A side `--keep` can take whole: yours or theirs, never where the lines parted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Side {
+    Mine,
+    Theirs,
+}
+
+impl From<Side> for Pick {
+    fn from(side: Side) -> Pick {
+        match side {
+            Side::Mine => Pick::Mine,
+            Side::Theirs => Pick::Theirs,
+        }
+    }
+}
+
 pub struct ResolveRequest<'a> {
     /// Places named, a folder standing for every place below it; `None` records every fixed one.
     pub paths: Option<&'a [String]>,
-    /// The side kept whole at each place named.
-    pub keep: Option<Pick>,
+    /// The side kept whole at each place named; refused without paths.
+    pub keep: Option<Side>,
     pub who: &'a Person,
     /// The command as the diary records it; already redacted.
     pub command: &'a str,
@@ -108,6 +126,8 @@ pub struct Copied {
 pub enum ResolveError {
     #[error("You're at a save, not on a line, so there is no line to record fixes on.")]
     NotOnALine,
+    #[error("Keeping a side needs the places to keep it at, so nothing was recorded.")]
+    KeepNeedsPlaces,
     #[error("{} isn't in conflict, so nothing was recorded.", escape(path, false))]
     NotInConflict { path: String },
     #[error("{}", still_yours(paths))]
@@ -169,6 +189,9 @@ impl ResolveError {
     pub fn hint(&self) -> Option<String> {
         Some(match self {
             ResolveError::NotOnALine => "Make a line here first: opalro line new <name>".into(),
+            ResolveError::KeepNeedsPlaces => {
+                "Name them: opalro resolve <path> --keep mine (or theirs).".into()
+            }
             ResolveError::NotInConflict { .. } => {
                 "opalro status lists the places in conflict.".into()
             }
@@ -277,6 +300,10 @@ fn resolve_locked(
     req: &ResolveRequest,
     ask: &mut dyn FnMut(&Ask) -> bool,
 ) -> Result<ResolveOutcome, ResolveError> {
+    // A side kept at every place in conflict is never what anyone asked for.
+    if req.keep.is_some() && req.paths.is_none() {
+        return Err(ResolveError::KeepNeedsPlaces);
+    }
     let (head, entry) = repo.current()?;
     let Position::OnLine(line) = &entry.state.position else {
         return Err(ResolveError::NotOnALine);
@@ -289,8 +316,12 @@ fn resolve_locked(
     }
     let drive = repo.drive()?;
     let chosen = choose(&status.conflicts, req, drive, ask)?;
+    // What is recorded must still be what was looked at, the question's wait included.
+    fsio::act_point("resolve:chosen");
     let places: Vec<String> = chosen.iter().map(|c| c.path.clone()).collect();
     let records: Vec<Id> = chosen.iter().map(|c| c.record).collect();
+    let chosen_now: Vec<(String, Option<(EntryKind, Id)>)> =
+        chosen.iter().map(|c| (c.path.clone(), c.now)).collect();
     let (left, left_count) = left(status.conflicts, &places);
     if places.is_empty() {
         return Ok(ResolveOutcome::Nothing { left, left_count });
@@ -315,29 +346,28 @@ fn resolve_locked(
         message: &message,
         amend,
     };
-    let mut state = entry.state.clone();
     let (save_id, save, short_change_id, applied, safety_copies, warnings) = match req.keep {
         None => {
+            let decided_on = chosen_now.into_iter().collect();
             let (save_id, save, short, mut warnings, packs, seen, now) =
-                built.as_the_folder_holds(repo, req, &places, ask, &mut cache)?;
-            state.lines.insert(line.clone(), save_id);
-            let diary = DiaryEntry {
-                parent: Some(head),
-                action: Action::Command,
-                command: req.command.to_owned(),
-                who: req.who.clone(),
-                opal_version: env!("CARGO_PKG_VERSION").into(),
-                state: state.clone(),
-                folder_change: None,
-            };
+                built.as_the_folder_holds(repo, req, &places, decided_on, ask, &mut cache)?;
             fsio::fault_point("resolve:built").map_err(RepoError::from)?;
-            repo.commit(lock, packs, &diary)?;
+            built.made(save_id, &save).commit(
+                repo,
+                lock,
+                head,
+                &entry.state,
+                req.who,
+                req.command,
+                packs,
+                &mut cache,
+            )?;
             keep_file_cache(repo, seen, now, &mut warnings);
             (save_id, save, short, Applied::default(), 0, warnings)
         }
-        Some(pick) => {
+        Some(side) => {
             let (save_id, save, short, mut warnings, packs) =
-                built.keeping(repo, &places, &records, pick, req.who, &mut cache)?;
+                built.keeping(repo, &places, &records, side.into(), req.who, &mut cache)?;
             // Stored as a combine stores its save before switching to it.
             repo.store_packs(lock, packs)?;
             fsio::fault_point("resolve:built").map_err(RepoError::from)?;
@@ -351,7 +381,8 @@ fn resolve_locked(
                 drive,
                 req.git_excludes,
             )?;
-            state.lines.insert(line.clone(), save_id);
+            let made = built.made(save_id, &save);
+            let state = made.state(&entry.state);
             let planned = Planned {
                 head,
                 before: &entry.state,
@@ -363,16 +394,11 @@ fn resolve_locked(
             };
             let (applied, safety_copies, _) =
                 make_switch(repo, lock, planned, req.who, req.command, earlier)?;
+            made.learn(repo, &mut cache, &state);
             warnings.splice(0..0, status.warnings);
             (save_id, save, short, applied, safety_copies, warnings)
         }
     };
-    if amend {
-        cache.replace(&line, parent_id, save_id);
-    } else {
-        cache.add(&line, parent_id, save_id, save.change_id);
-    }
-    cache.store(repo, &state);
     Ok(ResolveOutcome::Recorded {
         save_id,
         save,
@@ -497,6 +523,17 @@ type FromFolder = (
 );
 
 impl Built<'_> {
+    /// The save `save_id` made here.
+    fn made<'s>(&'s self, save_id: Id, save: &Save) -> Made<'s> {
+        Made {
+            line: self.line,
+            parent_id: self.parent_id,
+            save_id,
+            change_id: save.change_id,
+            amend: self.amend,
+        }
+    }
+
     /// The save with `places` as the folder holds them, walked and checked as `save <paths>`
     /// walks and checks them, not yet committed.
     fn as_the_folder_holds(
@@ -504,6 +541,7 @@ impl Built<'_> {
         repo: &Repository,
         req: &ResolveRequest,
         places: &[String],
+        decided_on: BTreeMap<String, Option<(EntryKind, Id)>>,
         ask: &mut dyn FnMut(&Ask) -> bool,
         cache: &mut ChangeIds,
     ) -> Result<FromFolder, ResolveError> {
@@ -520,6 +558,8 @@ impl Built<'_> {
         };
         let recording = Recording {
             fixed: places.iter().cloned().collect(),
+            decided_on,
+            ..Recording::default()
         };
         // Its places come from the save itself, and one standing as nothing matches nothing in
         // the folder.
@@ -611,26 +651,23 @@ impl Built<'_> {
             held.insert(id, l);
             Ok(id)
         })?;
-        // Moves noted as `save` notes them, against the save before.
-        let before = match (self.amend, self.parent.parents.first()) {
-            (true, Some(first)) => Some(store.save(first, repo.signatures_allowed())?.root),
-            (true, None) => None,
-            (false, _) => Some(self.parent.root),
+        // Held to a save's limits as the next save reads it, each conflict as what it stands as,
+        // before anything is stored: a side kept whole may be larger than what stood there.
+        let read = |id: &Id| match held.get(id) {
+            Some(l) => Ok(l.clone()),
+            None => store.listing(id),
         };
-        let place = |o: Option<&Entry>, n: Option<&Entry>| {
-            [o, n]
-                .into_iter()
-                .flatten()
-                .any(|e| e.kind == EntryKind::Conflict)
+        let stand = |id: &Id| {
+            store
+                .met_conflict(id)
+                .map(|r| conflict::stands_as(&r))
+                .map_err(|e| conflict::unreadable("in the new save", id, e))
         };
-        let mut move_notes = before
-            .and_then(|from| {
-                moves::count_and_moves(store, &held, from, root, MAX_LEFT_BYTES, &place).ok()
-            })
-            .and_then(|(_, notes)| notes.ok().flatten())
-            .unwrap_or_default();
-        let most = usize::try_from(MAX_MOVE_NOTES).unwrap_or(usize::MAX);
-        moves::first_that_fit(&mut move_notes, most, MAX_NOTED_BYTES);
+        if let Err(detail) = base_limits().add_all_standing(root, 0, 0, read, stand)? {
+            return Err(SaveError::TooLarge { detail }.into());
+        }
+        let before = save_before(repo, self.amend, self.parent);
+        let (move_notes, _) = notes_against(repo, &before, Some(&held), root);
         let mut warnings = Vec::new();
         let (id, save, short) = compose(
             repo,
@@ -688,8 +725,9 @@ pub fn copy_version(
         }
         Some(t) => t,
     };
-    let at = destination(repo, to, drive)?;
-    let size = fsio::write_new(&at, |file| {
+    // The file is made in the very folder that was checked.
+    let (dir, name) = destination(repo, to, drive)?;
+    let size = fsio::write_new(&dir, &name, |file| {
         repo.store()
             .copy_content(&term.id, file)
             .map_err(ResolveError::from)
@@ -745,31 +783,51 @@ fn conflict_on(
     Ok(None)
 }
 
-/// `to` with the folder it is in resolved as the system resolves it (links, `..`), refused when
-/// that is `.opalro` or inside it, compared as the drive compares names.
-fn destination(repo: &Repository, to: &Path, drive: Drive) -> Result<PathBuf, ResolveError> {
-    let already = || ResolveError::AlreadyThere { to: to.to_owned() };
+/// The folder `to` is in, opened once, and the name to make there, refused when that folder is
+/// `.opalro` or inside it, or the name is `.opalro`'s. Folders are told apart by identity (the
+/// drive's number and the folder's), so another name for `.opalro` is caught; the resolved path
+/// is compared by spelling too, as the drive compares names, for what Windows opens as `.opalro`
+/// (a stream on it, trailing dots and spaces).
+fn destination(
+    repo: &Repository,
+    to: &Path,
+    drive: Drive,
+) -> Result<(Dir, OsString), ResolveError> {
     let name = match to.components().next_back() {
         Some(Component::Normal(name)) => name,
         // `..`, `.` or a root names a folder that is there.
-        _ => return Err(already()),
+        _ => return Err(ResolveError::AlreadyThere { to: to.to_owned() }),
     };
     let up = match to.parent() {
         Some(up) if !up.as_os_str().is_empty() => up,
         _ => Path::new("."),
     };
-    let up = std::fs::canonicalize(up).map_err(RepoError::from)?;
-    let opal = std::fs::canonicalize(repo.root().join(".opalro")).map_err(RepoError::from)?;
+    let up = std::fs::canonicalize(up)?;
+    let opal_path = std::fs::canonicalize(repo.root().join(".opalro"))?;
+    let opal = Dir::open_top(&opal_path)?.own_meta()?.file_id;
+    let dir = Dir::open_top(&up)?;
+    let mut inside = dir.own_meta()?.file_id == opal;
+    // A folder above that can't be opened isn't `.opalro`, which was just opened.
+    for above in up.ancestors().skip(1) {
+        inside = inside
+            || Dir::open_top(above)
+                .and_then(|d| d.own_meta())
+                .is_ok_and(|m| m.file_id == opal);
+    }
+    let opened = opened_as(&name.to_string_lossy());
+    let named = dir
+        .metadata(OsStr::new(&opened))
+        .is_ok_and(|m| m.file_id == opal);
     let folded = |p: &Path| -> Vec<String> {
         p.components()
             .map(|c| drive.compared(&opened_as(&c.as_os_str().to_string_lossy())))
             .collect()
     };
-    let at = up.join(name);
-    if folded(&at).starts_with(&folded(&opal)) {
+    let spelled = folded(&up.join(name)).starts_with(&folded(&opal_path));
+    if inside || named || spelled {
         return Err(ResolveError::IntoOpalro);
     }
-    Ok(at)
+    Ok((dir, name.to_owned()))
 }
 
 /// The name Windows opens for `name`: a stream after `:` and trailing dots and spaces don't count.

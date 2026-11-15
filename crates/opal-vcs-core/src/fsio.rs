@@ -82,17 +82,15 @@ fn replace<T>(
     result
 }
 
-/// Makes the file `path`, outside the project, holding what `fill` writes, and flushes it; gives
-/// its size. Never written over anything: a file, a folder or a link there, even one leading
-/// nowhere, fails with `AlreadyExists`. A file `fill` fails is removed again.
+/// Makes the file `name` in the folder `dir`, outside the project, holding what `fill` writes,
+/// and flushes it; gives its size. Never written over anything: a file, a folder or a link
+/// there, even one leading nowhere, fails with `AlreadyExists`. A file `fill` fails is removed.
 pub(crate) fn write_new<E: From<io::Error>>(
-    path: &Path,
+    dir: &Dir,
+    name: &OsStr,
     fill: impl FnOnce(&mut File) -> Result<(), E>,
 ) -> Result<u64, E> {
-    let mut file = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(path)?;
+    let mut file = dir.create_new(name, false)?;
     let done = fill(&mut file).and_then(|()| {
         flush_file(&file)?;
         Ok(file.metadata()?.len())
@@ -100,7 +98,7 @@ pub(crate) fn write_new<E: From<io::Error>>(
     if done.is_err() {
         drop(file);
         // Only what this made, half written; failing to remove it changes nothing.
-        let _ = std::fs::remove_file(path);
+        let _ = remove_file(dir, name);
     }
     done
 }

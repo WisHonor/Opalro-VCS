@@ -51,6 +51,8 @@ pub struct ConflictAt {
     /// `None` for a place this computer can't hold, which the folder can't show.
     pub(crate) seen: Option<Seen>,
     pub(crate) has_own: bool,
+    /// The folder's entry there as this read found it, which `resolve` records only if it still is.
+    pub(crate) now: Option<(EntryKind, Id)>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -203,6 +205,7 @@ fn conflict_at(
         terms: record.terms.len(),
         seen: Some(seen),
         has_own: record.own.is_some(),
+        now,
     })
 }
 
@@ -269,6 +272,7 @@ pub fn status(
             terms: record.terms.len(),
             seen: None,
             has_own: record.own.is_some(),
+            now: None,
         });
     }
     conflicts.sort_by(|a, b| a.path.cmp(&b.path));

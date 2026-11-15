@@ -572,25 +572,23 @@ pub(crate) fn save_recording(
         before,
         ..
     } = walked;
-    let mut state = entry.state.clone();
-    state.lines.insert(line.clone(), save_id);
-    state.position = Position::OnLine(line.clone());
-    let diary = DiaryEntry {
-        parent: Some(head),
-        action: Action::Command,
-        command: req.command.to_owned(),
-        who: req.who.clone(),
-        opal_version: env!("CARGO_PKG_VERSION").into(),
-        state,
-        folder_change: None,
+    let made = Made {
+        line,
+        parent_id,
+        save_id,
+        change_id: save.change_id,
+        amend: req.amend,
     };
-    repo.commit(&lock, packs, &diary)?;
-    if req.amend {
-        cache.replace(line, parent_id, save_id);
-    } else {
-        cache.add(line, parent_id, save_id, save.change_id);
-    }
-    cache.store(repo, &diary.state);
+    made.commit(
+        repo,
+        &lock,
+        head,
+        &entry.state,
+        req.who,
+        req.command,
+        packs,
+        &mut cache,
+    )?;
     keep_file_cache(repo, seen, now, &mut warnings);
     // The save is committed now; failing to count its files must not make it look failed.
     let counted = counted
@@ -642,40 +640,132 @@ impl Walked {
         &mut self,
         repo: &Repository,
     ) -> (Vec<MoveNote>, Option<Result<usize, StoreError>>) {
-        // The files are counted in the same walk as the moves, while the new listings are at
-        // hand; without them, after the commit, from the store.
-        let (_, most_bytes, most_left) = note_limits();
-        let keeps_conflicts = repo.keeps_conflicts();
-        // A conflict's place is never a file that left or arrived.
-        let place = move |o: Option<&Entry>, n: Option<&Entry>| {
-            keeps_conflicts
-                && [o, n]
-                    .into_iter()
-                    .flatten()
-                    .any(|e| e.kind == EntryKind::Conflict)
+        let held = self.held.take();
+        notes_against(
+            repo,
+            &self.before,
+            held.as_ref().map(|h| &h.listings),
+            self.root,
+        )
+    }
+}
+
+/// The save a new save on `parent` is compared with: `parent`, or for an amend the first parent
+/// it takes over. Its moves are noted against it, and its files counted from it.
+pub(crate) fn save_before(
+    repo: &Repository,
+    amend: bool,
+    parent: &Save,
+) -> Result<Option<Id>, StoreError> {
+    match (amend, parent.parents.first()) {
+        (false, _) => Ok(Some(parent.root)),
+        (true, Some(first)) => repo
+            .store()
+            .save(first, repo.signatures_allowed())
+            .map(|s| Some(s.root)),
+        (true, None) => Ok(None),
+    }
+}
+
+/// The moves a save of `root` notes against `before`, and the files changed when they are
+/// counted on the way; `held` holds the new listings not yet stored, `None` when none were held.
+pub(crate) fn notes_against(
+    repo: &Repository,
+    before: &Result<Option<Id>, StoreError>,
+    held: Option<&HashMap<Id, Listing>>,
+    root: Id,
+) -> (Vec<MoveNote>, Option<Result<usize, StoreError>>) {
+    // The files are counted in the same walk as the moves, while the new listings are at hand;
+    // without them, after the commit, from the store.
+    let (_, most_bytes, most_left) = note_limits();
+    let keeps_conflicts = repo.keeps_conflicts();
+    // A conflict's place is never a file that left or arrived.
+    let place = move |o: Option<&Entry>, n: Option<&Entry>| {
+        keeps_conflicts
+            && [o, n]
+                .into_iter()
+                .flatten()
+                .any(|e| e.kind == EntryKind::Conflict)
+    };
+    // Nothing can have moved from an empty save.
+    let empty = Listing::empty().id();
+    let compared = match (before, held) {
+        (Ok(Some(from)), Some(held)) if *from != empty => Some(moves::count_and_moves(
+            repo.store(),
+            held,
+            *from,
+            root,
+            most_left,
+            &place,
+        )),
+        _ => None,
+    };
+    // Notes say only what is certain and never stop a save: one that can't be compared with the
+    // save before it notes nothing, and is told it couldn't count its files only if it couldn't.
+    let (mut move_notes, counted) = match compared {
+        Some(Ok((count, notes))) => (notes.ok().flatten().unwrap_or_default(), Some(Ok(count))),
+        Some(Err(why)) => (vec![], Some(Err(why))),
+        None => (vec![], None),
+    };
+    let most = usize::try_from(MAX_MOVE_NOTES).unwrap_or(usize::MAX);
+    moves::first_that_fit(&mut move_notes, most, most_bytes);
+    (move_notes, counted)
+}
+
+/// A save made on `line`, in place of its newest save `parent_id` when `amend`, else on top.
+pub(crate) struct Made<'a> {
+    pub line: &'a str,
+    pub parent_id: Id,
+    pub save_id: Id,
+    pub change_id: ChangeId,
+    pub amend: bool,
+}
+
+impl Made<'_> {
+    /// Commits it as one diary step after `head` (whose state is `before`), with no change to the
+    /// folder, and has the line's saves in `cache` learn it.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn commit(
+        &self,
+        repo: &mut Repository,
+        lock: &crate::repo::ChangeLock,
+        head: Id,
+        before: &State,
+        who: &Person,
+        command: &str,
+        packs: PackSet,
+        cache: &mut ChangeIds,
+    ) -> Result<(), SaveError> {
+        let diary = DiaryEntry {
+            parent: Some(head),
+            action: Action::Command,
+            command: command.to_owned(),
+            who: who.clone(),
+            opal_version: env!("CARGO_PKG_VERSION").into(),
+            state: self.state(before),
+            folder_change: None,
         };
-        let compared = match (&self.before, self.held.take()) {
-            (Ok(Some(from)), Some(held)) => Some(moves::count_and_moves(
-                repo.store(),
-                &held.listings,
-                *from,
-                self.root,
-                most_left,
-                &place,
-            )),
-            _ => None,
-        };
-        // Notes say only what is certain and never stop a save: one that can't be compared with
-        // the save before it notes nothing, and is told it couldn't count its files only if it
-        // couldn't.
-        let (mut move_notes, counted) = match compared {
-            Some(Ok((count, notes))) => (notes.ok().flatten().unwrap_or_default(), Some(Ok(count))),
-            Some(Err(why)) => (vec![], Some(Err(why))),
-            None => (vec![], None),
-        };
-        let most = usize::try_from(MAX_MOVE_NOTES).unwrap_or(usize::MAX);
-        moves::first_that_fit(&mut move_notes, most, most_bytes);
-        (move_notes, counted)
+        repo.commit(lock, packs, &diary)?;
+        self.learn(repo, cache, &diary.state);
+        Ok(())
+    }
+
+    /// `before` with the project on the line, at this save.
+    pub(crate) fn state(&self, before: &State) -> State {
+        let mut state = before.clone();
+        state.lines.insert(self.line.to_owned(), self.save_id);
+        state.position = Position::OnLine(self.line.to_owned());
+        state
+    }
+
+    /// Has the line's saves in `cache` learn this one, once it is committed in `state`.
+    pub(crate) fn learn(&self, repo: &Repository, cache: &mut ChangeIds, state: &State) {
+        if self.amend {
+            cache.replace(self.line, self.parent_id, self.save_id);
+        } else {
+            cache.add(self.line, self.parent_id, self.save_id, self.change_id);
+        }
+        cache.store(repo, state);
     }
 }
 
@@ -796,16 +886,7 @@ pub(crate) fn read_and_build(
             return Err(SaveError::LargeSave(large));
         }
     }
-    // The save before this one, which for an amend is the first parent it takes over: its moves
-    // are noted against it, and its files counted from it.
-    let before = match (req.amend, parent.parents.first()) {
-        (false, _) => Ok(Some(parent.root)),
-        (true, Some(first)) => repo
-            .store()
-            .save(first, repo.signatures_allowed())
-            .map(|s| Some(s.root)),
-        (true, None) => Ok(None),
-    };
+    let before = save_before(repo, req.amend, parent);
     // Nothing can have moved from an empty save, so a first save holds nothing to compare.
     let empty = Listing::empty().id();
     let compare = matches!(before, Ok(Some(from)) if from != empty);
@@ -833,6 +914,8 @@ pub(crate) fn read_and_build(
         last,
         &noted,
     )?;
+    // A place decided on with something there that the walk found nothing at.
+    recording.check_gone()?;
     let (seen, held) = (storing.cache, storing.held);
     let root = built.root;
     let kept = built.kept.len() + built.kept_below_gone;
@@ -1463,11 +1546,11 @@ fn note_limits() -> (usize, usize, usize) {
 #[cfg(test)]
 thread_local! {
     /// The depth and entries a save on this thread reads the base save's listings within.
-    static BASE_LIMITS: std::cell::Cell<Option<(usize, u64)>> = const { std::cell::Cell::new(None) };
+    pub(crate) static BASE_LIMITS: std::cell::Cell<Option<(usize, u64)>> = const { std::cell::Cell::new(None) };
 }
 
 /// The limits a save reads the base save's listings within.
-fn base_limits() -> SaveLimits {
+pub(crate) fn base_limits() -> SaveLimits {
     #[cfg(test)]
     if let Some((depth, entries)) = BASE_LIMITS.get() {
         return SaveLimits::new(depth, entries);
@@ -1563,6 +1646,8 @@ impl Contents for Storing<'_> {
     ) -> Result<Option<(EntryKind, Id, u64)>, SaveError> {
         let fixed = self.recording.fixes(path);
         let seen = if fixed {
+            self.recording
+                .check(path, built.map(|(kind, id, _)| (kind, id)))?;
             conflict::Seen::Fixed
         } else {
             self.seen(path, conflict, built)?
@@ -5590,6 +5675,7 @@ mod tests {
         };
         let recording = Recording {
             fixed: std::collections::BTreeSet::from(["hero.png".to_owned()]),
+            ..Recording::default()
         };
         let saved = save_recording(&mut repo, &req, &recording, &mut |_| {}, &mut |_| true);
         let (root, conflicts) = saved_with(saved);
@@ -5986,6 +6072,7 @@ mod tests {
         };
         let recording = Recording {
             fixed: fixed.iter().map(|p| (*p).to_owned()).collect(),
+            ..Recording::default()
         };
         save_recording(repo, &req, &recording, &mut |_| {}, &mut |_| true)
     }

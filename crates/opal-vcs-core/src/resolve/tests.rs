@@ -126,7 +126,7 @@ impl Fx {
     fn resolve(
         &mut self,
         paths: Option<&[&str]>,
-        keep: Option<Pick>,
+        keep: Option<Side>,
     ) -> Result<ResolveOutcome, ResolveError> {
         self.resolve_with(paths, keep, false, &mut |_| true)
     }
@@ -134,7 +134,7 @@ impl Fx {
     fn resolve_with(
         &mut self,
         paths: Option<&[&str]>,
-        keep: Option<Pick>,
+        keep: Option<Side>,
         accept_crlf: bool,
         ask: &mut dyn FnMut(&Ask) -> bool,
     ) -> Result<ResolveOutcome, ResolveError> {
@@ -315,6 +315,7 @@ fn file_against_folder() -> (Fx, Id) {
     fx.line_new("side");
     fx.write("dir/x.txt", b"x\n");
     fx.write("dir/y.txt", b"y\n");
+    fx.write("dir/sub/z.txt", b"z\n");
     fx.save("Side work");
     fx.goto(Target::Line("main".into()));
     fx.write("dir", b"a file\n");
@@ -467,7 +468,7 @@ fn resolve_a_folder_means_every_conflict_below_it() {
     assert_eq!(left, ["a.txt", "gone.bin", "pic.png"]);
     assert_eq!(fx.file(id, "art/hero.png"), b"\0hero painted");
     // The whole project is a folder too, with a version for each.
-    let (_, _, _, done, left, _) = recorded(fx.resolve(Some(&[""]), Some(Pick::Theirs)).unwrap());
+    let (_, _, _, done, left, _) = recorded(fx.resolve(Some(&[""]), Some(Side::Theirs)).unwrap());
     assert_eq!(done, ["a.txt", "gone.bin", "pic.png"]);
     assert!(left.is_empty());
 }
@@ -615,7 +616,7 @@ fn a_no_records_nothing() {
 fn resolve_keep_theirs_writes_theirs_whole() {
     let (mut fx, combined) = conflicted();
     let outcome = fx
-        .resolve(Some(&["pic.png", "a.txt"]), Some(Pick::Theirs))
+        .resolve(Some(&["pic.png", "a.txt"]), Some(Side::Theirs))
         .unwrap();
     let ResolveOutcome::Recorded { safety_copies, .. } = &outcome else {
         panic!("{outcome:?}");
@@ -639,7 +640,7 @@ fn resolve_keep_theirs_writes_theirs_whole() {
 fn resolve_keep_theirs_keeps_a_safety_copy_of_a_half_fix() {
     let (mut fx, _) = conflicted();
     fx.write("a.txt", A_HALF);
-    let outcome = fx.resolve(Some(&["a.txt"]), Some(Pick::Theirs)).unwrap();
+    let outcome = fx.resolve(Some(&["a.txt"]), Some(Side::Theirs)).unwrap();
     let ResolveOutcome::Recorded { safety_copies, .. } = &outcome else {
         panic!("{outcome:?}");
     };
@@ -654,7 +655,7 @@ fn resolve_keep_theirs_keeps_a_safety_copy_of_a_half_fix() {
 fn resolve_keep_mine_where_mine_is_nothing_removes_the_file() {
     let (mut fx, _) = conflicted();
     fx.write("gone.bin", b"\0my own");
-    let outcome = fx.resolve(Some(&["gone.bin"]), Some(Pick::Mine)).unwrap();
+    let outcome = fx.resolve(Some(&["gone.bin"]), Some(Side::Mine)).unwrap();
     let ResolveOutcome::Recorded { safety_copies, .. } = &outcome else {
         panic!("{outcome:?}");
     };
@@ -668,10 +669,15 @@ fn resolve_keep_mine_where_mine_is_nothing_removes_the_file() {
 #[test]
 fn resolve_keep_a_folder_term_writes_the_folder_under_write_outs_rules() {
     let (mut fx, _) = file_against_folder();
-    let (id, ..) = recorded(fx.resolve(Some(&["dir"]), Some(Pick::Theirs)).unwrap());
+    let (id, ..) = recorded(fx.resolve(Some(&["dir"]), Some(Side::Theirs)).unwrap());
     assert_eq!(fx.read("dir/x.txt").unwrap(), b"x\n");
     assert_eq!(fx.read("dir/y.txt").unwrap(), b"y\n");
-    assert_eq!(fx.entry(id, "dir").unwrap().kind, EntryKind::Folder);
+    assert_eq!(fx.read("dir/sub/z.txt").unwrap(), b"z\n");
+    // The side's own folder, whole, under its own listing ID.
+    let side = fx.repo.current().unwrap().1.state.lines["side"];
+    let theirs = fx.entry(side, "dir").unwrap();
+    let kept = fx.entry(id, "dir").unwrap();
+    assert_eq!((kept.kind, kept.id), (EntryKind::Folder, theirs.id));
     fx.assert_folder_is_goto_of(id);
 
     // A planted folder term holding `.OPALRO`, spelled `-OPALRO` and then changed, as no listing
@@ -717,7 +723,7 @@ fn resolve_keep_a_folder_term_writes_the_folder_under_write_outs_rules() {
     });
     fx.write("evil", b"mine");
     let (head, tip) = (fx.head(), fx.tip());
-    let err = fx.resolve(Some(&["evil"]), Some(Pick::Theirs)).unwrap_err();
+    let err = fx.resolve(Some(&["evil"]), Some(Side::Theirs)).unwrap_err();
     assert!(err.to_string().contains(".opalro"), "{err}");
     assert_eq!((fx.head(), fx.tip()), (head, tip));
     assert_eq!(fx.read("evil").unwrap(), b"mine");
@@ -742,7 +748,7 @@ fn five_terms() -> Fx {
 fn resolve_keep_on_a_record_of_five_terms_is_refused() {
     let mut fx = five_terms();
     let head = fx.head();
-    for pick in [Pick::Mine, Pick::Theirs] {
+    for pick in [Side::Mine, Side::Theirs] {
         let err = fx.resolve(Some(&["five.bin"]), Some(pick)).unwrap_err();
         assert_eq!(
             err.to_string(),
@@ -780,7 +786,7 @@ fn undo_takes_a_resolve_back_and_a_hand_fix_stays_in_the_folder() {
 #[test]
 fn undo_takes_back_a_resolve_keep_and_its_folder_change() {
     let (mut fx, combined) = conflicted();
-    recorded(fx.resolve(Some(&["pic.png"]), Some(Pick::Theirs)).unwrap());
+    recorded(fx.resolve(Some(&["pic.png"]), Some(Side::Theirs)).unwrap());
     assert_eq!(fx.read("pic.png").unwrap(), PIC_SIDE);
     fx.undo();
     assert_eq!(fx.tip(), combined);
@@ -791,7 +797,7 @@ fn undo_takes_back_a_resolve_keep_and_its_folder_change() {
 #[test]
 fn redo_makes_it_again() {
     let (mut fx, _) = conflicted();
-    let (id, ..) = recorded(fx.resolve(Some(&["pic.png"]), Some(Pick::Theirs)).unwrap());
+    let (id, ..) = recorded(fx.resolve(Some(&["pic.png"]), Some(Side::Theirs)).unwrap());
     fx.undo();
     fx.redo();
     assert_eq!(fx.tip(), id);
@@ -904,7 +910,7 @@ fn resolve_meets_saves_checks() {
         "{err:?}"
     );
     assert_eq!(fx.head(), head);
-    match fx.resolve(Some(&[name]), Some(Pick::Theirs)).unwrap() {
+    match fx.resolve(Some(&[name]), Some(Side::Theirs)).unwrap() {
         ResolveOutcome::Recorded {
             save_id, applied, ..
         } => {
@@ -1002,6 +1008,22 @@ fn copy_never_overwrites_and_never_writes_into_opalro() {
         fx.root().join("art").join("..").join(".opalro").join("x"),
         fx.root().join(".opalro"),
     ];
+    // Another name for the same folder, which no spelling rule folds: on Windows, the drive's
+    // administrative share, where this account can reach it.
+    #[cfg(windows)]
+    {
+        let real = fs::canonicalize(fx.root()).unwrap();
+        let real = real.to_string_lossy();
+        let plain = real.trim_start_matches(r"\\?\");
+        if let Some((letter, rest)) = plain.split_once(':') {
+            let share = std::path::PathBuf::from(format!(r"\\localhost\{letter}${rest}"));
+            if share.join(".opalro").is_dir() {
+                into.push(share.join(".opalro").join("x"));
+            } else {
+                println!("Skipped: this account can't reach the administrative share.");
+            }
+        }
+    }
     if fx.repo.drive().unwrap().ignores_case {
         into.push(fx.root().join(".OPALRO").join("x"));
     }
@@ -1082,7 +1104,7 @@ fn a_resolve_stopped_at_every_step_is_finished_or_never_happened() {
             assert!(n < 300, "the resolve never finished");
             let (mut fx, combined) = conflicted();
             let (bytes, pick) = if keep {
-                (A_HALF, Some(Pick::Theirs))
+                (A_HALF, Some(Side::Theirs))
             } else {
                 (A_FIXED, None)
             };
@@ -1119,4 +1141,241 @@ fn a_resolve_stopped_at_every_step_is_finished_or_never_happened() {
             }
         }
     }
+}
+
+/// Resolves `paths` with `change` made to the folder between the read that chose the places and
+/// the walk that records them; nothing may be recorded.
+#[cfg(feature = "fault-injection")]
+fn changed_between_the_reads(
+    fx: &mut Fx,
+    paths: Option<&[&str]>,
+    change: impl FnOnce() + 'static,
+) -> ResolveError {
+    use crate::fsio::fault;
+    let (head, tip) = (fx.head(), fx.tip());
+    fault::act_at("resolve:chosen", change);
+    let err = fx.resolve(paths, None).unwrap_err();
+    assert_eq!((fx.head(), fx.tip()), (head, tip), "something was recorded");
+    err
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn a_place_that_changes_between_the_reads_stops_resolve() {
+    let changed = |err: &ResolveError, path: &str| {
+        assert!(
+            matches!(err, ResolveError::Save(SaveError::ChangedDuringSave { path: p }) if p == path),
+            "{err:?}"
+        );
+        assert_eq!(
+            err.to_string(),
+            format!("{path} changed while Opalro was reading it.")
+        );
+    };
+    // A fixed text gains markers again.
+    let (mut fx, _) = conflicted();
+    fx.write("a.txt", A_FIXED);
+    let at = fx.root().join("a.txt");
+    let err = changed_between_the_reads(&mut fx, None, move || fs::write(at, A_HALF).unwrap());
+    changed(&err, "a.txt");
+    // A picture changed in place is put back to your line's version.
+    let (mut fx, _) = conflicted();
+    fx.write("pic.png", b"\0painted");
+    let at = fx.root().join("pic.png");
+    let err = changed_between_the_reads(&mut fx, Some(&["pic.png"]), move || {
+        fs::write(at, PIC_MAIN).unwrap();
+    });
+    changed(&err, "pic.png");
+    // A picture changed in place is removed.
+    let (mut fx, _) = conflicted();
+    fx.write("pic.png", b"\0painted");
+    let at = fx.root().join("pic.png");
+    let err = changed_between_the_reads(&mut fx, Some(&["pic.png"]), move || {
+        fs::remove_file(at).unwrap();
+    });
+    changed(&err, "pic.png");
+    // A marked text removed, so fixed, comes back.
+    let (mut fx, _) = conflicted();
+    fs::remove_file(fx.root().join("a.txt")).unwrap();
+    let at = fx.root().join("a.txt");
+    let err = changed_between_the_reads(&mut fx, None, move || fs::write(at, A_HALF).unwrap());
+    changed(&err, "a.txt");
+}
+
+#[test]
+fn a_file_changed_while_the_markers_question_waits_stops_resolve() {
+    let (mut fx, _) = conflicted();
+    fx.write("a.txt", A_HALF);
+    let (head, tip) = (fx.head(), fx.tip());
+    let at = fx.root().join("a.txt");
+    let err = fx
+        .resolve_with(Some(&["a.txt"]), None, false, &mut |_| {
+            fs::write(&at, b"one\nchanged while asked\n<<<<<<< main\n").unwrap();
+            true
+        })
+        .unwrap_err();
+    assert!(
+        matches!(&err, ResolveError::Save(SaveError::ChangedDuringSave { path }) if path == "a.txt"),
+        "{err:?}"
+    );
+    assert_eq!((fx.head(), fx.tip()), (head, tip));
+}
+
+#[test]
+fn keeping_a_side_without_places_is_refused() {
+    let (mut fx, combined) = conflicted();
+    let head = fx.head();
+    let err = fx.resolve(None, Some(Side::Theirs)).unwrap_err();
+    assert!(matches!(err, ResolveError::KeepNeedsPlaces), "{err:?}");
+    assert_eq!(
+        err.to_string(),
+        "Keeping a side needs the places to keep it at, so nothing was recorded."
+    );
+    assert_eq!(
+        err.hint().unwrap(),
+        "Name them: opalro resolve <path> --keep mine (or theirs)."
+    );
+    assert_eq!((fx.head(), fx.tip()), (head, combined));
+    assert_eq!(fx.read("pic.png").unwrap(), PIC_MAIN);
+}
+
+#[test]
+fn keep_where_the_first_parent_cant_be_read_goes_through_without_notes() {
+    // A combined save whose first parent the store doesn't hold, as `save` meets one it can't
+    // compare with: it notes nothing and goes on.
+    let mut fx = Fx::new();
+    keep(&mut fx.repo, &[b"\0mine", b"base", b"\0theirs"]);
+    let record = crate::status::tests::versions(Some(file_of(b"\0mine")));
+    let record = Record {
+        terms: vec![record.terms[0], record.terms[1], Some(file_of(b"\0theirs"))],
+        ..record
+    };
+    plant_with(&mut fx.repo, &[], &[("p.bin", record)]);
+    let lock = fx.repo.lock_for_change("test", &mut |_| {}).unwrap();
+    let (head, mut entry) = fx.repo.current().unwrap();
+    let tip = fx.tip();
+    let mut save = fx.save_of(tip);
+    save.parents = vec![Id([9; 32]), tip];
+    let mut packs = fx.repo.new_packs().unwrap();
+    let combined = packs.add_record(ObjectKind::Save, &save.encode()).unwrap();
+    entry.parent = Some(head);
+    entry.folder_change = None;
+    entry.state.lines.insert("main".into(), combined);
+    fx.repo.commit(&lock, packs, &entry).unwrap();
+    drop(lock);
+    fx.write("p.bin", b"\0mine");
+    let (id, save, replaced, ..) =
+        recorded(fx.resolve(Some(&["p.bin"]), Some(Side::Theirs)).unwrap());
+    assert_eq!(replaced, Some(combined));
+    assert!(save.move_notes.is_empty());
+    assert_eq!(fx.file(id, "p.bin"), b"\0theirs");
+    assert_eq!(fx.read("p.bin").unwrap(), b"\0theirs");
+}
+
+#[test]
+fn a_kept_side_past_a_saves_limits_is_refused() {
+    use crate::snapshot::BASE_LIMITS;
+    let (mut fx, combined) = file_against_folder();
+    let head = fx.head();
+    // Two entries now; with their folder, six.
+    BASE_LIMITS.set(Some((crate::listing::MAX_SAVE_DEPTH, 3)));
+    let result = fx.resolve(Some(&["dir"]), Some(Side::Theirs));
+    BASE_LIMITS.set(None);
+    let err = result.unwrap_err();
+    assert!(
+        matches!(err, ResolveError::Save(SaveError::TooLarge { .. })),
+        "{err:?}"
+    );
+    assert!(
+        err.to_string()
+            .starts_with("This project is too large to save: "),
+        "{err}"
+    );
+    assert_eq!((fx.head(), fx.tip()), (head, combined));
+    assert_eq!(fx.read("dir").unwrap(), b"a file\n");
+}
+
+#[test]
+fn keeping_a_link_term_writes_what_write_out_writes_for_it() {
+    // A link leading out of the project is written as a file holding its target.
+    let mut fx = Fx::new();
+    let held = crate::test_support::plant_save(
+        &mut fx.repo,
+        &[
+            ("l", EntryKind::Symlink, b"../outside"),
+            ("t", EntryKind::File, b"mine"),
+        ],
+    );
+    let link = held.get("l").unwrap();
+    let record = Record {
+        terms: vec![
+            Some(file_of(b"mine")),
+            None,
+            Some(Term {
+                kind: EntryKind::Symlink,
+                id: link.id,
+                size: link.size,
+            }),
+        ],
+        own: None,
+    };
+    plant_with(&mut fx.repo, &[], &[("l", record)]);
+    fx.write("l", b"mine");
+    match fx.resolve(Some(&["l"]), Some(Side::Theirs)).unwrap() {
+        ResolveOutcome::Recorded {
+            save_id, applied, ..
+        } => {
+            assert_eq!(applied.placeholders, ["l"]);
+            assert_eq!(fx.entry(save_id, "l").unwrap().kind, EntryKind::Symlink);
+        }
+        other => panic!("{other:?}"),
+    }
+    assert_eq!(fx.read("l").unwrap(), b"../outside");
+}
+
+#[test]
+fn keep_leaves_unsaved_changes_at_other_places_unsaved() {
+    let (mut fx, _) = conflicted();
+    fx.write("notes.txt", b"changed\n");
+    fx.write("new.txt", b"new\n");
+    fx.write("art/hero.png", b"\0hero painted");
+    let (id, ..) = recorded(fx.resolve(Some(&["pic.png"]), Some(Side::Theirs)).unwrap());
+    assert_eq!(fx.read("notes.txt").unwrap(), b"changed\n");
+    assert_eq!(fx.read("new.txt").unwrap(), b"new\n");
+    assert_eq!(fx.read("art/hero.png").unwrap(), b"\0hero painted");
+    assert_eq!(fx.file(id, "notes.txt"), b"notes\n");
+    assert!(fx.entry(id, "new.txt").is_none());
+    let status = crate::status::status(&fx.repo, false, None).unwrap();
+    let changed: Vec<&str> = status.changes.iter().map(|c| c.path.as_str()).collect();
+    assert_eq!(changed, ["new.txt", "notes.txt"]);
+}
+
+#[test]
+fn keep_replaces_a_fix_and_a_saved_own_version() {
+    // A fix made by hand is replaced, kept first as a safety copy.
+    let (mut fx, _) = conflicted();
+    fx.write("a.txt", A_FIXED);
+    let outcome = fx.resolve(Some(&["a.txt"]), Some(Side::Theirs)).unwrap();
+    let ResolveOutcome::Recorded { safety_copies, .. } = &outcome else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(*safety_copies, 1);
+    let (id, ..) = recorded(outcome);
+    assert_eq!(fx.read("a.txt").unwrap(), A_SIDE);
+    fx.assert_folder_is_goto_of(id);
+    fx.undo();
+    assert_eq!(fx.read("a.txt").unwrap(), A_FIXED);
+    // An own version a save holds is replaced too, and needs no safety copy.
+    let (mut fx, _) = conflicted();
+    fx.write("pic.png", b"\0painted");
+    fx.save("Painted");
+    let outcome = fx.resolve(Some(&["pic.png"]), Some(Side::Theirs)).unwrap();
+    let ResolveOutcome::Recorded { safety_copies, .. } = &outcome else {
+        panic!("{outcome:?}");
+    };
+    assert_eq!(*safety_copies, 0);
+    let (id, ..) = recorded(outcome);
+    assert_eq!(fx.read("pic.png").unwrap(), PIC_SIDE);
+    assert_eq!(fx.file(id, "pic.png"), PIC_SIDE);
+    fx.assert_folder_is_goto_of(id);
 }
