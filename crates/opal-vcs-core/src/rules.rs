@@ -42,6 +42,8 @@ const UNITS: [(&str, u64); 9] = [
 ];
 
 const UNKNOWN: &str = "Opalro doesn't know this key; a newer Opalro may have written it";
+const NO_FILES: &str =
+    "it has no usable `files`: a list of one or more patterns, none of them empty";
 
 /// Settings for the files a rule's patterns match.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -372,13 +374,31 @@ fn rule(item: &Value) -> Result<(Rule, Vec<(String, String)>), String> {
                 .collect::<Option<Vec<_>>>()
         })
         .filter(|files| !files.is_empty())
-        .ok_or("it has no usable `files`: a list of one or more patterns, none of them empty")?;
+        .ok_or(NO_FILES)?;
+    let mut bad = Vec::new();
+    let mut kept = Vec::new();
+    for (n, pattern) in (1u64..).zip(files) {
+        if pattern.contains(['\n', '\r']) {
+            bad.push((
+                format!("files[{n}]"),
+                "a pattern can't hold a line break, so it matches no file".to_owned(),
+            ));
+        } else {
+            kept.push(pattern);
+        }
+    }
+    // A rule that can match nothing would leave the files it was meant for unprotected in silence.
+    if kept.is_empty() {
+        return Err(NO_FILES.to_owned());
+    }
+    if kept.iter().all(|p| p.starts_with('!')) {
+        return Err("every pattern starts with !, so the rule matches no file".to_owned());
+    }
     let mut rule = Rule {
-        files,
+        files: kept,
         lockable: None,
         conflict_markers: None,
     };
-    let mut bad = Vec::new();
     for (key, value) in table {
         let setting = match key.as_str() {
             "files" => continue,
@@ -963,6 +983,75 @@ mod tests {
         assert_eq!(
             ask(&none, &ruled, "Main.txt", Some("a.txt")),
             LineMerge::Yes
+        );
+    }
+
+    const LINE_BREAK: &str = "a pattern can't hold a line break, so it matches no file";
+    const ALL_BANG: &str = "every pattern starts with !, so the rule matches no file";
+    const NO_FILES: &str =
+        "it has no usable `files`: a list of one or more patterns, none of them empty";
+
+    /// What `[[rule]]` with `files` as given, after a setting and before a usable rule, leaves
+    /// passed over; the rest of the file must count.
+    fn passed_over(files: &str) -> Vec<(String, String)> {
+        let text = format!(
+            "chunk-files-over = \"4 MiB\"\n[[rule]]\nfiles = {files}\nconflict-markers = false\n\
+             [[rule]]\nfiles = [\"*.psd\"]\nlockable = true\n"
+        );
+        let (rules, ignored) = parse(text.as_bytes()).unwrap();
+        assert_eq!(rules.chunk_files_over, 4 << 20, "{files}");
+        let psd = rules.rules.iter().find(|r| r.files == ["*.psd"]);
+        assert_eq!(psd.unwrap().lockable, Some(true), "{files}");
+        ignored
+    }
+
+    fn named(name: &str, why: &str) -> Vec<(String, String)> {
+        vec![(name.to_owned(), why.to_owned())]
+    }
+
+    #[test]
+    fn a_pattern_holding_a_line_break_is_passed_over_and_the_rules_other_patterns_count() {
+        for files in [r#"["a\nb", "*.unity"]"#, r#"["a\rb", "*.unity"]"#] {
+            assert_eq!(
+                passed_over(files),
+                named("rule[1].files[1]", LINE_BREAK),
+                "{files}"
+            );
+        }
+        let text = "[[rule]]\nfiles = [\"*.unity\", \"x\\r\\ny\"]\nconflict-markers = false\n";
+        let (rules, ignored) = parse(text.as_bytes()).unwrap();
+        assert_eq!(ignored, named("rule[1].files[2]", LINE_BREAK));
+        assert_eq!(rules.rules[0].files, ["*.unity"]);
+        assert_eq!(rules.rules[0].conflict_markers, Some(false));
+    }
+
+    #[test]
+    fn a_rule_that_can_match_no_file_is_passed_over_whole() {
+        assert_eq!(
+            passed_over(r#"["!*.unity", "!keep/"]"#),
+            named("rule[1]", ALL_BANG)
+        );
+        assert_eq!(passed_over(r#"["a\nb", "!c"]"#), named("rule[1]", ALL_BANG));
+        assert_eq!(
+            passed_over(r#"["a\nb", "c\rd"]"#),
+            named("rule[1]", NO_FILES)
+        );
+        // One pattern that can match is enough.
+        assert_eq!(passed_over(r#"["!keep.unity", "*.unity"]"#), vec![]);
+    }
+
+    #[test]
+    fn a_rule_that_can_match_no_file_is_warned_of_and_stops_line_merging() {
+        let read = read_text("[[rule]]\nfiles = [\"!*.unity\"]\nconflict-markers = false\n");
+        let message = &read.warnings()[0].message;
+        assert!(
+            message.contains(&format!("\n  rule[1]: {ALL_BANG}\n")),
+            "{message}"
+        );
+        let m = RuleMatcher::new(&read, &RulesRead::default());
+        assert_eq!(
+            m.line_merge("a.txt", None),
+            LineMerge::RulesNotWhole { theirs: false }
         );
     }
 

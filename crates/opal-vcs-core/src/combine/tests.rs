@@ -4102,6 +4102,29 @@ fn while_the_rules_are_not_read_whole_no_file_is_merged_line_by_line() {
     }
 }
 
+/// Before such rules were passed over, the file counted as read whole and `a.txt` merged.
+#[test]
+fn a_rule_that_can_match_no_file_stops_line_merging_until_it_is_fixed() {
+    let rules = [
+        "[[rule]]\nfiles = [\"!*.unity\"]\nconflict-markers = false\n",
+        "[[rule]]\nfiles = [\"*.unity\", \"x\\ny\"]\nconflict-markers = false\n",
+    ];
+    for text in rules {
+        let mut h = Hist::new();
+        changed_apart(&mut h);
+        rules_file(&h, text);
+        let err = combine_in(&mut h, "side").unwrap_err();
+        let (conflict, not_whole) = only_conflict(&err);
+        assert_eq!(
+            conflict.clash,
+            Clash::BothChanged(NotMerged::RulesNotWhole { theirs: false }),
+            "{text}"
+        );
+        assert_eq!(not_whole, Some(Side::Ours), "{text}");
+        assert_eq!(err.hint().unwrap(), RULES_HINT, "{text}");
+    }
+}
+
 #[test]
 fn a_file_that_clashes_for_a_reason_of_its_own_keeps_it_while_the_rules_are_not_read_whole() {
     let mut h = Hist::new();
