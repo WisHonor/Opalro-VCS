@@ -1348,7 +1348,7 @@ fn model_entry(path: &str, s: &Node, o: &Node, t: &Node, m: &mut Model) -> bool 
                 tc.clone()
             } else if tc == sc {
                 oc.clone()
-            } else if let (Text::Merged(both), _) = merge_text(sc, oc, tc, DEADLINE) {
+            } else if let (Text::Merged(both), _) = merge_text(sc, oc, tc, DEADLINE, None) {
                 both
             } else {
                 m.conflicts.insert(path.to_owned());

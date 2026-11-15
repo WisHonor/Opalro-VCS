@@ -159,9 +159,9 @@ fn git_merge(texts: &[Vec<u8>; 3]) -> Option<Vec<u8>> {
 }
 
 fn ours_merge(texts: &[Vec<u8>; 3]) -> Option<Vec<u8>> {
-    match merge_text(&texts[0], &texts[1], &texts[2], DEADLINE).0 {
+    match merge_text(&texts[0], &texts[1], &texts[2], DEADLINE, None).0 {
         Text::Merged(bytes) => Some(bytes),
-        Text::Not(_) => None,
+        _ => None,
     }
 }
 
@@ -224,7 +224,7 @@ fn text_merge_and_git_merge_file_on_repeating_lines() {
         .run(&three(false), |texts| {
             let [b, o, t] = &texts;
             let merged = |base: &[u8], ours: &[u8], theirs: &[u8]| {
-                merge_text(base, ours, theirs, DEADLINE).0
+                merge_text(base, ours, theirs, DEADLINE, None).0
             };
             prop_assert_eq!(merged(b, o, o), Text::Merged(o.clone()));
             prop_assert_eq!(merged(b, b, t), Text::Merged(t.clone()));

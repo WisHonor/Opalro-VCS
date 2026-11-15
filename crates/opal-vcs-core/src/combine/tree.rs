@@ -414,7 +414,7 @@ impl Walk<'_> {
         let (text, late) = {
             let read = |e| bytes(self.store, &self.made.texts, e);
             match (read(s)?, read(o)?, read(t)?) {
-                (Some(s), Some(o), Some(t)) => merge_text(&s, &o, &t, self.deadline),
+                (Some(s), Some(o), Some(t)) => merge_text(&s, &o, &t, self.deadline, None),
                 _ => (Text::Not(NotMerged::TooBig), false),
             }
         };
@@ -423,6 +423,14 @@ impl Walk<'_> {
         }
         let bytes = match text {
             Text::Merged(bytes) => bytes,
+            // Without labels a clash is never marked.
+            Text::Marked { .. } => {
+                let why = NotMerged::Overlap {
+                    endings_only: false,
+                };
+                self.conflict(path, Clash::BothChanged(why));
+                return Ok(None);
+            }
             Text::Not(why) => {
                 self.conflict(path, Clash::BothChanged(why));
                 return Ok(None);

@@ -15,6 +15,7 @@ use crate::text::escape;
 pub(crate) mod markers;
 pub(crate) mod standing;
 
+pub use markers::Labels;
 pub(crate) use markers::Left;
 pub(crate) use standing::Listings;
 
