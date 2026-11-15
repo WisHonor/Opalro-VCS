@@ -1175,6 +1175,9 @@ fn make_save(
     };
     // Only now: a combine refused before it builds anything makes no temporary file.
     let mut packs = repo.new_packs()?;
+    // The starting points' own combines read it too: a start conflict they meet is unknown.
+    let keeps = repo.keeps_conflicts();
+    made.keeps = keeps;
     let mut inner = Inner {
         repo,
         packs: &mut packs,
@@ -1186,8 +1189,7 @@ fn make_save(
     let (start, unknown) = inner.start_from(&starts)?;
     let starts_unfollowed = inner.unfollowed;
     made.unknown = unknown;
-    let keeps = repo.keeps_conflicts();
-    made.keeps = keeps;
+    made.side_unknown.clear();
     if asked.keep == Keep::Conflicts && keeps {
         made.keep = Some(sides(repo, asked, line, from, with, &starts)?);
     }
@@ -1387,7 +1389,9 @@ impl Inner<'_> {
             };
             let (start, unknown) = self.start_from(&under)?;
             let theirs = version_of(self.repo, next)?;
+            // Set only now: the starting points' own starting points were combined above.
             self.made.unknown = unknown;
+            self.made.side_unknown = acc_unknown.clone();
             let merged = merge_three(
                 self.repo, self.packs, self.made, true, &start, &acc, &theirs, self.rules,
             )
@@ -1403,7 +1407,8 @@ impl Inner<'_> {
                 root: merged.root,
                 save: None,
             };
-            acc_unknown = merged.unknown;
+            // What was unknown stays unknown through every later combine.
+            acc_unknown.extend(merged.unknown);
             tips.push(next);
         }
         Ok((acc, acc_unknown))

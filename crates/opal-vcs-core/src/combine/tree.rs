@@ -106,6 +106,9 @@ pub(crate) struct Made {
     /// Where the made-up starting point of the next merge is unknown. Set for each merge, not
     /// kept by root: two made-up starts can share a listing and differ in what is unknown.
     pub unknown: Unknown,
+    /// In a combine of starting points, where the side made up so far is unknown: what the
+    /// others hold there can't settle it, so it stays unknown.
+    pub side_unknown: Unknown,
 }
 
 impl Made {
@@ -134,6 +137,7 @@ impl Default for Made {
             keeps: false,
             max_below: MAX_SAVE_ENTRIES,
             unknown: Unknown::new(),
+            side_unknown: Unknown::new(),
         }
     }
 }
@@ -209,7 +213,15 @@ pub(crate) fn merge_trees(
             )
         }),
     };
-    let top = known(start_unknown, "");
+    let side_unknown = if inner {
+        made.side_unknown.clone()
+    } else {
+        Unknown::new()
+    };
+    let mut top = known(start_unknown, "");
+    if top == Known::Whole && !side_unknown.is_empty() {
+        top = Known::Above;
+    }
     let taken = match top {
         Known::Whole => one_sides([start, ours, theirs].map(Some)),
         _ => (ours == theirs).then_some(Some(theirs)),
@@ -225,7 +237,8 @@ pub(crate) fn merge_trees(
         inner,
         rules,
         moved,
-        unknown: start_unknown,
+        unknown: start_unknown.clone(),
+        side_unknown,
         deadline,
         limits: [(); 3].map(|()| SaveLimits::default()),
         merged,
@@ -368,7 +381,10 @@ struct Walk<'a> {
     inner: bool,
     rules: &'a RuleMatcher,
     moved: &'a BTreeMap<String, (String, bool)>,
-    unknown: &'a Unknown,
+    /// Where the start is unknown; a start conflict both lines made a folder is added as met.
+    unknown: Unknown,
+    /// Where ours is a made-up side that can't tell what it holds.
+    side_unknown: Unknown,
     deadline: Duration,
     /// Each version is held to a save's limits on its own.
     limits: Three<SaveLimits>,
@@ -399,11 +415,26 @@ impl Walk<'_> {
         let mut entries = Vec::new();
         let mut todo = Vec::new();
         for (name, three) in names(s, o, t) {
-            let here = if self.unknown.is_empty() {
-                Known::Whole
-            } else {
-                known(self.unknown, &join(&path, name))
-            };
+            let mut here = Known::Whole;
+            if !self.unknown.is_empty() || !self.side_unknown.is_empty() {
+                let at = join(&path, name);
+                // What the side made so far can't tell stays unknown, whatever the others hold.
+                if is_unknown(&self.side_unknown, &at) {
+                    self.merged.unknown.insert(at);
+                    continue;
+                }
+                here = match known(&self.unknown, &at) {
+                    Known::Whole => known(&self.side_unknown, &at),
+                    k => k,
+                };
+            }
+            // A start in conflict that each line made a folder of its own: nothing below is
+            // known. Without the feature such an entry is no conflict to Opalro.
+            let start_held = three[0].is_some_and(|e| e.kind == EntryKind::Conflict);
+            if start_held && self.made.keeps && is_folder(three[1]) && is_folder(three[2]) {
+                self.unknown.insert(join(&path, name));
+                here = Known::Not;
+            }
             // Where the start isn't known whole, no side is "unchanged": only alike is taken.
             let taken = match here {
                 Known::Whole => one_sides(three.map(version)),

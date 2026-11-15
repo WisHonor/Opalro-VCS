@@ -2269,15 +2269,18 @@ fn start_from(m: &Model, starts: &[usize], left: &mut usize) -> Result<Ver, Stop
         }
         let start = start_from(m, &under, left)?;
         // Where the two clash, the start of the next merge holds nothing and is unsure.
+        // What the starting points so far were unsure of stays so, whatever the next one holds.
         let done = merge(m, &start, &acc, &ver(m, next));
         let mut tree = done.tree;
-        for c in &done.conflicts {
-            tree.files.remove(c);
+        let mut unsure = acc.unsure;
+        unsure.extend(done.conflicts);
+        for c in &unsure {
+            tree.remove(c);
         }
         acc = Ver {
             tree,
             save: None,
-            unsure: done.conflicts,
+            unsure,
         };
         tips.push(next);
     }
@@ -2368,10 +2371,11 @@ fn followed(m: &Model, start: &Ver, side: &Ver) -> Went {
         (Some(s), Some(t)) => noted(m, s, t),
         _ => BTreeMap::new(),
     };
-    // A place the start is unsure of is never where a move began or ended.
+    // A place the start, or a made-up side, is unsure of is never where a move began or ended.
+    let sure = |p: &str| !unsure_at(&start.unsure, p) && !unsure_at(&side.unsure, p);
     let fits = |from: &str, to: &str| {
-        !unsure_at(&start.unsure, from)
-            && !unsure_at(&start.unsure, to)
+        sure(from)
+            && sure(to)
             && start.tree.files.contains_key(from)
             && room(&start.tree, to)
             && side.tree.files.contains_key(to)
@@ -2541,6 +2545,7 @@ fn merge(m: &Model, start: &Ver, ours: &Ver, theirs: &Ver) -> Merge {
     let mut paths = PathMerge {
         three: [s, o, t],
         unsure: &start.unsure,
+        ours_unsure: &ours.unsure,
         out: Tree::default(),
         conflicts,
         unsure_clashes: Vec::new(),
@@ -2623,6 +2628,8 @@ struct PathMerge<'a> {
     three: [&'a Tree; 3],
     /// Where the start knows nothing.
     unsure: &'a BTreeSet<String>,
+    /// Where ours, made up from starting points, is unsure: nothing there is decided.
+    ours_unsure: &'a BTreeSet<String>,
     out: Tree,
     conflicts: BTreeSet<String>,
     /// The conflicts at places the start is unsure of, at them or inside them.
@@ -2659,8 +2666,11 @@ impl PathMerge<'_> {
         // Where the start is unsure, at the path or inside it, nothing counts as unchanged: the
         // two sides alike are the result; two folders, or a folder against nothing when only
         // something inside is unsure, are merged inside; anything else conflicts.
+        if unsure_at(self.ours_unsure, path) {
+            return;
+        }
         let here = unsure_at(self.unsure, path);
-        if here || unsure_inside(self.unsure, path) {
+        if here || unsure_inside(self.unsure, path) || unsure_inside(self.ours_unsure, path) {
             if alike(o, t, path) {
                 return self.out.take(path, o);
             }

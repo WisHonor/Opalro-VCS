@@ -124,10 +124,22 @@ impl Fixture {
     /// Merges, then stores what the merge built so that it can be read back.
     fn merge_with(
         &mut self,
+        ids: [Id; 3],
+        rules: &RuleMatcher,
+        inner: bool,
+        made: &mut Made,
+    ) -> Result<Merged, CombineError> {
+        self.merge_unknown(ids, rules, inner, made, &Unknown::new())
+    }
+
+    /// `merge_with`, the start unknown at and below each of `unknown`.
+    fn merge_unknown(
+        &mut self,
         [s, o, t]: [Id; 3],
         rules: &RuleMatcher,
         inner: bool,
         made: &mut Made,
+        unknown: &Unknown,
     ) -> Result<Merged, CombineError> {
         let mut packs = self.repo.new_packs().unwrap();
         let store = self.repo.store();
@@ -141,7 +153,7 @@ impl Fixture {
             t,
             rules,
             &BTreeMap::new(),
-            &Unknown::new(),
+            unknown,
             DEADLINE,
         );
         self.repo.store_packs(&self.lock, packs).unwrap();
@@ -1284,9 +1296,11 @@ struct Model {
     files: Tree,
     conflicts: BTreeSet<String>,
     clash: bool,
-    /// Where conflicts are kept, the four label lines: yours, where the lines parted, where they
-    /// parted with nothing there, theirs.
-    marks: Option<[String; 4]>,
+    /// Where conflicts are kept, the five label lines: yours, where the lines parted, where they
+    /// parted with nothing there, where what they parted from is unknown, theirs.
+    marks: Option<[String; 5]>,
+    /// Where the start can't tell what the lines parted from, at and below each path.
+    unknown: BTreeSet<String>,
     /// What each kept conflict must hold, by path.
     kept: BTreeMap<String, Want>,
 }
@@ -1311,11 +1325,16 @@ const KEPT: V = V::Conflict(Id([0; 32]));
 
 /// A clash at `path`, named; where conflicts are kept, held with all three versions, shown with
 /// markers when two text files clash, else as yours, or nothing where yours is gone. Whether the
-/// result has something there.
+/// result has something there. Where the start is unknown, `s` is `Missing`.
 fn clash(path: &str, s: &Node, o: &Node, t: &Node, m: &mut Model) -> bool {
     m.conflicts.insert(path.to_owned());
-    let Some([ours, parted, nothing, theirs]) = m.marks.clone() else {
+    let Some([ours, parted, nothing, unknown, theirs]) = m.marks.clone() else {
         return false;
+    };
+    let nothing = if unsure(&m.unknown, path) {
+        unknown
+    } else {
+        nothing
     };
     let marked = |o: &[u8], middle: &str, s: &[u8], t: &[u8], exec: bool| {
         let mut text = format!(
@@ -1401,6 +1420,17 @@ fn model_folder(path: &str, s: &Tree, o: &Tree, t: &Tree, m: &mut Model) {
     }
 }
 
+/// Whether the start is unknown at `path`: it, a folder holding it, or something inside it is
+/// listed in `unknown`.
+fn unsure(unknown: &BTreeSet<String>, path: &str) -> bool {
+    unknown.iter().any(|u| {
+        u.is_empty()
+            || u == path
+            || path.starts_with(&format!("{u}/"))
+            || u.starts_with(&format!("{path}/"))
+    })
+}
+
 /// Merges one path; whether the result has something there.
 fn model_entry(path: &str, s: &Node, o: &Node, t: &Node, m: &mut Model) -> bool {
     let take = |n: &Node, m: &mut Model| {
@@ -1418,6 +1448,39 @@ fn model_entry(path: &str, s: &Node, o: &Node, t: &Node, m: &mut Model) -> bool 
         }
         true
     };
+    // Where the start is unknown, here or inside, nothing is unchanged: alike is the result, two
+    // folders are merged inside (from nothing where it is unknown here), as is a folder against
+    // nothing where it is unknown only inside; anything else is a conflict of the two whole.
+    if unsure(&m.unknown, path) {
+        if o == t {
+            return take(t, m);
+        }
+        let here = m
+            .unknown
+            .iter()
+            .any(|u| u.is_empty() || u == path || path.starts_with(&format!("{u}/")));
+        let start = match s {
+            Node::Folder(x) if !here => x.clone(),
+            _ => Tree::new(),
+        };
+        let (a, b) = match (o, t) {
+            (Node::Folder(a), Node::Folder(b)) => (a.clone(), b.clone()),
+            (Node::Folder(a), Node::Missing) if !here => (a.clone(), Tree::new()),
+            (Node::Missing, Node::Folder(b)) if !here => (Tree::new(), b.clone()),
+            _ => return clash(path, &Node::Missing, o, t, m),
+        };
+        let before = m.files.len();
+        model_folder(path, &start, &a, &b, m);
+        if m.files.len() > before {
+            return true;
+        }
+        let both = matches!((o, t), (Node::Folder(_), Node::Folder(_)));
+        if both && (a.is_empty() || b.is_empty()) {
+            m.files.insert(path.to_owned(), V::Folder);
+            return true;
+        }
+        return false;
+    }
     if o == t || o == s {
         return take(t, m);
     }
@@ -1470,13 +1533,27 @@ fn model_entry(path: &str, s: &Node, o: &Node, t: &Node, m: &mut Model) -> bool 
     clash(path, s, o, t, m)
 }
 
-/// The model's merge; with `marks`, keeping conflicts.
-fn model(s: &Tree, o: &Tree, t: &Tree, marks: Option<[String; 4]>) -> Model {
+/// The model's merge; with `marks`, keeping conflicts; the start unknown at and below each of
+/// `unknown`.
+fn model(
+    s: &Tree,
+    o: &Tree,
+    t: &Tree,
+    marks: Option<[String; 5]>,
+    unknown: &BTreeSet<String>,
+) -> Model {
     let mut m = Model {
         marks,
+        unknown: unknown.clone(),
         ..Model::default()
     };
-    if o == t || o == s {
+    if !unknown.is_empty() {
+        if o == t {
+            m.files = with_folders(t);
+        } else {
+            model_folder("", s, o, t, &mut m);
+        }
+    } else if o == t || o == s {
         m.files = with_folders(t);
     } else if t == s {
         m.files = with_folders(o);
@@ -1500,6 +1577,16 @@ fn value() -> impl Strategy<Value = Option<V>> {
         1 => prop::sample::select(vec!["x", "y"]).prop_map(|t| Some(link(t))),
         1 => Just(Some(V::Folder)),
         1 => (1u8..=2).prop_map(|n| Some(V::Project(n))),
+    ]
+}
+
+/// Where the start is unknown: nowhere in half the cases, else one to three paths among a
+/// folder, its files and its folder's file, and files at the top.
+fn unknown_paths() -> impl Strategy<Value = Unknown> {
+    let paths = prop::sample::select(vec!["a", "b", "d", "d/a", "d/e", "d/e/b", "\u{e9}"]);
+    prop_oneof![
+        Just(Unknown::new()),
+        prop::collection::btree_set(paths.prop_map(str::to_owned), 1..=3),
     ]
 }
 
@@ -1540,8 +1627,8 @@ fn tree_merge_agrees_with_a_path_by_path_model() {
     let fx = std::cell::RefCell::new(Fixture::new());
     let mut runner = TestRunner::new(Config::with_cases(256));
     runner
-        .run(&three_trees(), |[s, o, t]| {
-            let want = model(&s, &o, &t, None);
+        .run(&(three_trees(), unknown_paths()), |([s, o, t], unknown)| {
+            let want = model(&s, &o, &t, None, &unknown);
             let mut fx = fx.borrow_mut();
             let [s_id, o_id, t_id] = fx.three(&s, &o, &t);
             // Read back from what it made, never stored: no text is merged here.
@@ -1559,7 +1646,7 @@ fn tree_merge_agrees_with_a_path_by_path_model() {
                 t_id,
                 &rules,
                 &BTreeMap::new(),
-                &Unknown::new(),
+                &unknown,
                 DEADLINE,
             );
             match merged {
@@ -1582,24 +1669,48 @@ fn tree_merge_agrees_with_a_path_by_path_model() {
     // Keeping conflicts: each place the model calls a clash holds a record of exactly the model's
     // three versions, standing as it says; every other place holds the model's merge.
     let one = ChangeId([3; 16]);
-    let [labels, nothing] =
-        [Parted::One(one), Parted::Nothing(Some(one))].map(|p| sides().labels(p));
-    let marks = [labels.ours, labels.base, nothing.base, labels.theirs];
+    let [labels, nothing, unsure] = [
+        Parted::One(one),
+        Parted::Nothing(Some(one)),
+        Parted::Unknown,
+    ]
+    .map(|p| sides().labels(p));
+    let marks = [
+        labels.ours,
+        labels.base,
+        nothing.base,
+        unsure.base,
+        labels.theirs,
+    ];
     let seen: std::cell::RefCell<BTreeMap<&str, usize>> = Default::default();
     let mut runner = TestRunner::new_with_rng(
         Config::with_cases(256),
         TestRng::deterministic_rng(RngAlgorithm::ChaCha),
     );
     runner
-        .run(&three_trees(), |[s, o, t]| {
-            let want = model(&s, &o, &t, Some(marks.clone()));
+        .run(&(three_trees(), unknown_paths()), |([s, o, t], unknown)| {
+            let want = model(&s, &o, &t, Some(marks.clone()), &unknown);
             let mut fx = fx.borrow_mut();
             let ids = fx.three(&s, &o, &t);
             let mut made = Made {
                 keep: Some(sides()),
                 ..Made::default()
             };
-            let m = match fx.merge_with(ids, &no_rules(), false, &mut made) {
+            let mut seen = seen.borrow_mut();
+            // Each unknown place the merge meets first, by what the two lines hold there.
+            for u in &unknown {
+                if unknown.iter().any(|up| u.starts_with(&format!("{up}/"))) {
+                    continue;
+                }
+                let kind = match (node(&o, u), node(&t, u)) {
+                    (a, b) if a == b => "unknown, alike",
+                    (Node::Folder(_), Node::Folder(_)) => "unknown, two folders",
+                    (Node::Missing, _) | (_, Node::Missing) => "unknown, on one line",
+                    _ => "unknown, different",
+                };
+                *seen.entry(kind).or_default() += 1;
+            }
+            let m = match fx.merge_unknown(ids, &no_rules(), false, &mut made, &unknown) {
                 Err(CombineError::NamesClash { .. }) => {
                     prop_assert!(want.clash, "{want:?}");
                     return Ok(());
@@ -1610,13 +1721,13 @@ fn tree_merge_agrees_with_a_path_by_path_model() {
             prop_assert!(!want.clash, "{want:?}");
             let got: BTreeSet<String> = m.conflicts.iter().map(|c| c.path.clone()).collect();
             prop_assert_eq!(&got, &want.conflicts);
-            let mut seen = seen.borrow_mut();
             for c in &m.conflicts {
                 let kind = match c.clash {
                     Clash::BothChanged(_) => "both changed",
                     Clash::ChangedRemoved { .. } => "changed and removed",
                     Clash::BothAdded => "both added",
                     Clash::FileAndFolder { .. } => "file and folder",
+                    Clash::StartUnknown => "start unknown",
                     _ => "other",
                 };
                 *seen.entry(kind).or_default() += 1;
@@ -1658,9 +1769,14 @@ fn tree_merge_agrees_with_a_path_by_path_model() {
         "changed and removed",
         "both added",
         "file and folder",
+        "start unknown",
         "markers",
         "yours",
         "nothing",
+        "unknown, alike",
+        "unknown, two folders",
+        "unknown, on one line",
+        "unknown, different",
     ] {
         assert!(seen.get(kind).is_some_and(|&n| n >= 3), "{seen:?}");
     }
@@ -3466,11 +3582,21 @@ fn moves_case(
     for keep in [false, true] {
         let marks = keep.then(|| {
             let one = ChangeId([3; 16]);
-            let [labels, nothing] =
-                [Parted::One(one), Parted::Nothing(Some(one))].map(|p| sides().labels(p));
-            [labels.ours, labels.base, nothing.base, labels.theirs]
+            let [labels, nothing, unsure] = [
+                Parted::One(one),
+                Parted::Nothing(Some(one)),
+                Parted::Unknown,
+            ]
+            .map(|p| sides().labels(p));
+            [
+                labels.ours,
+                labels.base,
+                nothing.base,
+                unsure.base,
+                labels.theirs,
+            ]
         });
-        let mut want = model(&was[0], &was[1], &was[2], marks);
+        let mut want = model(&was[0], &was[1], &was[2], marks, &Unknown::new());
         // Where a file came onto one the other line changed, the start's file is the middle.
         for at in &whole_at {
             if let Some(kept) = want.kept.get_mut(at) {
@@ -4356,6 +4482,272 @@ fn a_move_into_or_out_of_an_unknown_place_is_not_followed() {
     assert_eq!(conflicts, [kept_at("u.txt", Clash::StartUnknown, markers)]);
     // Taken out on side, as any removal.
     assert!(!saved.contains_key("w.txt"), "{saved:?}");
+}
+
+/// Three starting points under one save holding `u.txt`: two changed it apart and one left it,
+/// each adding a file of its own, combined criss-cross. Built until the one that left it is at
+/// `at` in ID order, the order they are combined in. Gives the tips and what they hold.
+fn three_starts_untouched_at(at: usize) -> (Hist, (Id, Id), Tree) {
+    let base = tree(&[("k.txt", f("k\n")), ("u.txt", f("o\n"))]);
+    let starts = [
+        with(&base, &[("a.txt", f("a\n")), ("u.txt", f("1\n"))]),
+        with(&base, &[("b.txt", f("b\n")), ("u.txt", f("2\n"))]),
+        with(&base, &[("c.txt", f("c\n"))]),
+    ];
+    let both = with(
+        &base,
+        &[
+            ("a.txt", f("a\n")),
+            ("b.txt", f("b\n")),
+            ("c.txt", f("c\n")),
+            ("u.txt", f("both\n")),
+        ],
+    );
+    let (h, crossed) = three_starts(&base, &starts, &both, at);
+    (h, crossed, both)
+}
+
+/// `crossed` with three starting points, built until the last of `starts` is at `at` in ID order.
+fn three_starts(base: &Tree, starts: &[Tree; 3], both: &Tree, at: usize) -> (Hist, (Id, Id)) {
+    loop {
+        let mut h = Hist::new();
+        let crossed = crossed(&mut h, base, starts, both);
+        let lines = h.entry().1.state.lines;
+        let mut ids: Vec<Id> = (0..3).map(|i| lines[&format!("start{i}")]).collect();
+        ids.sort();
+        if ids[at] == lines["start2"] {
+            return (h, crossed);
+        }
+    }
+}
+
+#[test]
+fn a_place_the_side_made_so_far_cant_tell_of_is_no_move() {
+    // One starting point copied `u.txt` to `x.txt` and changed `u.txt`; another changed it its own
+    // way, so the two together can't tell of `u.txt`. The third changed it too: that change is
+    // `u.txt`'s, never carried to `x.txt` as if `u.txt` had moved there.
+    let base = tree(&[("k.txt", f("k\n")), ("u.txt", f("o\n"))]);
+    let starts = [
+        with(&base, &[("u.txt", f("1\n")), ("x.txt", f("o\n"))]),
+        with(&base, &[("u.txt", f("2\n"))]),
+        with(&base, &[("u.txt", f("3\n"))]),
+    ];
+    let both = with(&base, &[("u.txt", f("both\n")), ("x.txt", f("o\n"))]);
+    let (mut h, crossed) = three_starts(&base, &starts, &both, 2);
+    // Side takes `x.txt` away, main leaves it: a removal, where `x.txt` was known as `o`.
+    let mut side = with(&both, &[("s.txt", f("s\n"))]);
+    side.remove("x.txt");
+    tips(&mut h, crossed, &with(&both, &[("m.txt", f("m\n"))]), &side);
+    let (saved, conflicts, _) = kept_combine(&mut h);
+    assert!(conflicts.is_empty(), "{conflicts:?}");
+    assert!(!saved.contains_key("x.txt"), "{saved:?}");
+}
+
+#[test]
+fn a_place_unknown_in_a_folder_the_next_starting_point_holds_alike_stays_unknown() {
+    // Two starting points changed `d/u.txt` apart and the third removed it, so that all three
+    // hold `d` alike but for it; the third is combined last.
+    let base = tree(&[("d/k.txt", f("k\n")), ("d/u.txt", f("o\n"))]);
+    let mut gone = base.clone();
+    gone.remove("d/u.txt");
+    let starts = [
+        with(&base, &[("a.txt", f("a\n")), ("d/u.txt", f("1\n"))]),
+        with(&base, &[("b.txt", f("b\n")), ("d/u.txt", f("2\n"))]),
+        with(&gone, &[("c.txt", f("c\n"))]),
+    ];
+    let both = with(
+        &base,
+        &[
+            ("a.txt", f("a\n")),
+            ("b.txt", f("b\n")),
+            ("c.txt", f("c\n")),
+            ("d/u.txt", f("both\n")),
+        ],
+    );
+    let (mut h, crossed) = three_starts(&base, &starts, &both, 2);
+    let mut main = with(&both, &[("m.txt", f("m\n"))]);
+    main.remove("d/u.txt");
+    tips(&mut h, crossed, &main, &with(&both, &[("s.txt", f("s\n"))]));
+    let (_, conflicts, _) = kept_combine(&mut h);
+    let want = [kept_at("d/u.txt", Clash::StartUnknown, Stands::Nothing)];
+    assert_eq!(conflicts, want);
+}
+
+#[test]
+fn three_starting_points_keep_unknown_whatever_their_order() {
+    let markers = Stands::Markers { places: 1 };
+    for at in 0..3 {
+        // Alike on both lines: taken.
+        let (mut h, crossed, both) = three_starts_untouched_at(at);
+        let main = with(&both, &[("m.txt", f("m\n"))]);
+        tips(&mut h, crossed, &main, &with(&both, &[("s.txt", f("s\n"))]));
+        let (saved, conflicts, _) = kept_combine(&mut h);
+        assert!(conflicts.is_empty(), "{at}: {conflicts:?}");
+        assert_eq!(saved["u.txt"], f("both\n"), "{at}");
+
+        // Differently: the two whole.
+        let (mut h, crossed, both) = three_starts_untouched_at(at);
+        let main = with(&both, &[("u.txt", f("mine\n"))]);
+        let side = with(&both, &[("u.txt", f("theirs\n"))]);
+        tips(&mut h, crossed, &main, &side);
+        let (_, conflicts, _) = kept_combine(&mut h);
+        let want = [kept_at("u.txt", Clash::StartUnknown, markers)];
+        assert_eq!(conflicts, want, "{at}");
+
+        // Held on one line only: neither an addition nor a removal.
+        let (mut h, crossed, both) = three_starts_untouched_at(at);
+        let mut main = with(&both, &[("m.txt", f("m\n"))]);
+        main.remove("u.txt");
+        tips(&mut h, crossed, &main, &with(&both, &[("s.txt", f("s\n"))]));
+        let (saved, conflicts, _) = kept_combine(&mut h);
+        let want = [kept_at("u.txt", Clash::StartUnknown, Stands::Nothing)];
+        assert_eq!(conflicts, want, "{at}");
+        let V::Conflict(id) = saved["u.txt"] else {
+            panic!("{at}: {saved:?}");
+        };
+        let store = h.repo.store();
+        let r = store.conflict(&id).unwrap();
+        let terms: Vec<Option<V>> = (r.terms.iter())
+            .map(|t| t.map(|t| leaf(store, t.kind, t.id)))
+            .collect();
+        assert_eq!(terms, [None, None, Some(f("both\n"))], "{at}");
+    }
+}
+
+/// Plants `base`, `b1` and `b2` after it, a save of `both` after those two in each order, then
+/// `main` and `side` after those, and puts the project on `main`: two lines whose starting points
+/// are `b1` and `b2`.
+fn planted_crossed(h: &mut Hist, [base, b1, b2, both, main, side]: [&Tree; 6]) {
+    let first = h.first;
+    let none: &[(&str, &str)] = &[];
+    let b = h.plant(&[first], base, Some(none));
+    let one = h.plant(&[b], b1, Some(none));
+    let two = h.plant(&[b], b2, Some(none));
+    let m = h.plant(&[one, two], both, Some(none));
+    let s = h.plant(&[two, one], both, Some(none));
+    let o = h.plant(&[m], main, Some(none));
+    let t = h.plant(&[s], side, Some(none));
+    h.set(|state| {
+        state.lines.insert("side".into(), t);
+        state.lines.insert("main".into(), o);
+    });
+    let folder = standing(h, main);
+    h.on("main", &folder);
+}
+
+#[test]
+fn a_start_conflict_under_two_folders_is_unknown_below() {
+    let a = || ("d/a.txt", f("a\n"));
+    let x = || ("d/x.txt", f("x\n"));
+    let want = [kept_at("d/x.txt", Clash::StartUnknown, Stands::Yours)];
+    // Where the lines parted, `d` was in conflict; each line made it a folder its own way.
+    let mut h = Hist::new();
+    let c = plant_record(&mut h, [b"mine\n", b"was\n", b"theirs\n"]);
+    let base = tree(&[("d", V::Conflict(c))]);
+    planted_lines(&mut h, &base, &tree(&[a(), x()]), &tree(&[a()]));
+    let (saved, conflicts, _) = kept_combine(&mut h);
+    assert_eq!(conflicts, want);
+    assert_eq!(saved["d/a.txt"], f("a\n"));
+
+    // The same between two starting points: `d/x.txt` is unknown in the start they make.
+    let mut h = Hist::new();
+    let c = plant_record(&mut h, [b"mine\n", b"was\n", b"theirs\n"]);
+    let base = tree(&[("d", V::Conflict(c))]);
+    let both = tree(&[a(), x()]);
+    let main = tree(&[a(), x(), ("m.txt", f("m\n"))]);
+    let side = tree(&[a(), ("s.txt", f("s\n"))]);
+    let b1 = tree(&[a(), x()]);
+    let b2 = tree(&[a()]);
+    planted_crossed(&mut h, [&base, &b1, &b2, &both, &main, &side]);
+    let (_, conflicts, _) = kept_combine(&mut h);
+    assert_eq!(conflicts, want);
+
+    // Without the feature, the entry is no conflict to Opalro: as before, the folders merge
+    // from nothing.
+    let dir = tempfile::tempdir().unwrap();
+    Repository::init(dir.path(), &ada()).unwrap();
+    let repo = crate::test_support::without_conflicts_feature(dir.path());
+    let first = repo.current().unwrap().1.state.lines["main"];
+    let mut h = Hist {
+        dir,
+        repo,
+        first,
+        keep: Keep::Conflicts,
+    };
+    let c = plant_record(&mut h, [b"mine\n", b"was\n", b"theirs\n"]);
+    let base = tree(&[("d", V::Conflict(c))]);
+    let main = tree(&[a(), x()]);
+    planted_lines(&mut h, &base, &main, &tree(&[a()]));
+    let done = combine_in(&mut h, "side").unwrap();
+    assert!(matches!(&done.result, Combined::Made { conflicts, .. } if conflicts.is_empty()));
+    assert_eq!(h.folder(), main);
+}
+
+#[test]
+fn a_move_clash_between_starting_points_leaves_its_places_unknown() {
+    let base = tree(&[("k.txt", f("k\n")), ("p.txt", f(BODY))]);
+    let moved = |to: &str| tree(&[("k.txt", f("k\n")), (to, f(BODY))]);
+    // Moved apart, and moved against removed.
+    for b2 in [moved("b/p.txt"), tree(&[("k.txt", f("k\n"))])] {
+        let mut h = Hist::new();
+        let both = moved("a/p.txt");
+        let crossed = crossed(&mut h, &base, &[moved("a/p.txt"), b2], &both);
+        // Main keeps the file where it went, side took it away: neither is known.
+        let main = with(&both, &[("m.txt", f("m\n"))]);
+        let side = tree(&[("k.txt", f("k\n")), ("s.txt", f("s\n"))]);
+        tips(&mut h, crossed, &main, &side);
+        let (_, conflicts, _) = kept_combine(&mut h);
+        let want = [kept_at("a/p.txt", Clash::StartUnknown, Stands::Yours)];
+        assert_eq!(conflicts, want);
+    }
+}
+
+#[test]
+fn a_folder_against_nothing_with_unknown_below_is_gone_into() {
+    // The start holds no `d`, and is unknown at `d/u.txt` only: side's new `d/n.txt` is an
+    // addition, `d/u.txt` a conflict.
+    let base = tree(&[("k.txt", f("k\n"))]);
+    let mut h = Hist::new();
+    starts_added_at(&mut h, &base, "d/u.txt");
+    let (saved, conflicts, _) = kept_combine(&mut h);
+    assert_eq!(
+        conflicts,
+        [kept_at("d/u.txt", Clash::StartUnknown, Stands::Nothing)]
+    );
+    assert_eq!(saved["d/n.txt"], f("n\n"));
+
+    // The start holds `d`: what it is known to hold there is merged as ever.
+    let base = tree(&[("d/j.txt", f("j\n")), ("d/k.txt", f("k\n"))]);
+    let mut h = Hist::new();
+    starts_added_at(&mut h, &base, "d/u.txt");
+    let (saved, conflicts, _) = kept_combine(&mut h);
+    let removed = Clash::ChangedRemoved {
+        removed_on: Side::Ours,
+    };
+    assert_eq!(
+        conflicts,
+        [
+            kept_at("d/j.txt", removed, Stands::Nothing),
+            kept_at("d/u.txt", Clash::StartUnknown, Stands::Nothing),
+        ]
+    );
+    assert!(!saved.contains_key("d/k.txt"), "{saved:?}");
+    assert_eq!(saved["d/n.txt"], f("n\n"));
+}
+
+/// Two starting points that added `at` apart to `base`, combined criss-cross; then main takes
+/// away everything but a file of its own, and side changes `d/j.txt` (if `base` holds it) and
+/// adds `d/n.txt`.
+fn starts_added_at(h: &mut Hist, base: &Tree, at: &str) {
+    let b1 = with(base, &[(at, f("1\n"))]);
+    let b2 = with(base, &[(at, f("2\n"))]);
+    let both = with(base, &[(at, f("both\n"))]);
+    let crossed = crossed(h, base, &[b1, b2], &both);
+    let mut side = with(&both, &[("d/n.txt", f("n\n")), ("s.txt", f("s\n"))]);
+    if side.contains_key("d/j.txt") {
+        side.insert("d/j.txt".into(), f("J\n"));
+    }
+    tips(h, crossed, &tree(&[("m.txt", f("m\n"))]), &side);
 }
 
 /// Two starting points that changed `a.txt` in different places, the lines combined criss-cross,

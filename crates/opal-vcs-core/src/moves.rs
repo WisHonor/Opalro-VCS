@@ -281,7 +281,11 @@ pub(crate) fn followed(
         (Some(from), Some(tip)) if !made.notes_spent => noted(repo, made, from, start.root, tip)?,
         _ => BTreeMap::new(),
     };
-    let unknown = made.unknown_in(start);
+    let mut unknown = made.unknown_in(start);
+    if side.save.is_none() {
+        // A made-up side can't tell what it holds there either.
+        unknown.extend(made.side_unknown.iter().cloned());
+    }
     let stored = Listings::stored(store, &made.listings);
     let mut at_start = Tree::new(&stored, start.root, EXACT);
     let mut on_side = Tree::new(&stored, side.root, EXACT);
@@ -427,7 +431,7 @@ fn true_of(before: &mut Tree, after: &mut Tree, n: &MoveNote) -> Result<bool, St
 }
 
 /// Whether a move from `from` to `to` counts: the start holds a file at `from` and has room at
-/// `to`, neither of them a place the start can't tell of, and the side holds a file at `to`.
+/// `to`, neither of them a place `unknown` can't tell of, and the side holds a file at `to`.
 fn fits(
     start: &mut Tree,
     side: &mut Tree,
