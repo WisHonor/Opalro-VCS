@@ -288,7 +288,9 @@ enum Unsaved {
     Keep,
 }
 
-fn act() -> impl Strategy<Value = Act> {
+/// The acts drawn; with `everywhere_alike`, only those whose effect is the same on every system:
+/// no executable bit turned, which only Unix keeps (a status that reads every file stands in).
+fn act(everywhere_alike: bool) -> impl Strategy<Value = Act> {
     let file = || prop::sample::select(&FILES[..]);
     let folder = || prop::sample::select(&FOLDERS[..]);
     let when = || prop_oneof![Just(When::Now), Just(When::Past), Just(When::Same)];
@@ -377,7 +379,11 @@ fn act() -> impl Strategy<Value = Act> {
         3 => (file(), any::<u64>(), BIG..=3 * BIG).prop_map(|(p, seed, n)| Act::Big(p, seed, n)),
         4 => (any::<usize>(), any::<usize>(), any::<[u8; 3]>(), any::<bool>(), when())
             .prop_map(|(pick, at, bytes, insert, when)| Act::Edit { pick, at, bytes, insert, when }),
-        1 => file().prop_map(Act::Flip),
+        1 => file().prop_map(move |p| if everywhere_alike {
+            Act::FullStatus
+        } else {
+            Act::Flip(p)
+        }),
         2 => file().prop_map(Act::Delete),
         2 => (file(), file()).prop_map(|(a, b)| Act::Rename(a, b)),
         1 => folder().prop_map(Act::MakeFolder),
@@ -740,6 +746,8 @@ struct Saved {
     message: String,
     /// A shelf's save, which no line reaches.
     shelf: bool,
+    /// Made by a combine, not reached by one moving a line forward.
+    made_by_combine: bool,
 }
 
 /// The lines, the tags, where the project is and the shelves, newest first; saves by index.
@@ -873,6 +881,7 @@ impl Model {
                 change: 0,
                 message,
                 shelf: false,
+                made_by_combine: false,
             }],
             done: vec![start],
             undone: Vec::new(),
@@ -1860,6 +1869,7 @@ fn save(repo: &mut Repository, m: &mut Model, line: Option<&str>) {
                 change: m.saves.len(),
                 message: "Save".to_owned(),
                 shelf: false,
+                made_by_combine: false,
             });
             m.state.on = m.saves.len() - 1;
             if let Some(name) = new_line {
@@ -1881,6 +1891,11 @@ fn save(repo: &mut Repository, m: &mut Model, line: Option<&str>) {
     }
 }
 
+/// Whether a version is a file that isn't text, which only a person's word settles.
+fn is_picture(term: &Option<Part>) -> bool {
+    matches!(term, Some(Part::File(f)) if text_lines(&f.bytes).is_none())
+}
+
 /// Counts how a save settled the places in conflict `before` held.
 fn count_settled(before: &BTreeMap<String, Kept>, after: &Tree) {
     for (p, k) in before {
@@ -1888,7 +1903,10 @@ fn count_settled(before: &BTreeMap<String, Kept>, after: &Tree) {
             None => met("save fixed a marked text"),
             Some(now) if now == k => {}
             Some(_) if k.marker() > 0 => met("save kept a half-fixed text"),
-            Some(_) => met("save kept a version changed in place"),
+            Some(_) if k.terms.iter().any(is_picture) => {
+                met("save kept a picture changed in place");
+            }
+            Some(_) => {}
         }
     }
 }
@@ -1939,6 +1957,7 @@ fn save_only(repo: &mut Repository, m: &mut Model, path: &str) {
                 change: m.saves.len(),
                 message: "Save".to_owned(),
                 shelf: false,
+                made_by_combine: false,
             });
             m.state.on = m.saves.len() - 1;
             m.state.lines.insert(line, m.state.on);
@@ -2042,6 +2061,7 @@ fn amend(repo: &mut Repository, m: &mut Model, new_message: bool) {
                 change,
                 message,
                 shelf: false,
+                made_by_combine: false,
             });
             m.state.on = m.saves.len() - 1;
             m.state.lines.insert(line, m.state.on);
@@ -2471,6 +2491,7 @@ fn new_shelf(
         change: m.saves.len(),
         message: message.to_owned(),
         shelf: true,
+        made_by_combine: false,
     });
     m.saves.len() - 1
 }
@@ -2562,10 +2583,12 @@ fn take(
     m.state = state;
     let entry = step.entry;
     let kept = !m.saves[step.after.on].stored.kept.is_empty();
+    // A combine that made its save, not one that moved the line forward onto a save in conflict.
+    let made_here = m.saves[step.after.on].made_by_combine;
 
     match (step.command, kept, again) {
-        ("combine", true, false) => met("undo over a combine that kept conflicts"),
-        ("combine", true, true) => met("redo over a combine that kept conflicts"),
+        ("combine", true, false) if made_here => met("undo over a combine that kept conflicts"),
+        ("combine", true, true) if made_here => met("redo over a combine that kept conflicts"),
         ("save", true, false) => met("undo over a save that kept a conflict"),
         ("save", true, true) => met("redo over a save that kept a conflict"),
         ("resolve", _, false) => met("undo over a resolve"),
@@ -3051,6 +3074,7 @@ fn combine_into(
                 change: m.saves.len(),
                 message,
                 shelf: false,
+                made_by_combine: true,
             });
             m.saves.len() - 1
         }
@@ -4305,12 +4329,8 @@ fn resolve_at(
         return "no conflicts";
     }
     let listed = conflicts_listed(m);
-    if let Some(Asked::Path(top)) = &asked_for
-        && !top.is_empty()
-        && listed.iter().filter(|(p, _)| within(p, top)).count() > 1
-    {
-        met("resolve at a folder above several places");
-    }
+    let several = matches!(&asked_for, Some(Asked::Path(top)) if !top.is_empty()
+        && listed.iter().filter(|(p, _)| within(p, top)).count() > 1);
     let fixed = |s: &Standing| *s == Standing::Fixed;
     // The places named, or those the folder shows fixed; a pattern takes only those too.
     let chosen: Vec<&(String, Standing)> = match &asked_for {
@@ -4434,11 +4454,15 @@ fn resolve_at(
         change,
         message,
         shelf: false,
+        made_by_combine: false,
     });
     m.state.on = m.saves.len() - 1;
     m.state.lines.insert(line, m.state.on);
     let held = std::mem::replace(&mut m.folder, folder);
     stepped(repo, m, "resolve", was, held);
+    if several {
+        met("resolve at a folder above several places");
+    }
     met(match how {
         ResolveHow::All => "resolve with no paths",
         ResolveHow::Paths => "resolve with a path",
@@ -4991,7 +5015,7 @@ const MUST_MEET: [&str; 37] = [
     "a marked file fixed by hand",
     "save fixed a marked text",
     "save kept a half-fixed text",
-    "save kept a version changed in place",
+    "save kept a picture changed in place",
     "a rename at a place in conflict",
     "save <path> at a place in conflict",
     "undo over a combine that kept conflicts",
@@ -5007,8 +5031,8 @@ const MUST_MEET: [&str; 37] = [
 const FIXED_CASES: u32 = 128;
 
 /// Runs `run` on `config.cases` cases drawn by `runner`, then gives what they met.
-fn pass(mut runner: TestRunner) -> BTreeMap<&'static str, usize> {
-    let acts = prop::collection::vec(act(), 1..=30);
+fn pass(mut runner: TestRunner, everywhere_alike: bool) -> BTreeMap<&'static str, usize> {
+    let acts = prop::collection::vec(act(everywhere_alike), 1..=30);
     let done = runner.run(&acts, |acts| {
         run(&acts);
         Ok(())
@@ -5028,12 +5052,13 @@ fn edits_saves_switches_shelves_and_undos_match_the_model() {
         source_file: Some(file!()),
         ..ProptestConfig::default()
     };
-    let met = pass(TestRunner::new(config));
+    let met = pass(TestRunner::new(config), false);
     println!("met: {met:#?}");
 }
 
 /// The same on cases from a fixed seed, the same on every run, on which every kind the model is
-/// there to exercise must be met at least 3 times.
+/// there to exercise must be met at least 3 times. It draws no act whose effect differs between
+/// systems, so its counts are the same on every system as well as every run.
 #[test]
 fn a_fixed_pass_meets_every_kind_of_case() {
     let config = ProptestConfig {
@@ -5042,7 +5067,7 @@ fn a_fixed_pass_meets_every_kind_of_case() {
         ..ProptestConfig::default()
     };
     let rng = TestRng::deterministic_rng(RngAlgorithm::ChaCha);
-    let met = pass(TestRunner::new_with_rng(config, rng));
+    let met = pass(TestRunner::new_with_rng(config, rng), true);
     println!("met on the fixed pass: {met:#?}");
     let short: Vec<(&str, usize)> = (MUST_MEET.iter())
         .map(|k| (*k, met.get(k).copied().unwrap_or(0)))

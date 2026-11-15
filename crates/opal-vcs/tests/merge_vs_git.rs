@@ -929,8 +929,8 @@ fn combine_matches_git_merge() {
         compared >= 16,
         "{compared} cases where both conflict compared"
     );
-    // Measured with Git 2.50.1: 57 both clean, 34 both conflict (20 compared, 14 set aside by
-    // the earlier, wider rule), 1 Opalro clean only (the accepted case; any other fails), 4 Git
+    // Measured with Git 2.50.1: 57 both clean, 34 both conflict (20 compared, 14 set aside where
+    // Git followed a move, nothing lost), 1 Opalro clean only (the accepted case; any other fails), 4 Git
     // clean only, 12 moves followed into a file the other branch edited, 5 files edited before
     // their move and on the other branch. Another Git can pair a few files its own way, so each
     // bound has some room.
@@ -983,41 +983,64 @@ fn kept_sides(env: &Env) -> Vec<(Files, BTreeMap<String, bool>)> {
     sides
 }
 
-/// Whether every version of a file either branch made is in one of Opalro's `results`: whole,
-/// with its executable mark, or merged line by line (every line it added in one file there, with
-/// the mark too where the branch changed it). Lines are unique in the whole history, so a line
-/// found is the line that was made.
+/// Whether everything either branch made is in one of Opalro's `results` (the files as the
+/// combine left them, or each side of its conflicts taken everywhere): every line a branch added
+/// to a file, as many times as it added it, in one file there; a change of the executable mark,
+/// on a file there holding that file's lines; and a file a branch added whole, whole. A version
+/// that only took lines out has nothing that can be lost.
 fn nothing_lost(
     made: &Generated,
     results: &[(Files, BTreeMap<String, bool>)],
 ) -> Result<(), String> {
-    let texts: Vec<(&Vec<u8>, bool)> = (results.iter())
-        .flat_map(|(files, marks)| files.iter().map(move |(p, b)| (b, marks[p])))
+    let counted = |lines: &mut dyn Iterator<Item = &str>| {
+        let mut n: BTreeMap<String, usize> = BTreeMap::new();
+        for l in lines {
+            *n.entry(l.to_owned()).or_default() += 1;
+        }
+        n
+    };
+    let held: Vec<(&Vec<u8>, bool, BTreeMap<String, usize>)> = (results.iter())
+        .flat_map(|(files, marks)| files.iter().map(move |(p, b)| (p, b, marks[p])))
+        .map(|(_, b, x)| {
+            let text = String::from_utf8_lossy(b).into_owned();
+            (b, x, counted(&mut text.split_inclusive('\n')))
+        })
         .collect();
     for (branch, end) in made.ends.iter().enumerate() {
         for (path, f) in end {
-            let was = f.origin.as_ref().and_then(|o| made.first.get(o));
-            if was.is_some_and(|w| w.lines == f.lines && w.exec == f.exec) {
-                continue;
-            }
-            let bytes = f.lines.concat().into_bytes();
-            if texts.iter().any(|(b, x)| **b == bytes && *x == f.exec) {
-                continue;
-            }
-            let added: Vec<&String> = (f.lines.iter())
-                .filter(|l| was.is_none_or(|w| !w.lines.contains(l)))
-                .collect();
-            let mark_changed = was.is_some_and(|w| w.exec != f.exec);
-            let holds = |(b, x): &(&Vec<u8>, bool)| {
-                let text = String::from_utf8_lossy(b);
-                added.iter().all(|l| text.contains(l.as_str())) && (!mark_changed || *x == f.exec)
+            let lost = |what: &str| {
+                Err(format!(
+                    "branch {branch}'s {path}: {what} is in none of Opalro's results"
+                ))
             };
-            if added.is_empty() || !texts.iter().any(holds) {
-                return Err(format!(
-                    "branch {branch}'s {path} ({} lines, executable {}) is in none of Opalro's results",
-                    f.lines.len(),
-                    f.exec
-                ));
+            let Some(was) = f.origin.as_ref().and_then(|o| made.first.get(o)) else {
+                let bytes = f.lines.concat().into_bytes();
+                if !held.iter().any(|(b, x, _)| **b == bytes && *x == f.exec) {
+                    return lost("the file it added");
+                }
+                continue;
+            };
+            let mut added = counted(&mut f.lines.iter().map(String::as_str));
+            for l in &was.lines {
+                if let Some(n) = added.get_mut(l) {
+                    *n = n.saturating_sub(1);
+                }
+            }
+            added.retain(|_, n| *n > 0);
+            let holds_added = |lines: &BTreeMap<String, usize>| {
+                added
+                    .iter()
+                    .all(|(l, n)| lines.get(l).is_some_and(|m| m >= n))
+            };
+            if !added.is_empty() && !held.iter().any(|(_, _, lines)| holds_added(lines)) {
+                return lost("a line it added");
+            }
+            // The file there: one holding what it added and a line of its own.
+            let ours = |lines: &BTreeMap<String, usize>| {
+                holds_added(lines) && f.lines.iter().any(|l| lines.contains_key(l))
+            };
+            if f.exec != was.exec && !held.iter().any(|(_, x, lines)| *x == f.exec && ours(lines)) {
+                return lost("the executable mark it changed");
             }
         }
     }
