@@ -1042,3 +1042,32 @@ Every save now works out its move notes against its first parent. At `cee0175` t
 ### A combine's memory
 
 `a_combine_of_many_large_text_files_stays_within_memory` runs on Linux on every push ([testing.md](testing.md) §3): a combine of twelve 30 MiB text files, each changed on both lines and merged line by line, stays under 300 MB at its peak. The test asserts the bound and prints no figure, so there is no number to give here.
+
+## 13. v0.2, milestone 8: a combine over saves that hold 100,000 move notes each
+
+**In plain words.** The red team planted a history whose saves each hold as many move notes as a save may (100,000), none of them true, and combined it: 22 seconds in its debug build ([decision 171](decisions/171-red-team-m8-rulings.md), finding RT19-2). Its report put the time down to checking the notes. Timed piece by piece, checking was a tenth of it. Most went on reading the saves: each reading built all 100,000 notes in memory, and a combine read each save six times. After the fix the same combine takes 1.7 seconds in a release build, where it took 5.7.
+
+Measured on 2026-11-14 on the owner's Windows computer, with the history the proof test plants (`crates/opal-vcs/tests/redteam19.rs`): fifty saves on `main`, each holding the same folder as the one before and 100,000 notes from `f000000` to `t000000` and so on (2.4 MB of packs; each save is a record of 1.6 MB unpacked), one save on `side`, then `opalro combine side`.
+
+| | Debug build | Release build |
+|---|---|---|
+| Before (`c6f8222`) | 26.5 s | 5.7 s |
+| After (`096d142`) | 13.1 s | 1.7 s |
+
+**Where the 5.7 seconds went** (release build, a clock around every reading of a save, put in for the measurement and taken out again):
+
+| | Seconds | |
+|---|---|---|
+| Four walks over history (is each line in the other; where they parted; how far a line's notes reach) | 2.7 | 200 readings, each building every note and using none |
+| The change-ID index, reading the fifty new saves once | 0.7 | builds the notes, uses none |
+| The notes pass, reading the saves | 0.7 | uses the notes |
+| The notes pass, checking the notes | 0.6 | what the report named |
+| The rest of the combine | 1.0 | |
+
+**One reading of such a save** (release build): 2.9 ms to unpack it and check its fingerprint, 10.4 ms more to build its notes (two pieces of text each), or 2.5 ms to check the notes as the format demands without building them. In a debug build: 14 ms, 44 ms and 28 ms.
+
+**What the fix changed.** The walks and the change-ID index now read a save's parents, date and change ID and check its notes without building them (the same check, one parser). A combine checks at most 1,000,000 notes in all, then stops believing notes and stops reading saves for them, and says so (`too_many_move_notes`); here that is after ten of the fifty saves.
+
+**What stays.** Reading a save costs in proportion to its size, whoever reads it: about 5 ms for each of these, about 260 readings in this combine. `opalro history` over the fifty saves still builds every note (5.5 s in the red team's debug build). A history planted with thousands of such saves stays slow to walk; whether to make large saves cheap for every reader is the owner's call ([the follow-ups](plans/2026-11-01-milestone-1-follow-ups.md), "Deferred by milestone 8").
+
+The proof test asserts no time (a debug build still takes 13 seconds, almost all of it reading, and no bound on the clock separates fixed from unfixed on three kinds of computer); it prints the time it took, and asserts that the combine goes through and gives the warning.
