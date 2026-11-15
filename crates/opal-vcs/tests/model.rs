@@ -33,7 +33,7 @@ use opal_core::undo::{
     Effect, StepInfo, StepRequest, UndoError, UndoOutcome, redo, undo, undo_list, undo_to,
 };
 use proptest::prelude::*;
-use proptest::test_runner::TestRunner;
+use proptest::test_runner::{RngAlgorithm, TestRng, TestRunner};
 use serde_json::{Value, json};
 
 mod support;
@@ -180,6 +180,8 @@ enum Act {
         edit: u8,
         back: bool,
         changes: (Change, Change),
+        /// The combine back asks for a clean line.
+        clean: bool,
     },
     /// Combines the line or save `pick` chooses into the line the project is on, keeping the
     /// conflicts it meets unless asked for a clean line.
@@ -195,6 +197,8 @@ enum Act {
     CrissCross {
         pick: usize,
         fix: bool,
+        /// The last combine asks for a clean line.
+        clean: bool,
     },
     /// `resolve`, at a place in conflict `pick` chooses, or at every one.
     Resolve {
@@ -211,6 +215,32 @@ enum Act {
     },
     /// `tidy`, as if two days later, keeping every step.
     Tidy,
+    /// `save <path>` at a place in conflict `pick` chooses, or at the folder above it.
+    SaveOnly {
+        pick: usize,
+    },
+    /// Renames the file at a place in conflict `pick` chooses to `to`, and saves.
+    RenameInConflict {
+        pick: usize,
+        to: &'static str,
+    },
+    /// Goes to a line whose save another line's history holds, where that other line's save
+    /// holds a conflict, and combines it in asking for a clean line: a forward refused.
+    CleanForward {
+        pick: usize,
+    },
+    /// Undoes one step and redoes it, with a `tidy` between them if `tidy` says so.
+    UndoRedo {
+        tidy: bool,
+    },
+    /// Makes places in conflict on purpose (two texts in one folder edited in the same place on
+    /// two lines, or with `picture` a text one line made not text), then at once does what `then`
+    /// picks with them: each form of `resolve`, a refusal, a rename, `save <path>`, an undo.
+    Conflicted {
+        pick: usize,
+        picture: bool,
+        then: u8,
+    },
 }
 
 /// What one line of a `Fork` does to its file, each kind of clash a combine meets drawn on
@@ -240,8 +270,11 @@ type Pair = fn(usize, usize, bool) -> (Change, Change);
 enum ResolveHow {
     /// Every place the folder shows fixed.
     All,
-    /// A place, or the whole project, as the folder holds it.
+    /// A place, a folder above some, a path not in conflict, or the whole project, as the folder
+    /// holds it.
     Paths,
+    /// A pattern that matches one place, which takes it only if the folder shows it fixed.
+    Pattern,
     KeepMine,
     KeepTheirs,
 }
@@ -332,7 +365,8 @@ fn act() -> impl Strategy<Value = Act> {
     };
     let how = prop_oneof![
         2 => Just(ResolveHow::All),
-        2 => Just(ResolveHow::Paths),
+        3 => Just(ResolveHow::Paths),
+        2 => Just(ResolveHow::Pattern),
         1 => Just(ResolveHow::KeepMine),
         1 => Just(ResolveHow::KeepTheirs)
     ];
@@ -377,25 +411,32 @@ fn act() -> impl Strategy<Value = Act> {
             .prop_map(|(pick, to, remake)| Act::Moved { pick, to, remake }),
         10 => (
             (any::<usize>(), file(), any::<usize>(), any::<u8>()),
-            prop::bool::weighted(0.75),
+            (prop::bool::weighted(0.75), prop::bool::weighted(0.2)),
             change(),
         )
-            .prop_map(|((pick, path, at, edit), back, changes)| Act::Fork {
+            .prop_map(|((pick, path, at, edit), (back, clean), changes)| Act::Fork {
                 pick,
                 path,
                 at,
                 edit,
                 back,
-                changes
+                changes,
+                clean
             }),
         3 => (any::<usize>(), any::<bool>(), prop::bool::weighted(0.25))
             .prop_map(|(pick, message, clean)| Act::Combine { pick, message, clean }),
-        3 => (any::<usize>(), prop::bool::weighted(0.75))
-            .prop_map(|(pick, fix)| Act::CrissCross { pick, fix }),
+        3 => (any::<usize>(), prop::bool::weighted(0.75), prop::bool::weighted(0.25))
+            .prop_map(|(pick, fix, clean)| Act::CrissCross { pick, fix, clean }),
         4 => (any::<usize>(), how).prop_map(|(pick, how)| Act::Resolve { pick, how }),
         4 => any::<usize>().prop_map(|pick| Act::FixFile { pick }),
         2 => any::<usize>().prop_map(|pick| Act::ChangeInPlace { pick }),
         1 => Just(Act::Tidy),
+        2 => any::<usize>().prop_map(|pick| Act::SaveOnly { pick }),
+        2 => (any::<usize>(), file()).prop_map(|(pick, to)| Act::RenameInConflict { pick, to }),
+        2 => any::<usize>().prop_map(|pick| Act::CleanForward { pick }),
+        3 => any::<bool>().prop_map(|tidy| Act::UndoRedo { tidy }),
+        8 => (any::<usize>(), prop::bool::weighted(0.35), any::<u8>())
+            .prop_map(|(pick, picture, then)| Act::Conflicted { pick, picture, then }),
     ]
 }
 
@@ -1200,6 +1241,7 @@ fn apply(repo: &mut Repository, m: &mut Model, root: &Path, a: &Act) -> Option<S
             edit,
             back,
             changes,
+            clean,
         } => {
             // A text the save holds, saved first if there is none, so both sides change it.
             let texts: Vec<&'static str> = (FILES.into_iter())
@@ -1241,7 +1283,7 @@ fn apply(repo: &mut Repository, m: &mut Model, root: &Path, a: &Act) -> Option<S
             change_file(repo, m, root, changes.1, path, (at, edit), &empty);
             save(repo, m, None);
             if back {
-                combine_into(repo, m, &Aim::Save(first), None, Keep::Conflicts);
+                combine_into(repo, m, &Aim::Save(first), None, keep_of(clean));
             }
             None
         }
@@ -1251,16 +1293,11 @@ fn apply(repo: &mut Repository, m: &mut Model, root: &Path, a: &Act) -> Option<S
             clean,
         } => {
             let aims = aims(m);
-            let keep = if clean {
-                Keep::OnlyIfClean
-            } else {
-                Keep::Conflicts
-            };
             let message = message.then_some("Combined");
-            combine_into(repo, m, &aims[pick % aims.len()], message, keep);
+            combine_into(repo, m, &aims[pick % aims.len()], message, keep_of(clean));
             None
         }
-        Act::CrissCross { pick, fix } => {
+        Act::CrissCross { pick, fix, clean } => {
             let mut here = m.state.line.clone()?;
             let others: Vec<String> = (aims(m).into_iter())
                 .filter_map(|a| match a {
@@ -1278,6 +1315,7 @@ fn apply(repo: &mut Repository, m: &mut Model, root: &Path, a: &Act) -> Option<S
                     edit: (pick % 3) as u8,
                     back: false,
                     changes: (Change::Edit, Change::Edit),
+                    clean: false,
                 };
                 apply(repo, m, root, &fork);
                 there = Some(here);
@@ -1291,7 +1329,8 @@ fn apply(repo: &mut Repository, m: &mut Model, root: &Path, a: &Act) -> Option<S
             // Each line keeps its own side of what its combine left in conflict.
             let own_side = |repo: &mut Repository, m: &mut Model| {
                 if fix && !m.kept().is_empty() {
-                    resolve_at(repo, m, Some(String::new()), ResolveHow::KeepMine, true);
+                    let whole = Some(Asked::Path(String::new()));
+                    resolve_at(repo, m, whole, ResolveHow::KeepMine, true);
                 }
             };
             combine_into(repo, m, &Aim::Line(there.clone()), None, Keep::Conflicts);
@@ -1306,24 +1345,121 @@ fn apply(repo: &mut Repository, m: &mut Model, root: &Path, a: &Act) -> Option<S
             apply(repo, m, root, &goto);
             combine_into(repo, m, &Aim::Save(old), None, Keep::Conflicts);
             own_side(repo, m);
-            combine_into(repo, m, &Aim::Line(here), None, Keep::Conflicts);
+            combine_into(repo, m, &Aim::Line(here), None, keep_of(clean));
             None
         }
         Act::Resolve { pick, how } => {
-            // A place in conflict, or one past them for the whole project.
             let places: Vec<String> = m.kept().keys().cloned().collect();
-            let place = match places.get(pick % (places.len() + 1)) {
-                Some(p) => p.clone(),
-                None => String::new(),
+            // The places, and for a path also the folders above them, a file in no conflict
+            // and the whole project; a keep, the places and the whole project.
+            let mut targets = places.clone();
+            match how {
+                ResolveHow::Paths => {
+                    let above = (FOLDERS.into_iter())
+                        .filter(|f| places.iter().any(|p| within(p, f) && p != f));
+                    targets.extend(above.map(str::to_owned));
+                    let calm = (FILES.into_iter())
+                        .find(|f| !places.iter().any(|p| within(p, f) || within(f, p)));
+                    targets.extend(calm.map(str::to_owned));
+                    targets.push(String::new());
+                }
+                ResolveHow::KeepMine | ResolveHow::KeepTheirs => targets.push(String::new()),
+                ResolveHow::Pattern => {
+                    // A pattern takes only what the folder shows fixed: mostly one that is.
+                    let fixed: Vec<String> = (conflicts_listed(m).into_iter())
+                        .filter(|(_, s)| *s == Standing::Fixed)
+                        .map(|(p, _)| p)
+                        .collect();
+                    if !fixed.is_empty() && pick % 4 != 0 {
+                        targets = fixed;
+                    }
+                }
+                ResolveHow::All => {}
+            }
+            let target = targets.get(pick % targets.len().max(1)).cloned();
+            let asked = match how {
+                ResolveHow::All => None,
+                ResolveHow::Pattern => Some(Asked::Pattern(target?)),
+                _ => Some(Asked::Path(target.unwrap_or_default())),
             };
-            let given = (how != ResolveHow::All).then_some(place);
-            resolve_at(repo, m, given, how, (pick / 7).is_multiple_of(2));
+            resolve_at(repo, m, asked, how, (pick / 7).is_multiple_of(2));
             None
         }
         Act::FixFile { pick } => fix_file(m, root, pick),
         Act::ChangeInPlace { pick } => change_in_place(m, root, pick),
         Act::Tidy => {
             tidy_and_check(repo, m);
+            None
+        }
+        Act::SaveOnly { pick } => {
+            // A place in conflict, or the folder above one.
+            let mut targets: Vec<String> = m.kept().keys().cloned().collect();
+            let above = (targets.iter())
+                .filter_map(|p| p.rsplit_once('/').map(|(up, _)| up.to_owned()))
+                .collect::<BTreeSet<String>>();
+            targets.extend(above);
+            let path = targets.get(pick % targets.len().max(1))?.clone();
+            save_only(repo, m, &path);
+            None
+        }
+        Act::RenameInConflict { pick, to } => {
+            let places: Vec<&String> = (m.kept().keys())
+                .filter(|p| m.folder.files.contains_key(*p))
+                .collect();
+            let from = places.get(pick % places.len().max(1))?.to_string();
+            let from = *FILES.iter().find(|f| **f == from)?;
+            if from == to || m.folder.files.contains_key(to) {
+                return None;
+            }
+            apply(repo, m, root, &Act::Rename(from, to));
+            met("a rename at a place in conflict");
+            save(repo, m, None);
+            None
+        }
+        Act::CleanForward { pick } => {
+            // A line whose save is in the history of another line's save that holds a conflict.
+            let lines = &m.state.lines;
+            let pairs: Vec<(String, String)> = (lines.iter())
+                .flat_map(|(a, &sa)| {
+                    (lines.iter())
+                        .filter(move |&(b, &sb)| a != b && sa != sb)
+                        .map(move |(b, &sb)| (a.clone(), b.clone(), sa, sb))
+                })
+                .filter(|(_, _, sa, sb)| {
+                    !m.saves[*sb].stored.kept.is_empty() && history(m, &[*sb]).contains(sa)
+                })
+                .map(|(a, b, _, _)| (a, b))
+                .collect();
+            let (a, b) = pairs.get(pick % pairs.len().max(1))?.clone();
+            let pick = m.state.lines.keys().position(|l| *l == a).unwrap();
+            let goto = Act::Goto {
+                pick,
+                by_line: true,
+                unsaved: Unsaved::Discard,
+            };
+            apply(repo, m, root, &goto);
+            if m.state.line.as_deref() == Some(a.as_str()) {
+                combine_into(repo, m, &Aim::Line(b), None, Keep::OnlyIfClean);
+            }
+            None
+        }
+        Act::Conflicted {
+            pick,
+            picture,
+            then,
+        } => {
+            in_conflict(repo, m, root, pick, picture);
+            then_with_conflicts(repo, m, root, pick, then);
+            None
+        }
+        Act::UndoRedo { tidy } => {
+            let back = Act::Undo { n: 1, shelve: true };
+            apply(repo, m, root, &back);
+            if tidy {
+                tidy_and_check(repo, m);
+            }
+            let again = Act::Redo { n: 1, shelve: true };
+            apply(repo, m, root, &again);
             None
         }
     };
@@ -1333,6 +1469,9 @@ fn apply(repo: &mut Repository, m: &mut Model, root: &Path, a: &Act) -> Option<S
             | Act::Combine { .. }
             | Act::CrissCross { .. }
             | Act::Resolve { .. }
+            | Act::CleanForward { .. }
+            | Act::UndoRedo { .. }
+            | Act::Conflicted { .. }
             | Act::Fork { back: true, .. }
             | Act::Discard(_)
             | Act::Undo { .. }
@@ -1349,6 +1488,171 @@ fn apply(repo: &mut Repository, m: &mut Model, root: &Path, a: &Act) -> Option<S
             .retain(|p| after.files.contains_key(p) && before.files.get(p) == after.files.get(p));
     }
     missable
+}
+
+/// The two texts `in_conflict` puts in conflict, in one folder.
+const TWO_TEXTS: [&str; 2] = ["d/a", "d/c"];
+
+/// Makes places in conflict on the line the project is on: both texts of `TWO_TEXTS` given a
+/// line in the same place on two lines, combined; or with `picture`, a text one line made bytes
+/// that aren't text, which stands as yours.
+fn in_conflict(repo: &mut Repository, m: &mut Model, root: &Path, pick: usize, picture: bool) {
+    if picture {
+        let fork = Act::Fork {
+            pick: 1,
+            path: "a",
+            at: pick,
+            edit: 2,
+            back: true,
+            changes: (Change::Binary, Change::Edit),
+            clean: false,
+        };
+        apply(repo, m, root, &fork);
+        return;
+    }
+    for p in TWO_TEXTS {
+        if (m.folder.files.get(p)).is_none_or(|f| text_lines(&f.bytes).is_none()) {
+            let _ = std::fs::remove_file(root.join(p));
+            m.folder.files.remove(p);
+            edit_text(m, root, p, 0, 0);
+        }
+    }
+    save(repo, m, None);
+    let edit_both = |m: &mut Model| {
+        for p in TWO_TEXTS {
+            edit_text(m, root, p, pick, 2);
+        }
+    };
+    edit_both(m);
+    save(repo, m, None);
+    let first = m.state.on;
+    let Some(parent) = m.saves[first].parent else {
+        return;
+    };
+    let saves = (0..m.saves.len()).filter(|&i| !m.saves[i].shelf);
+    let pick_parent = saves.into_iter().position(|s| s == parent).unwrap();
+    let goto = Act::Goto {
+        pick: pick_parent,
+        by_line: false,
+        unsaved: Unsaved::Save,
+    };
+    apply(repo, m, root, &goto);
+    edit_both(m);
+    save(repo, m, None);
+    combine_into(repo, m, &Aim::Save(first), None, Keep::Conflicts);
+}
+
+/// What `Conflicted` does with the places in conflict it made, as `then` picks.
+fn then_with_conflicts(repo: &mut Repository, m: &mut Model, root: &Path, pick: usize, then: u8) {
+    let places: Vec<String> = m.kept().keys().cloned().collect();
+    let Some(place) = places.get(pick % places.len().max(1)).cloned() else {
+        return;
+    };
+    let fix_all = |m: &mut Model| {
+        for k in 0..places.len() {
+            fix_file(m, root, k * 6 + 1);
+        }
+    };
+    let path = |p: &str| Some(Asked::Path(p.to_owned()));
+    let yes = (pick / 7).is_multiple_of(2);
+    match then % 14 {
+        0 => {
+            fix_all(m);
+            resolve_at(repo, m, None, ResolveHow::All, true);
+        }
+        1 | 13 => {
+            fix_all(m);
+            let asked = Some(Asked::Pattern(place));
+            resolve_at(repo, m, asked, ResolveHow::Pattern, true);
+        }
+        2 => drop(resolve_at(repo, m, path(&place), ResolveHow::Paths, yes)),
+        3 => drop(resolve_at(repo, m, path("d"), ResolveHow::Paths, yes)),
+        4 => drop(resolve_at(
+            repo,
+            m,
+            path(&place),
+            ResolveHow::KeepMine,
+            true,
+        )),
+        5 => drop(resolve_at(
+            repo,
+            m,
+            path(&place),
+            ResolveHow::KeepTheirs,
+            true,
+        )),
+        6 => {
+            let calm = FILES.into_iter().find(|f| !places.iter().any(|p| p == f));
+            if let Some(calm) = calm {
+                resolve_at(repo, m, path(calm), ResolveHow::Paths, true);
+            }
+        }
+        7 => {
+            let to = FILES.into_iter().find(|f| !m.folder.files.contains_key(*f));
+            if let Some(to) = to {
+                apply(repo, m, root, &Act::RenameInConflict { pick, to });
+            }
+        }
+        8 => {
+            fix_file(m, root, pick);
+            change_in_place(m, root, pick);
+            save_only(repo, m, &place);
+        }
+        9 => {
+            let asked = Some(Asked::Path(String::new()));
+            resolve_at(repo, m, asked, ResolveHow::KeepTheirs, true);
+            apply(repo, m, root, &Act::UndoRedo { tidy: false });
+        }
+        10 => {
+            fix_file(m, root, pick);
+            save(repo, m, None);
+            let tidy = pick.is_multiple_of(2);
+            apply(repo, m, root, &Act::UndoRedo { tidy });
+        }
+        11 => {
+            // Without a side, a picture still standing as yours is refused.
+            let picture = (m.kept().iter())
+                .find(|(_, k)| k.marker() == 0)
+                .map(|(p, _)| p.clone());
+            let at = picture.unwrap_or(place);
+            resolve_at(repo, m, path(&at), ResolveHow::Paths, yes);
+        }
+        _ => carried_into_a_clean_line(repo, m, root),
+    }
+}
+
+/// From the line the project is on, whose save holds a conflict: another line made from that
+/// save's first parent with a change elsewhere, combined in asking for a clean line, so the
+/// conflict would be carried.
+fn carried_into_a_clean_line(repo: &mut Repository, m: &mut Model, root: &Path) {
+    let (Some(here), Some(parent)) = (m.state.line.clone(), m.saves[m.state.on].parent) else {
+        return;
+    };
+    let saves = (0..m.saves.len()).filter(|&i| !m.saves[i].shelf);
+    let pick = saves.into_iter().position(|s| s == parent).unwrap();
+    let goto = Act::Goto {
+        pick,
+        by_line: false,
+        unsaved: Unsaved::Save,
+    };
+    apply(repo, m, root, &goto);
+    edit_text(m, root, "b", 0, 2);
+    save(repo, m, None);
+    let Some(there) = m.state.line.clone().filter(|l| *l != here) else {
+        return;
+    };
+    let Some(pick) = m.state.lines.keys().position(|l| *l == here) else {
+        return;
+    };
+    let goto = Act::Goto {
+        pick,
+        by_line: true,
+        unsaved: Unsaved::Save,
+    };
+    apply(repo, m, root, &goto);
+    if m.state.line.as_deref() == Some(here.as_str()) {
+        combine_into(repo, m, &Aim::Line(there), None, Keep::OnlyIfClean);
+    }
 }
 
 /// Makes `change` to the text at `path` in the folder, for a line of a fork; `empty` are the
@@ -1545,6 +1849,7 @@ fn save(repo: &mut Repository, m: &mut Model, line: Option<&str>) {
             );
             assert_eq!(saved_tree(repo.store(), save_id), stored);
             assert_eq!(conflicts, stored.kept.len() as u64, "still in conflict");
+            count_settled(m.kept(), &stored);
             let was = m.state.clone();
             m.saves.push(Saved {
                 id: save_id,
@@ -1576,7 +1881,78 @@ fn save(repo: &mut Repository, m: &mut Model, line: Option<&str>) {
     }
 }
 
-/// What a save of `folder` holds on top of the save `tip` (as stored): the folder as it is,
+/// Counts how a save settled the places in conflict `before` held.
+fn count_settled(before: &BTreeMap<String, Kept>, after: &Tree) {
+    for (p, k) in before {
+        match after.kept.get(p) {
+            None => met("save fixed a marked text"),
+            Some(now) if now == k => {}
+            Some(_) if k.marker() > 0 => met("save kept a half-fixed text"),
+            Some(_) => met("save kept a version changed in place"),
+        }
+    }
+}
+
+/// `save <path>`: the place at or below `path` settled as a full save settles it, everything
+/// else as the save the project is on holds it.
+fn save_only(repo: &mut Repository, m: &mut Model, path: &str) {
+    let who = who();
+    let only = [Given::Path(path.to_owned())];
+    let req = SaveRequest {
+        message: Some("Save"),
+        who: &who,
+        command: "save",
+        accept_crlf: false,
+        git_excludes: None,
+        new_line: None,
+        only: Some(&only),
+        amend: false,
+    };
+    // At a save, a save starts a line: that is the full save's to draw.
+    let Some(line) = m.state.line.clone() else {
+        return;
+    };
+    let done = save_folder(repo, &req, &mut |_| {}, &mut |_| true);
+    let tip = m.saves[m.state.on].stored.clone();
+    let mut stored = tip.clone();
+    stored.take(path, &settled(&m.folder, &tip));
+    let named = |p: &String| within(p, path);
+    match done.unwrap() {
+        SaveOutcome::Saved {
+            save_id, conflicts, ..
+        } => {
+            assert_ne!(stored, tip, "saved with nothing changed");
+            assert_eq!(saved_tree(repo.store(), save_id), stored, "save {path}");
+            let still = stored.kept.keys().filter(|p| named(p)).count() as u64;
+            assert_eq!(conflicts, still, "of the places saved, still in conflict");
+            if m.kept().keys().any(named) {
+                met("save <path> at a place in conflict");
+            }
+            count_settled(m.kept(), &stored);
+            let was = m.state.clone();
+            m.saves.push(Saved {
+                id: save_id,
+                tree: stored.standing(),
+                stored,
+                parent: Some(m.state.on),
+                others: Vec::new(),
+                change: m.saves.len(),
+                message: "Save".to_owned(),
+                shelf: false,
+            });
+            m.state.on = m.saves.len() - 1;
+            m.state.lines.insert(line, m.state.on);
+            let held = m.folder.clone();
+            stepped(repo, m, "save", was, held);
+        }
+        SaveOutcome::NothingChanged { .. } => {
+            assert_eq!(stored, tip, "changes not saved");
+            settle(repo, m, Vec::new());
+        }
+    }
+}
+
+/// What a save holds on top of the save `tip` (as stored): the folder as it is,
 /// with each of the tip's places in conflict settled by what the folder shows there. Untouched,
 /// the conflict stays as it is; shown with markers, it is fixed once no marker line is left,
 /// and else keeps the file as its own; standing as a version, it keeps whatever the folder holds
@@ -1652,6 +2028,7 @@ fn amend(repo: &mut Repository, m: &mut Model, new_message: bool) {
             assert_eq!(replaced, Some(m.saves[old].id));
             assert_eq!(saved_tree(repo.store(), save_id), stored);
             assert_eq!(conflicts, stored.kept.len() as u64, "still in conflict");
+            count_settled(m.kept(), &stored);
             let was = m.state.clone();
             let (parent, change) = (m.saves[old].parent, m.saves[old].change);
             // An amend keeps every parent.
@@ -2184,6 +2561,18 @@ fn take(
     }
     m.state = state;
     let entry = step.entry;
+    let kept = !m.saves[step.after.on].stored.kept.is_empty();
+
+    match (step.command, kept, again) {
+        ("combine", true, false) => met("undo over a combine that kept conflicts"),
+        ("combine", true, true) => met("redo over a combine that kept conflicts"),
+        ("save", true, false) => met("undo over a save that kept a conflict"),
+        ("save", true, true) => met("redo over a save that kept a conflict"),
+        ("resolve", _, false) => met("undo over a resolve"),
+        ("resolve", _, true) => met("redo over a resolve"),
+        _ => {}
+    }
+
     if again {
         m.undone.pop();
         m.done.push(step);
@@ -2467,7 +2856,14 @@ impl Stopped {
                 for (_, row, _) in made {
                     met(clash_kind(row));
                 }
-                met("stopped for a clean line");
+                if *forward {
+                    met("--only-if-clean: a forward onto a save in conflict");
+                } else if !made.is_empty() {
+                    met("--only-if-clean: a conflict it would make");
+                }
+                if *held > 0 && !*forward {
+                    met("--only-if-clean: a conflict carried from a line");
+                }
             }
             (
                 Stopped::Held { path, at, on },
@@ -3824,17 +4220,43 @@ fn conflicts_listed(m: &Model) -> Vec<(String, Standing)> {
         .collect()
 }
 
-/// `resolve`, at `given` (a place, or `""` for the whole project), or without one at every
-/// place the folder shows fixed; `yes` answers whether to record a file with markers left.
+/// What `resolve` is given: a path (`""` for the whole project), or a pattern matching exactly
+/// the one place it holds.
+enum Asked {
+    Path(String),
+    Pattern(String),
+}
+
+/// Whether `keep` asks for a clean line.
+fn keep_of(clean: bool) -> Keep {
+    if clean {
+        Keep::OnlyIfClean
+    } else {
+        Keep::Conflicts
+    }
+}
+
+/// `resolve` given `asked`, or nothing for every place the folder shows fixed; `yes` answers
+/// whether to record a file with markers left. Gives what came of it: `recorded`, or why not.
 fn resolve_at(
     repo: &mut Repository,
     m: &mut Model,
-    given: Option<String>,
+    asked_for: Option<Asked>,
     how: ResolveHow,
     yes: bool,
-) {
+) -> &'static str {
     let who = who();
-    let paths: Option<Vec<Given>> = given.clone().map(|p| vec![Given::Path(p)]);
+    let given = |a: &Asked| match a {
+        Asked::Path(p) => Given::Path(p.clone()),
+        Asked::Pattern(place) => {
+            // The place's last letter in brackets: a pattern that matches it and nothing else.
+            let (head, last) = place.split_at(place.len() - 1);
+            let glob = format!("{head}[{last}]");
+            let below = String::new();
+            Given::Pattern { below, glob }
+        }
+    };
+    let paths: Option<Vec<Given>> = asked_for.as_ref().map(|a| vec![given(a)]);
     let keep = match how {
         ResolveHow::KeepMine => Some(resolve::Side::Mine),
         ResolveHow::KeepTheirs => Some(resolve::Side::Theirs),
@@ -3869,7 +4291,8 @@ fn resolve_at(
     };
     let Some(line) = m.state.line.clone() else {
         refused(&done, "not on a line");
-        return drop(settle(repo, m, Vec::new()));
+        settle(repo, m, Vec::new());
+        return "not on a line";
     };
     let on = m.state.on;
     if m.kept().is_empty() {
@@ -3878,23 +4301,34 @@ fn resolve_at(
             matches!(done, ResolveOutcome::NoConflicts { save_id } if save_id == m.saves[on].id),
             "{done:?}"
         );
-        return drop(settle(repo, m, Vec::new()));
+        settle(repo, m, Vec::new());
+        return "no conflicts";
     }
     let listed = conflicts_listed(m);
-    // The places named, or those the folder shows fixed.
-    let chosen: Vec<&(String, Standing)> = match &given {
-        None => listed
-            .iter()
-            .filter(|(_, s)| *s == Standing::Fixed)
-            .collect(),
-        Some(top) => listed
+    if let Some(Asked::Path(top)) = &asked_for
+        && !top.is_empty()
+        && listed.iter().filter(|(p, _)| within(p, top)).count() > 1
+    {
+        met("resolve at a folder above several places");
+    }
+    let fixed = |s: &Standing| *s == Standing::Fixed;
+    // The places named, or those the folder shows fixed; a pattern takes only those too.
+    let chosen: Vec<&(String, Standing)> = match &asked_for {
+        None => listed.iter().filter(|(_, s)| fixed(s)).collect(),
+        Some(Asked::Path(top)) => listed
             .iter()
             .filter(|(p, _)| top.is_empty() || within(p, top))
             .collect(),
+        Some(Asked::Pattern(place)) => listed
+            .iter()
+            .filter(|(p, s)| p == place && (keep.is_some() || fixed(s)))
+            .collect(),
     };
-    if given.is_some() && chosen.is_empty() {
+    if matches!(asked_for, Some(Asked::Path(_))) && chosen.is_empty() {
         refused(&done, "not in conflict");
-        return drop(settle(repo, m, Vec::new()));
+        met("resolve refused: not in conflict");
+        settle(repo, m, Vec::new());
+        return "not in conflict";
     }
     if keep.is_none() {
         // Without a side named, only what the folder shows decides: a version standing as the
@@ -3903,7 +4337,8 @@ fn resolve_at(
         if chosen.iter().any(|(_, s)| still(s)) {
             refused(&done, "still yours");
             met("resolve refused: still yours");
-            return drop(settle(repo, m, Vec::new()));
+            settle(repo, m, Vec::new());
+            return "still yours";
         }
         let marked: Vec<(String, u64)> = (chosen.iter())
             .filter_map(|(p, s)| match s {
@@ -3919,7 +4354,9 @@ fn resolve_at(
         assert_eq!(asked, want_asked, "what resolve asked");
         if !yes && !marked.is_empty() {
             refused(&done, "markers left");
-            return drop(settle(repo, m, Vec::new()));
+            met("resolve refused: markers left, answered no");
+            settle(repo, m, Vec::new());
+            return "markers left";
         }
     }
     let places: Vec<String> = chosen.iter().map(|(p, _)| p.clone()).collect();
@@ -3933,7 +4370,8 @@ fn resolve_at(
             panic!("the model records nothing, the engine {done:?}");
         };
         assert_eq!(got, left_count);
-        return drop(settle(repo, m, Vec::new()));
+        settle(repo, m, Vec::new());
+        return "nothing";
     }
     let ResolveOutcome::Recorded {
         save_id,
@@ -3981,14 +4419,11 @@ fn resolve_at(
         };
         (Some(on), Vec::new(), m.saves.len(), message)
     };
-    met(if keep.is_some() {
-        "resolve kept a side"
+    met(if amend {
+        "resolve into the combined save"
     } else {
-        "resolve recorded the folder"
+        "resolve on a save of its own"
     });
-    if amend {
-        met("resolve replaced the combined save");
-    }
     let was = m.state.clone();
     m.saves.push(Saved {
         id: save_id,
@@ -4004,6 +4439,14 @@ fn resolve_at(
     m.state.lines.insert(line, m.state.on);
     let held = std::mem::replace(&mut m.folder, folder);
     stepped(repo, m, "resolve", was, held);
+    met(match how {
+        ResolveHow::All => "resolve with no paths",
+        ResolveHow::Paths => "resolve with a path",
+        ResolveHow::Pattern => "resolve with a pattern",
+        ResolveHow::KeepMine => "resolve --keep mine",
+        ResolveHow::KeepTheirs => "resolve --keep theirs",
+    });
+    "recorded"
 }
 
 /// Writes a file shown with markers, that still has them, with each marked place made into
@@ -4087,8 +4530,17 @@ fn tidy_and_check(repo: &mut Repository, m: &mut Model) {
     let later = now + 2 * 86_400_000;
     opal_core::tidy::tidy(repo, 36_500, later, &mut |_| {}, &mut |_| {}).unwrap();
     no_version_a_kept_conflict_names_is_freed(repo, m);
-    if m.saves.iter().any(|s| !s.stored.kept.is_empty()) {
-        met("tidy with conflicts kept");
+    // A save in conflict that no line, tag or shelf reaches, only a step undo or redo can take.
+    let held: Vec<usize> = (m.state.lines.values())
+        .chain(m.state.tags.values())
+        .chain(m.state.shelves.iter().map(|(_, s)| s))
+        .copied()
+        .collect();
+    let reached = history(m, &held);
+    let only_by_steps = (0..m.saves.len())
+        .any(|i| !m.saves[i].shelf && !m.saves[i].stored.kept.is_empty() && !reached.contains(&i));
+    if only_by_steps {
+        met("tidy with a conflict only undo reaches");
     }
     settle(repo, m, Vec::new());
 }
@@ -4507,11 +4959,11 @@ fn cases() -> u32 {
         .unwrap_or(64)
 }
 
-/// The kinds of case a run of 64 must meet at least 3 times each: every clash a combine keeps
+/// The kinds of case the fixed pass must meet at least 3 times each: every clash a combine keeps
 /// that the model's files can make (two kinds at one place, a link, a rule against markers and
-/// files past the text limits they can't), the starting points that disagree, and a line's
-/// conflict that stops a combine.
-const MUST_MEET: [&str; 10] = [
+/// files past the text limits they can't), the starting points that disagree, a line's conflict
+/// that stops a combine, and each way the other commands meet a conflict.
+const MUST_MEET: [&str; 37] = [
     "changed on both, in the same place",
     "changed on both, not text",
     "changed, removed",
@@ -4522,8 +4974,53 @@ const MUST_MEET: [&str; 10] = [
     "start unknown",
     "starting points that disagree",
     "stopped at a conflict a line holds",
+    "--only-if-clean: a conflict it would make",
+    "--only-if-clean: a conflict carried from a line",
+    "--only-if-clean: a forward onto a save in conflict",
+    "resolve with no paths",
+    "resolve with a path",
+    "resolve with a pattern",
+    "resolve --keep mine",
+    "resolve --keep theirs",
+    "resolve into the combined save",
+    "resolve on a save of its own",
+    "resolve refused: not in conflict",
+    "resolve refused: still yours",
+    "resolve refused: markers left, answered no",
+    "resolve at a folder above several places",
+    "a marked file fixed by hand",
+    "save fixed a marked text",
+    "save kept a half-fixed text",
+    "save kept a version changed in place",
+    "a rename at a place in conflict",
+    "save <path> at a place in conflict",
+    "undo over a combine that kept conflicts",
+    "redo over a combine that kept conflicts",
+    "undo over a save that kept a conflict",
+    "redo over a save that kept a conflict",
+    "undo over a resolve",
+    "redo over a resolve",
+    "tidy with a conflict only undo reaches",
 ];
 
+/// How many cases the fixed pass runs.
+const FIXED_CASES: u32 = 128;
+
+/// Runs `run` on `config.cases` cases drawn by `runner`, then gives what they met.
+fn pass(mut runner: TestRunner) -> BTreeMap<&'static str, usize> {
+    let acts = prop::collection::vec(act(), 1..=30);
+    let done = runner.run(&acts, |acts| {
+        run(&acts);
+        Ok(())
+    });
+    if let Err(e) = done {
+        panic!("{e}");
+    }
+    MET.with(|m| m.borrow().clone())
+}
+
+/// Cases drawn anew on every run, to find what nobody thought of: 64 on every push, more nightly.
+/// It asserts no count, and prints them.
 #[test]
 fn edits_saves_switches_shelves_and_undos_match_the_model() {
     let config = ProptestConfig {
@@ -4531,26 +5028,34 @@ fn edits_saves_switches_shelves_and_undos_match_the_model() {
         source_file: Some(file!()),
         ..ProptestConfig::default()
     };
-    let acts = prop::collection::vec(act(), 1..=30);
-    let done = TestRunner::new(config).run(&acts, |acts| {
-        run(&acts);
-        Ok(())
-    });
-    if let Err(e) = done {
-        panic!("{e}");
-    }
-    let met = MET.with(|m| m.borrow().clone());
+    let met = pass(TestRunner::new(config));
     println!("met: {met:#?}");
-    for kind in MUST_MEET {
-        let n = met.get(kind).copied().unwrap_or(0);
-        assert!(n >= 3, "{kind}: met {n} times, at least 3 needed");
-    }
+}
+
+/// The same on cases from a fixed seed, the same on every run, on which every kind the model is
+/// there to exercise must be met at least 3 times.
+#[test]
+fn a_fixed_pass_meets_every_kind_of_case() {
+    let config = ProptestConfig {
+        cases: FIXED_CASES,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    };
+    let rng = TestRng::deterministic_rng(RngAlgorithm::ChaCha);
+    let met = pass(TestRunner::new_with_rng(config, rng));
+    println!("met on the fixed pass: {met:#?}");
+    let short: Vec<(&str, usize)> = (MUST_MEET.iter())
+        .map(|k| (*k, met.get(k).copied().unwrap_or(0)))
+        .filter(|(_, n)| *n < 3)
+        .collect();
+    assert!(short.is_empty(), "met fewer than 3 times: {short:?}");
 }
 
 /// A combine whose lines parted at a save holding a conflict that each line fixed its own way:
 /// one line kept theirs, the other fixed the markers by hand. `clean` asks for a clean line.
 fn parted_in_conflict(clean: bool) -> Vec<Act> {
     let fork = Act::Fork {
+        clean: false,
         pick: 1,
         path: "a",
         at: 0,
@@ -4601,6 +5106,7 @@ fn a_file_moved_to_two_places_held_alike_at_one_is_no_conflict_there() {
     run(&[
         Act::Big("d/a", 0, 1_048_576),
         Act::Fork {
+            clean: false,
             pick: 4_915_421_869_871_524_073,
             path: "a",
             at: 0,
@@ -4619,6 +5125,7 @@ fn a_file_moved_to_two_places_held_alike_at_one_is_no_conflict_there() {
             remake: true,
         },
         Act::Fork {
+            clean: false,
             pick: 13_567_937_977_859_821_551,
             path: "a",
             at: 14_330_216_744_520_979_105,
@@ -4634,6 +5141,7 @@ fn a_file_moved_to_two_places_held_alike_at_one_is_no_conflict_there() {
             shelve: true,
         },
         Act::CrissCross {
+            clean: false,
             pick: 14_366_835_740_253_199_054,
             fix: true,
         },
