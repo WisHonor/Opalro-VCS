@@ -1184,9 +1184,7 @@ Every message, row, question, hint, line of help and `--json` name this plan int
 | `status` row | `<path>  changed in place, still to decide` | 5 |
 | `status` row | `<path>  not in your folder, still to decide` | 5 |
 | `status` row | `<path>  can't be written on this computer, kept as it is` | 5 |
-| Next | `Next: record what you fixed with: opalro resolve` (when any is fixed) | 5 |
-| Next | `Fix the marked places in your editor, then run opalro resolve.` (when any has markers) | 5 |
-| Next | `To pick a version: opalro resolve <path> --keep mine (or theirs); to look at theirs first: opalro resolve <path> --copy theirs --to <file>` (when any stands as a version) | 5 |
+| Next (one line: the first that applies; else the step `status` gives without conflicts) | `Next: record what you fixed with: opalro resolve` (any place fixed and not yet recorded); else `Next: fix the marked places in your editor, then run: opalro resolve` (any place with marked places left); else `Next: pick a version with: opalro resolve <path> --keep mine (or theirs); to look at theirs first: opalro resolve <path> --copy theirs --to <file>` (any place standing as a version) | 5 |
 | `changes` line | `In conflict: <path> (compared with what your folder held for it after the last save)` | 5 |
 | JSON | `status --json`: `conflicts`, every place, uncapped as `changes` is (`path`, `standing`: `"markers"`, `"fixed"`, `"yours"`, `"changed"`, `"nothing"`, `"not_here"`; `places_left`; `terms`); `changes --json`: `in_conflict` | 5 |
 | `goto` detail | `The save you went to holds places in conflict: opalro status lists them.` (no number, ruling B; second-round ruling 4) | 6 |
