@@ -1,0 +1,100 @@
+# Milestone 9 ("Conflicts"): rulings
+
+The owner asked for v0.2 to be started while they were away, with Claude working alone. This file collects the calls made while planning and building milestone 9. It has three parts:
+
+- **Please confirm:** the calls that most change what Opalro does. Each can be reversed.
+- **Every ruling, as made:** each ruling as it was written when it was made, with its reason and what it costs if it is wrong.
+- **Deferred:** what this milestone left for later.
+
+The decisions themselves are records [174](../decisions/174-the-conflict-record.md) to [179](../decisions/179-every-command-and-a-conflict.md). Each says "Decided by Claude, at the owner's request while the owner was away. The owner can reverse any part." The plan is [2026-11-14-milestone-9-conflicts.md](2026-11-14-milestone-9-conflicts.md).
+
+**Branch:** `milestone-9`, from `v0.2`. Nothing is merged into `main`, which stays what v0.1 is released from.
+
+## Please confirm
+
+1. **A combine that has conflicts goes through and keeps them** ([175](../decisions/175-what-a-combine-keeps-as-a-conflict.md)). In milestone 8 it stopped and changed nothing. Now the combined save holds a conflict at each place that clashes, every version is kept, and you fix them when you choose. `opalro combine --only-if-clean` is the old behaviour, for scripts.
+2. **Such a combine ends with 0, where Git's `merge` ends with 1** (175). Opalro has three exit codes (done, failed, a command line it couldn't use), and the combine is done. A script that must stop on conflicts uses `--only-if-clean`.
+3. **In the folder, a text file in conflict gets markers; anything else keeps your line's version** ([176](../decisions/176-a-conflict-in-the-folder.md)). Markers are the well-known ones, with the part both lines started from in the middle. A picture, a scene, a file too big to compare, or a file whose rule says so, stays as your line has it, whole, and the other versions stay inside `.opalro`. If you had removed the file, nothing appears in your folder.
+4. **A text file is fixed when its markers are gone; a picture or a scene only when you say so** ([177](../decisions/177-recording-a-fix-save-and-resolve.md)). Game engines rewrite files just by opening a project, so a file that changed by itself never settles which line's version is kept. `opalro resolve <file> --keep mine` or `--keep theirs` does.
+5. **`opalro resolve` puts the fix into the combined save when it can** (177): the save is replaced by one with the same ID, message and parents, as `save --amend` replaces a save, so history ends with one combined save that holds the result. When something else shows that save, or other saves came in between, the fix is a new save. Say if you would rather have fixes always be a new save.
+6. **`opalro save` works on a folder with conflicts and never decides one** (177): half-fixed files are saved as they are, and the conflicts stay listed.
+7. **`opalro resolve <file> --copy theirs --to <somewhere>`** (177) writes one version out for you to look at. Opalro starts no other program.
+8. **A project made by v0.1 needs `opalro setup --upgrade` once before it can keep conflicts** ([178](../decisions/178-the-conflicts-feature.md)), and after that v0.1 can no longer open it. That is your rule from decisions 008 and 121, kept to the letter. A project made by v0.2 can keep conflicts from the start, and v0.1 can't open it. Asking on the spot, at the combine that needs it, would save a step: say if you want that.
+9. **The conflict record stores the file as it stands in your folder** ([174](../decisions/174-the-conflict-record.md)): the marked text, or your half-fixed version. It costs one more stored text for each conflict, and it means Opalro never has to work the marked text out again to tell whether you touched it. This is the one new thing on disk in v0.2.
+10. **A project without conflicts pays nothing for being able to have them** ([179](../decisions/179-every-command-and-a-conflict.md)): no command looks through a save for conflicts. For that reason `opalro history` doesn't yet mark a save that holds conflicts; `status`, `show` and `combine` say so.
+11. **In a criss-cross history, a file the two lines' starting points disagree about becomes one whole conflict** (175), where milestone 8 refused the combine. Git would often merge such a file; Opalro never guesses there.
+12. **A line that still holds a conflict can be combined, except where the other line changed the same place** (175): then the combine asks for that conflict to be fixed first. Opalro never makes a conflict inside a conflict.
+
+## Every ruling, as made
+
+**Before the build: what the decisions didn't yet say** (given to the planning agent on 2026-11-14)
+
+- **R1. One function says what a conflict stands as** in the folder: its own version if the record has one, else its first term; either may be absent. Write-out, the folder walk, the check for unsaved work, safety copies, `discard` and the shelf all go through it.
+- **R2. Without the feature, nothing changes.** In a project whose `format` doesn't list `conflicts`, a conflict entry or record is treated exactly as before, and the tests for that stay. The check is in one place.
+- **R3. Everything in a record is untrusted.** A term's kind is checked against the object it names when that is read. A folder among the terms can be as large as a save: commands that don't need it never read it, `tidy` and `verify` walk it without recursion, and `resolve --keep` writes it under write-out's own limits and name rules. A marked text is at most 64 MiB, a label at most 200 bytes of plain text on one line, a list of conflicts a command names at most 100 with a count of the rest.
+- **R4. Only the combine writes a record** (three terms), and `save`, which rewrites one only to change its own version. Nothing writes a record in a project without the feature.
+- **R5.** Withdrawn by ruling B below (it said where a count of conflicts in a save would come from).
+- **R6. `resolve` reaches the save code** the way `save --amend <paths>` does; "record these places as fixed" reaches the walk for the named paths only; `--keep` writes through write-out's planned actions with its safety copies; one diary step either way; it meets every check `save` makes on the files it records.
+- **R7. The starting version "unknown"** is a value of its own inside the merge, never stored and never the same as "absent".
+- **R8. What milestone 9 does not do:** conflicts of more than three terms written by Opalro (read, yes); combining two conflicts into a wider one; `who`; writing a conflicted save into a Git repository; a general command that takes one file out of any save; writing a conflict out afresh from its terms; merge programs.
+
+**Before the build: three rulings that changed the plan's shape** (2026-11-14, on the planning agent's first plan)
+
+- **A. No walk of a save to find its conflicts.** The first plan read every folder of a save, in every command that meets the folder, to find conflicts. Every v0.2 project can hold conflicts and `status` is at its speed limit against Git, so that was ruled out. A conflict is met where a listing's entry is met; its record is read then; a listing keeps its stored ID. A test holds that a project without conflicts reads no listing and no record it didn't read before. Why: the ability must cost nothing until it is used. Cost if wrong: the walk and write-out each learn about conflicts where they meet an entry, which is more places to get right than one pass up front.
+- **B. No count of conflicts in a save.** It can't be kept exact without that walk, and nothing needs it: no field in the save, no check in `verify`, no mark in `history`. `show` and `changes --save` say what a save changed; `combine` counts while it measures its result against a save's limits; `save` and `resolve` say how many they met. Why: a number that is sometimes wrong is worse than none. Cost if wrong: a save that holds conflicts looks like any other in `history`.
+- **C. A combine never makes a conflict inside a conflict.** It stops where both lines changed a place and one holds it in conflict or holds one below it. A planted one is refused as damage when it is read for the folder; `tidy` and `verify` still follow everything. Why: every such case has an easy way forward (fix the inner one), and nesting doubles what every command must handle. Cost if wrong: a combine is refused where it could have gone through with two conflicts, one inside the other.
+
+**Before the build: answers to the planning agent's 22 questions** (first round)
+
+1. Where the starting version is unknown and both lines hold a folder, the merge goes in and decides entry by entry, everything below still unknown; elsewhere the conflict is whole.
+2. A picture in conflict inside a folder the person deleted: the conflict stays, its own version absent, and its folder stays in the save, standing as an empty folder. Cost if wrong: `status` keeps showing that folder as removed until the conflict is resolved, and `goto` to the save makes an empty folder.
+3. Where a save's count of conflicts would come from: gone with ruling B.
+4. What finding conflicts costs: ruling A.
+5. Conflicts inside conflicts: ruling C.
+6. Moves: nothing a line saved is cleared before the merge; a move clash's row names the place where the file landed; milestone 8's three rows for moves are reworded.
+7. `resolve <path>` on a picture whose changed copy was already saved: recorded as that copy, since the person named the path. It is refused without `--keep` only while it stands as the line's version as the combine left it.
+8. A planted record of 512 MiB: a conflict record over 16 KiB is refused before it is unpacked (the store knows a record's size there).
+9. What must hold of a marked text: two properties, not one. When every change of theirs overlaps one of ours, taking one side everywhere gives that side back exactly; in general, taking ours everywhere equals a merge with every clash settled by ours. And every marked text reads back with as many opening lines as marked places.
+10. In a project without the feature, a criss-cross that milestone 8 refused can now combine cleanly when both lines hold the disputed file alike: intended, and nothing new is stored.
+11. `resolve` at a save that no line is at: its own refusal, with the hint `opalro line new <name>`, which makes a line there.
+12. A save between two conflicted saves of one place: a third kind in `show`, "still in conflict".
+13. A file with only closing markers left is still being fixed.
+14. `combine` says how many places its save holds in conflict; its rows name the ones this combine made; a detail says how many the lines held already.
+15. `status` lists every conflict, as it lists every change, in `--json` too; `combine` and `resolve` name the first 100 and count the rest.
+16. A marker's label carries the first 8 letters of the save's change ID, always, so the same conflict gives the same text whenever it is made.
+17. Changes below a conflict that stands as a folder are not listed apart; the conflict's row says "changed in place".
+18. `--copy` may write anywhere but inside `.opalro`; the file is made new and never written over anything; nothing is locked or recorded.
+19. A file moved to two places, where the other line also put something new at your place: that line's term is whatever it holds there, so nothing is dropped.
+20. Two added files with the same contents and a different executable mark: a conflict standing as yours, no markers.
+21. The hint for a conflict a line holds names the line in its prose and puts no name inside a command.
+22. `opalro setup --upgrade --json` asks nothing: without `--yes` it changes nothing and says so.
+
+**Second round** (the seven questions left after the plan was revised)
+
+1. A conflict standing as a folder that an ignore rule now matches behaves as a saved folder at that place does today; where that is "gone from the folder", the conflict stays with its own version absent. Cost if wrong: the person's folder is still on the drive but no longer the conflict's version, and going back to that save moves it to a safety copy.
+2. A picture in conflict below a deleted folder, in a project already past a save's limits: the save goes ahead without it, as today for other entries kept as they were. Cost if wrong: that conflict is dropped from the next save; it is still in the save before.
+3. `save <path>` inside a conflict that stands as a folder goes the way a full save goes. If that needs more than the shared rule, the answer becomes a refusal ("save the place whole, or resolve it").
+4. `goto` says "The save you went to holds places in conflict" when it met one in the save it went to; never about the save it left; no number.
+5. `save` counts the places it met; its words say so.
+6. `resolve` can't record, from the folder, a place this computer can't hold; with `--keep` the save records the version and write-out says it wasn't written here.
+7. Nothing read "as it stands" is ever stored under the ID it was read by: a constraint of the plan, with a test, and a point for the whole-branch review.
+
+**Third round** (after a pre-flight scan of the plan and milestone 8's whole-branch review)
+
+- **D1.** No record is ever put at a place below another conflict's place: what a line holds there is held by that conflict's folder. Putting a move clash's record back never replaces a conflict with a plain folder. The scan's case is a test: ours moves `a.txt` to `ui/a.txt` and adds `ui/b.txt`; theirs moves `a.txt` to `c.txt` and adds a file `ui`; nothing may end in no entry and no record. Why: as first planned, their `ui` and your `b.txt` would have been lost. Cost if wrong: none found.
+- **D2.** While either line's `opalro.toml` can't be read whole, a text file both lines changed stops the combine, whether its changes would merge or overlap, inside the starting points' own combines too ([decision 172](../decisions/172-red-team-m8-session-2-rulings.md)). Why: Opalro can't know whether such a file may be merged, or marked. Cost if wrong: a mistake in a rules file stops a combine that could have kept an ordinary conflict.
+- **The rules of both lines** ([decision 173](../decisions/173-the-rules-of-both-lines-decide-what-a-combine-merges.md)) decide markers too: a file is shown with markers only when both allow it, under every name it had.
+- The scan's twelve findings that would have broken a task as written (stale names, files a task touches and didn't list, an option that couldn't be given, a test that needed a later task) are fixed in the plan. Marker labels are given for each file merged, since the middle label can differ from place to place.
+
+**Fourth round**
+
+- When the rules stop a combine, the refusal names only the places the rules would decide, not every clash. Cost if wrong: one more run to see the rest.
+- The other line's rules file is found by the name `opalro.toml`, or, when there is none, by a name that differs only in the case of ASCII letters, on every system; several such names count as rules that can't be read whole (left over from milestone 8's last re-review).
+
+**While building**
+
+(None yet.)
+
+## Deferred
+
+A mark in `opalro history` for a save that holds conflicts (it needs a save to say so, or a cache); conflicts of more than three versions, and combining two conflicts into a wider one (decision 007's conflict algebra); writing a conflicted save into a Git repository; a command that takes one file out of any save; writing a conflict out again from its versions (`opalro undo` gives the first marked text back); asking on the spot to turn the `conflicts` feature on; merging line by line a file the starting points disagree about.

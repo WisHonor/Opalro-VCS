@@ -516,3 +516,46 @@ Planned on 2026-11-14 after decisions [164](decisions/164-where-two-lines-parted
 - **Docs** ✅: the design, the guide, [security.md](security.md), [testing.md](testing.md) and [benchmarks.md](benchmarks.md) §12 and §13 say what is built; [terminal.md](terminal.md), [json.md](json.md) and [storage-format.md](storage-format.md) were written with the code.
 - **Red team** ✅ (2026-11-14): two sessions from the sandbox, RT19 (2 Low) and RT20 on its fixes (1 Medium), every finding fixed or ruled on ([decisions 171](decisions/171-red-team-m8-rulings.md) and [172](decisions/172-red-team-m8-session-2-rulings.md); [security.md](security.md) §6). Left for the owner: reading very large saves stays slow.
 - **Review and merge** ✅ (2026-11-14): a whole-branch review found nothing that loses or mixes what a person saved; its one open point became [decision 173](decisions/173-the-rules-of-both-lines-decide-what-a-combine-merges.md) (a combine asks the rules of both lines); the calls made on the way, with twenty-one for the owner to confirm, are in [the rulings](plans/2026-11-14-milestone-8-rulings.md); merged into `v0.2`.
+
+## Milestone 9: Conflicts
+
+Planned on 2026-11-14 after decisions [174](decisions/174-the-conflict-record.md) to [179](decisions/179-every-command-and-a-conflict.md), which Claude made at the owner's request while the owner was away: [plans/2026-11-14-milestone-9-conflicts.md](plans/2026-11-14-milestone-9-conflicts.md). Each step ends with tests passing on Windows, macOS and Linux; the plan's task numbers are in brackets. A ✅ marks a step that is done.
+
+**1. The conflict record** (Task 1)
+- Its final layout in the storage spec, with test vectors and a fuzz target, before anything writes one ([decision 174](decisions/174-the-conflict-record.md)).
+- *Done when:* every record the layout allows reads back, and every one it forbids is refused.
+
+**2. The `conflicts` feature** (Task 2)
+- New projects list it; `opalro setup --upgrade` turns it on in an older one, asking first; without it nothing changes ([decision 178](decisions/178-the-conflicts-feature.md)).
+- *Done when:* the `format` file keeps every feature a project has, and a stopped upgrade leaves the file whole.
+
+**3. `tidy`, `verify` and a save's limits** (Task 3)
+- `tidy` keeps everything a kept conflict names, `verify` reads every record, and what a conflict stands as counts toward a save's limits.
+- *Done when:* no version a kept conflict names is ever freed.
+
+**4. A conflict in the folder** (Tasks 4 to 6)
+- A conflict is met where its entry is met: `status` and `changes` list it with how it stands; `goto`, `discard`, the shelf, `undo` and `redo` write and protect its place as what it stands as ([decisions 176](decisions/176-a-conflict-in-the-folder.md) and [179](decisions/179-every-command-and-a-conflict.md)).
+- *Done when:* a project without conflicts reads nothing it didn't read before, and the folder after any of these equals what `goto` to that save writes.
+
+**5. `save` with conflicts** (Task 7)
+- Half-fixed files are saved as the conflict's own version; a text with no markers left is fixed; a picture changed in place stays to decide ([decision 177](decisions/177-recording-a-fix-save-and-resolve.md)).
+- *Done when:* saving never loses a version and never decides a conflict that has no markers.
+
+**6. The merge keeps conflicts** (Tasks 8 to 11)
+- The marked text; each kind of clash kept at its place, moves included; starting points that disagree give an unknown starting version, never a guess ([decisions 175](decisions/175-what-a-combine-keeps-as-a-conflict.md) and [176](decisions/176-a-conflict-in-the-folder.md)).
+- *Done when:* nothing a line saved is left out of the result without a conflict that holds it.
+
+**7. `opalro combine` keeps conflicts** (Task 12)
+- The outcome with its conflicts, `--only-if-clean`, and the stop in a project that can't keep them yet.
+- *Done when:* `undo` takes a combine back, conflicts and all.
+
+**8. `opalro resolve`** (Tasks 13 and 14)
+- Records fixes, into the combined save when it may be replaced; `--keep mine` or `theirs`; `--copy` to look at a version ([decision 177](decisions/177-recording-a-fix-save-and-resolve.md)).
+- *Done when:* a fix is recorded only for what the person fixed or chose.
+
+**9. `show`, `changes --save` and Git's words** (Task 15)
+
+**10. The model test and the comparison with `git merge`** (Task 16)
+
+**11. Docs, red team, review and merge** (Tasks 17 to 19)
+- *Done when:* every proven finding is fixed or ruled on, every document matches the code, and the branch is merged into `v0.2`.
