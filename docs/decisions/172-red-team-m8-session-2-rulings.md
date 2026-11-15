@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 8, its second red-team session, RT20)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 114](114-bolt-toml-keys-and-how-bolt-reads-it.md) (an `opalro.toml` Opalro can't use is passed over with a warning and Opalro's own values apply); [decision 167](167-merging-text-line-by-line.md) (a file's rule decides whether it is merged line by line; the rules are the folder's own when the combine starts); [decision 171](171-red-team-m8-rulings.md) (the first session's rulings, attacked here)
+- **Refined by:** [decision 173](173-the-rules-of-both-lines-decide-what-a-combine-merges.md) (the other side's rules file is read as well, and stops automatic merging when it can't be read whole)
 
 ## Context
 
