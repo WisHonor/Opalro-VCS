@@ -1,0 +1,75 @@
+   Compiling opal-vcs v0.1.0 (/work/crates/opal-vcs)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.19s
+     Running tests/rt19_fuzz.rs (target/debug/deps/rt19_fuzz-74dc5e02800f3537)
+
+running 1 test
+REFUSED 101:  f/g/h: moved to d1/p7 on main, and to d1/e/p1 on side
+REFUSED 102:  c/x: moved to d1/e/p4 on main, and to q3 on side
+REFUSED 103:  c/x: moved to p1 on side, removed on main
+REFUSED 104:  f/g/h: moved to q3 on side, removed on main
+REFUSED 108:  c/y: changed on side, removed on main
+REFUSED 111:  c/y: changed on side, removed on main
+REFUSED 112:  c/x: changed on side, removed on main
+REFUSED 112:  c/y: changed on main, removed on side
+REFUSED 113:  f/g/h: changed on side, removed on main
+REFUSED 114:  c/y: moved to d0/e/p7 on main, and to d0/p5 on side
+REFUSED 115:  b: changed on main, removed on side
+REFUSED 115:  c/y: changed on side, removed on main
+REFUSED 116:  f/g/h: changed on side, removed on main
+REFUSED 117:  c/y: moved to d0/e/p3 on main, and to p1 on side
+REFUSED 122:  c/x: moved to q0 on side, removed on main
+REFUSED 123:  a: moved to d1/p1 on main, and to p2 on side
+REFUSED 123:  c/x: moved to p0 on main, removed on side
+REFUSED 123:  f/g/h: moved to d0/p7 on main, removed on side
+REFUSED 124:  b: moved to p4 on main, removed on side
+REFUSED 125:  a: moved to p3 on main, and to d0/e/p2 on side
+REFUSED 128:  b: moved to q2 on main, and to d1/p1 on side
+REFUSED 128:  c/x: moved to d0/p5 on main, and to p2 on side
+REFUSED 129:  b: changed on side, removed on main
+REFUSED 131:  c/y: moved to p7 on main, and to p2 on side
+REFUSED 132:  a: moved to q0 on main, and to p1 on side
+REFUSED 135:  c/y: changed on side, removed on main
+REFUSED 137:  c/y: changed on side, removed on main
+REFUSED 138:  a: changed on side, removed on main
+REFUSED 139:  b: changed on side, removed on main
+test rt19_random_combines has been running for over 60 seconds
+REFUSED 141:  a: moved to d1/p7 on main, and to d0/e/p1 on side
+REFUSED 141:  c/x: moved to q5 on main, and to d1/p2 on side
+REFUSED 143:  a: changed on side, removed on main
+REFUSED 144:  a: moved to d0/e/p6 on main, and to q1 on side
+REFUSED 144:  b: moved to q3 on main, removed on side
+REFUSED 144:  c/y: changed on main, removed on side
+REFUSED 144:  f/g/h: moved to p3 on side, removed on main
+REFUSED 145:  c/y: moved to d1/p1 on side, removed on main
+REFUSED 148:  a: moved to p2 on side, removed on main
+REFUSED 148:  b: moved to d1/p3 on main, removed on side
+REFUSED 149:  f/g/h: changed on main, removed on side
+REFUSED 150:  b: moved to p6 on main, removed on side
+REFUSED 154:  b: moved to p2 on main, and to d1/p1 on side
+REFUSED 156:  b: moved to q0 on main, and to d1/e/p1 on side
+REFUSED 158:  b: moved to q1 on main, where side has something else
+REFUSED 158:  q1: added on both lines, differently
+REFUSED 159:  b: moved to d1/e/p2 on side, removed on main
+REFUSED 159:  c/x: changed on side, removed on main
+REFUSED 159:  f/g/h: moved to d0/p4 on main, and to q0 on side
+REFUSED 161:  c/x: moved to p1 on side, removed on main
+REFUSED 162:  a: changed on main, removed on side
+REFUSED 164:  b: moved to q5 on main, removed on side
+REFUSED 164:  c/x: changed on side, removed on main
+REFUSED 165:  a: moved to d1/e/p1 on side, removed on main
+REFUSED 166:  c/y: moved to d1/p1 on main, removed on side
+REFUSED 167:  b: changed on side, removed on main
+REFUSED 168:  f/g/h: moved to d0/p4 on main, and to p1 on side
+REFUSED 169:  f/g/h: changed on main, removed on side
+REFUSED 173:  f/g/h: changed on side, removed on main
+REFUSED 175:  a: changed on main, removed on side
+REFUSED 176:  a: moved to q2 on main, and to p1 on side
+REFUSED 176:  c/x: changed on side, removed on main
+REFUSED 178:  a: changed on main, removed on side
+REFUSED 179:  b: moved to p7 on main, and to p4 on side
+REFUSED 179:  c/y: moved to d0/p5 on main, and to p1 on side
+made 32, refused 48
+test rt19_random_combines ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 118.22s
+

@@ -23,12 +23,13 @@ use crate::ingest::{self, IngestError, Ready};
 use crate::lines::{NameError, check_new_name};
 use crate::link;
 use crate::listing::{Entry, EntryKind, Listing, SaveLimits};
+use crate::moves;
 use crate::names::{Given, PortabilityProblem, folder_problems};
 use crate::otherlines::OtherLines;
 use crate::pack::{ObjectKind, PackError, PackSet};
 use crate::repo::{RepoError, Repository};
 use crate::rules::Rules;
-use crate::save::{EXTRA_GIT_COMMIT, EXTRA_LINE, GIT_FIELDS, Person, Save};
+use crate::save::{EXTRA_GIT_COMMIT, EXTRA_LINE, GIT_FIELDS, MAX_MOVE_NOTES, Person, Save};
 use crate::scope::Scope;
 use crate::store::{Store, StoreError};
 use crate::text::{self, escape, thousands};
@@ -557,15 +558,29 @@ pub fn save_folder(
             return Err(SaveError::LargeSave(large));
         }
     }
+    // The save before this one, which for an amend is the first parent it takes over: its moves
+    // are noted against it, and its files counted from it.
+    let before = match (req.amend, parent.parents.first()) {
+        (false, _) => Ok(Some(parent.root)),
+        (true, Some(first)) => repo
+            .store()
+            .save(first, repo.signatures_allowed())
+            .map(|s| Some(s.root)),
+        (true, None) => Ok(None),
+    };
+    // Nothing can have moved from an empty save, so a first save holds nothing to compare.
+    let empty = Listing::empty().id();
+    let compare = matches!(before, Ok(Some(from)) if from != empty);
     let mut packs = repo.new_packs()?;
-    for listing in &rebuilt {
-        store_listing(repo.store(), &mut packs, listing)?;
-    }
     let mut storing = Storing {
         store: repo.store(),
         packs: &mut packs,
         cache,
+        held: compare.then(Held::default),
     };
+    for listing in rebuilt {
+        storing.listing(listing)?;
+    }
     let last = Last {
         listings: &old,
         ids: &old_ids,
@@ -578,7 +593,7 @@ pub fn save_folder(
         last,
         &noted,
     )?;
-    let seen = storing.cache;
+    let (seen, held) = (storing.cache, storing.held);
     let root = built.root;
     let kept = built.kept.len() + built.kept_below_gone;
     if kept > 0 {
@@ -606,6 +621,28 @@ pub fn save_folder(
     let Some(line) = &line else {
         return Err(SaveError::NeedsLineName);
     };
+    // The files are counted in the same walk as the moves, while the new listings are at hand;
+    // without them, after the commit, from the store.
+    let (_, most_bytes, most_left) = note_limits();
+    let compared = match (&before, held) {
+        (Ok(Some(from)), Some(held)) => Some(moves::count_and_moves(
+            repo.store(),
+            &held.listings,
+            *from,
+            root,
+            most_left,
+        )),
+        _ => None,
+    };
+    // Notes say only what is certain and never stop a save: one that can't be compared with the
+    // save before it notes nothing, and is told it couldn't count its files only if it couldn't.
+    let (mut move_notes, counted) = match compared {
+        Some(Ok((count, notes))) => (notes.ok().flatten().unwrap_or_default(), Some(Ok(count))),
+        Some(Err(why)) => (vec![], Some(Err(why))),
+        None => (vec![], None),
+    };
+    let most = usize::try_from(MAX_MOVE_NOTES).unwrap_or(usize::MAX);
+    moves::first_that_fit(&mut move_notes, most, most_bytes);
     let save = if req.amend {
         let mut extra = parent.extra.clone();
         for field in GIT_FIELDS {
@@ -618,7 +655,7 @@ pub fn save_folder(
             saver: req.who.clone(),
             message: message.to_owned(),
             change_id: parent.change_id,
-            move_notes: parent.move_notes.clone(),
+            move_notes,
             signature: vec![],
             extra,
         }
@@ -632,7 +669,7 @@ pub fn save_folder(
             change_id: ChangeId::random()
                 .map_err(io::Error::other)
                 .map_err(RepoError::from)?,
-            move_notes: vec![],
+            move_notes,
             signature: vec![],
             extra: BTreeMap::from([(EXTRA_LINE.to_owned(), line.as_bytes().to_vec())]),
         }
@@ -683,17 +720,10 @@ pub fn save_folder(
     }
     cache.store(repo, &diary.state);
     keep_file_cache(repo, seen, now, &mut warnings);
-    // Counted from the save before it, which for an amend is the first parent it took over.
-    let before = match (req.amend, save.parents.first()) {
-        (false, _) => Ok(Some(parent.root)),
-        (true, Some(first)) => repo
-            .store()
-            .save(first, repo.signatures_allowed())
-            .map(|s| Some(s.root)),
-        (true, None) => Ok(None),
-    };
     // The save is committed now; failing to count its files must not make it look failed.
-    let changed_files = match before.and_then(|before| count_changes(repo.store(), before, root)) {
+    let counted = counted
+        .unwrap_or_else(|| before.and_then(|before| count_changes(repo.store(), before, root)));
+    let changed_files = match counted {
         Ok(count) => Some(count),
         Err(why) => {
             warnings.push(Warning::new(
@@ -1166,11 +1196,71 @@ trait Contents {
 
 /// A save's: everything goes into `packs` unless the store holds a good copy. A file `cache`
 /// vouches for is taken from the base save unread, if the base save holds what the cache says it
-/// held. `cache` keeps or learns every file met.
+/// held. `cache` keeps or learns every file met, and `held` the listings stored, while they fit.
 struct Storing<'a> {
     store: &'a Store,
     packs: &'a mut PackSet,
     cache: FileCache,
+    held: Option<Held>,
+}
+
+/// Past this many bytes of listings held to compare a save with the one before it, the save
+/// lets them go and notes no moves.
+const MAX_HELD_LISTINGS: usize = 64 << 20;
+
+#[cfg(test)]
+thread_local! {
+    /// The listings a save may hold, the path bytes its notes may have, and the path bytes of the
+    /// files that left it may hold, on this thread.
+    static NOTE_LIMITS: std::cell::Cell<(usize, usize, usize)> = const {
+        std::cell::Cell::new((MAX_HELD_LISTINGS, moves::MAX_NOTED_BYTES, moves::MAX_LEFT_BYTES))
+    };
+    /// The most bytes of listings held on this thread.
+    static HELD_MOST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(not(test))]
+fn note_limits() -> (usize, usize, usize) {
+    (
+        MAX_HELD_LISTINGS,
+        moves::MAX_NOTED_BYTES,
+        moves::MAX_LEFT_BYTES,
+    )
+}
+
+#[cfg(test)]
+fn note_limits() -> (usize, usize, usize) {
+    NOTE_LIMITS.get()
+}
+
+/// The listings a save stored, which can't be read from the store until it is committed.
+#[derive(Default)]
+struct Held {
+    listings: HashMap<Id, Listing>,
+    /// About how much memory they take.
+    bytes: usize,
+}
+
+impl Held {
+    /// Holds `listing`, or gives up all of them past the limit.
+    fn hold(held: &mut Option<Held>, id: Id, listing: Listing) {
+        let Some(h) = held else {
+            return;
+        };
+        let size: usize = listing
+            .entries()
+            .iter()
+            .map(|e| size_of::<Entry>() + e.name.len())
+            .sum();
+        h.bytes = h.bytes.saturating_add(size);
+        if h.bytes > note_limits().0 {
+            *held = None;
+            return;
+        }
+        h.listings.insert(id, listing);
+        #[cfg(test)]
+        HELD_MOST.set(HELD_MOST.get().max(h.bytes));
+    }
 }
 
 /// The ID and size `trusted` gives the file `c`, which the base save holds as `was`, if it vouches
@@ -1223,7 +1313,9 @@ impl Contents for Storing<'_> {
     }
 
     fn listing(&mut self, listing: Listing) -> Result<Id, SaveError> {
-        store_listing(self.store, self.packs, &listing)
+        let id = store_listing(self.store, self.packs, &listing)?;
+        Held::hold(&mut self.held, id, listing);
+        Ok(id)
     }
 }
 
@@ -1541,6 +1633,7 @@ fn build(
         store,
         packs,
         cache: FileCache::default(),
+        held: None,
     };
     let last = Last {
         listings: old,
@@ -2020,11 +2113,11 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
     use crate::drive::Drive;
-    use crate::id::hash_content;
+    use crate::id::{Flavor, hash_content, hash_record};
     use crate::listing::EntryKind;
     use crate::names::{name_problems, validate_name};
     use crate::pack::{ENTRY_HEADER_LEN, PackReader};
-    use crate::save::Person;
+    use crate::save::{MoveNote, Person};
     use crate::test_support::{
         Written, commit_records, names, noise, plant_damaged_copies, plant_save, sample_records,
         written,
@@ -3078,6 +3171,248 @@ mod tests {
             "{refused:?}"
         );
         assert_eq!(repo.head().unwrap(), head);
+    }
+
+    /// The save the line `main` is at, as stored, with its fingerprint.
+    fn newest_save(repo: &Repository) -> (Id, Save) {
+        let id = repo.current().unwrap().1.state.lines["main"];
+        (id, repo.store().save(&id, false).unwrap())
+    }
+
+    fn note(from: &str, to: &str) -> MoveNote {
+        MoveNote {
+            from: from.into(),
+            to: to.into(),
+        }
+    }
+
+    #[test]
+    fn a_save_notes_a_file_moved_alone() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"hello");
+        write(dir.path(), "b.txt", b"stay");
+        saved_root(save_now(&mut repo).unwrap());
+        fs::create_dir(dir.path().join("Characters")).unwrap();
+        fs::rename(
+            dir.path().join("a.txt"),
+            dir.path().join("Characters/a.txt"),
+        )
+        .unwrap();
+        saved_root(save_now(&mut repo).unwrap());
+        let (_, save) = newest_save(&repo);
+        assert_eq!(save.move_notes, [note("a.txt", "Characters/a.txt")]);
+    }
+
+    #[test]
+    fn a_save_notes_nothing_when_unsure() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a", b"same");
+        write(dir.path(), "b", b"same");
+        write(dir.path(), "c", b"changed");
+        saved_root(save_now(&mut repo).unwrap());
+        let (parent_id, _) = newest_save(&repo);
+        // Two alike files moved, one moved and changed, and an edit in place.
+        fs::rename(dir.path().join("a"), dir.path().join("x")).unwrap();
+        fs::rename(dir.path().join("b"), dir.path().join("y")).unwrap();
+        fs::remove_file(dir.path().join("c")).unwrap();
+        write(dir.path(), "z", b"changed!");
+        saved_root(save_now(&mut repo).unwrap());
+        let (id, save) = newest_save(&repo);
+        assert!(save.move_notes.is_empty(), "{:?}", save.move_notes);
+        // A save that notes nothing is stored byte for byte as one made before moves were noted.
+        let before = Save {
+            root: save.root,
+            parents: vec![parent_id],
+            author: who(),
+            saver: who(),
+            message: "Change things".into(),
+            change_id: save.change_id,
+            move_notes: vec![],
+            signature: vec![],
+            extra: BTreeMap::from([(EXTRA_LINE.to_owned(), b"main".to_vec())]),
+        };
+        assert_eq!(hash_record(Flavor::Save, &before.encode()), id);
+    }
+
+    #[test]
+    fn amend_works_its_notes_out_afresh() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"hello");
+        write(dir.path(), "other", b"o");
+        saved_root(save_now(&mut repo).unwrap());
+        fs::rename(dir.path().join("a.txt"), dir.path().join("b.txt")).unwrap();
+        saved_root(save_now(&mut repo).unwrap());
+        assert_eq!(newest_save(&repo).1.move_notes, [note("a.txt", "b.txt")]);
+        // Moved back, with another change so the amend has something to save.
+        fs::rename(dir.path().join("b.txt"), dir.path().join("a.txt")).unwrap();
+        write(dir.path(), "other", b"o2");
+        saved_root(save_as(&mut repo, None, true).unwrap());
+        assert!(newest_save(&repo).1.move_notes.is_empty());
+        // And an amend that moves a file notes it, against the save before the amended one.
+        fs::rename(dir.path().join("a.txt"), dir.path().join("c.txt")).unwrap();
+        saved_root(save_as(&mut repo, None, true).unwrap());
+        assert_eq!(newest_save(&repo).1.move_notes, [note("a.txt", "c.txt")]);
+    }
+
+    #[test]
+    fn a_shelf_notes_no_moves() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"hello");
+        saved_root(save_now(&mut repo).unwrap());
+        fs::rename(dir.path().join("a.txt"), dir.path().join("b.txt")).unwrap();
+        let shelved = crate::shelf::shelf(&mut repo, None, &who(), None, &mut |_| {}).unwrap();
+        assert!(matches!(shelved, crate::shelf::Shelved::Made(_)));
+        let shelves = repo.current().unwrap().1.state.shelves;
+        assert_eq!(shelves.len(), 1);
+        for (_, id) in &shelves {
+            let save = repo.store().save(id, false).unwrap();
+            assert!(save.move_notes.is_empty(), "{:?}", save.move_notes);
+        }
+    }
+
+    /// The files a save counted as changed.
+    fn changed(outcome: SaveOutcome) -> Option<usize> {
+        match outcome {
+            SaveOutcome::Saved { changed_files, .. } => changed_files,
+            SaveOutcome::NothingChanged { .. } => panic!("nothing was saved"),
+        }
+    }
+
+    #[test]
+    fn a_save_notes_only_the_first_moves_whose_paths_fit() {
+        let (dir, mut repo) = project();
+        for name in ["a", "b", "c", "d"] {
+            write(dir.path(), &format!("{name}.txt"), name.as_bytes());
+        }
+        saved_root(save_now(&mut repo).unwrap());
+        for name in ["a", "b", "c", "d"] {
+            let (from, to) = (format!("{name}.txt"), format!("{name}2.txt"));
+            fs::rename(dir.path().join(from), dir.path().join(to)).unwrap();
+        }
+        // Each note is 5 + 6 bytes of paths: two fit in 25, not three.
+        NOTE_LIMITS.set((MAX_HELD_LISTINGS, 25, moves::MAX_LEFT_BYTES));
+        assert_eq!(changed(save_now(&mut repo).unwrap()), Some(8));
+        let notes = newest_save(&repo).1.move_notes;
+        assert_eq!(notes, [note("a.txt", "a2.txt"), note("b.txt", "b2.txt")]);
+    }
+
+    #[test]
+    fn a_first_save_holds_nothing_to_note_moves_and_one_that_adds_keeps_no_arrivals() {
+        let (dir, mut repo) = project();
+        for i in 0..20 {
+            write(dir.path(), &format!("f/{i}"), i.to_string().as_bytes());
+        }
+        HELD_MOST.set(0);
+        assert_eq!(changed(save_now(&mut repo).unwrap()), Some(20));
+        assert_eq!(HELD_MOST.get(), 0);
+        // A save after it holds what it stores, but keeps no file that arrived when none left.
+        for i in 20..40 {
+            write(dir.path(), &format!("f/{i}"), i.to_string().as_bytes());
+        }
+        moves::ARRIVALS_KEPT.set(0);
+        assert_eq!(changed(save_now(&mut repo).unwrap()), Some(20));
+        assert!(HELD_MOST.get() > 0);
+        assert_eq!(moves::ARRIVALS_KEPT.get(), 0);
+        assert!(newest_save(&repo).1.move_notes.is_empty());
+    }
+
+    #[test]
+    fn a_save_past_the_listings_it_may_hold_is_written_without_notes() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"hello");
+        saved_root(save_now(&mut repo).unwrap());
+        fs::rename(dir.path().join("a.txt"), dir.path().join("b.txt")).unwrap();
+        NOTE_LIMITS.set((1, moves::MAX_NOTED_BYTES, moves::MAX_LEFT_BYTES));
+        // Its files are still counted, from the store once it is written.
+        assert_eq!(changed(save_now(&mut repo).unwrap()), Some(2));
+        assert!(newest_save(&repo).1.move_notes.is_empty());
+    }
+
+    #[test]
+    fn a_save_that_removes_more_than_it_may_hold_counts_them_and_notes_nothing() {
+        let (dir, mut repo) = project();
+        for name in ["gone1", "gone2", "gone3", "moved"] {
+            write(dir.path(), name, name.as_bytes());
+        }
+        saved_root(save_now(&mut repo).unwrap());
+        for name in ["gone1", "gone2", "gone3"] {
+            fs::remove_file(dir.path().join(name)).unwrap();
+        }
+        fs::rename(dir.path().join("moved"), dir.path().join("there")).unwrap();
+        // Four files left, past the 12 bytes it may hold.
+        NOTE_LIMITS.set((MAX_HELD_LISTINGS, moves::MAX_NOTED_BYTES, 12));
+        let outcome = save_now(&mut repo).unwrap();
+        let SaveOutcome::Saved { warnings, .. } = &outcome else {
+            panic!("nothing was saved");
+        };
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(changed(outcome), Some(5));
+        assert!(newest_save(&repo).1.move_notes.is_empty());
+    }
+
+    #[test]
+    fn a_save_whose_parent_can_t_be_compared_is_written_without_notes() {
+        let (dir, mut repo) = project();
+        // A save past the limits, as an imported one can be: a folder nested past the longest
+        // path, beside a file that then moves.
+        crate::test_support::plant_root(&mut repo, |packs| {
+            let mut id = packs.add_content(b"deep").unwrap();
+            let mut kind = EntryKind::File;
+            for _ in 0..2_100 {
+                let entry = Entry {
+                    name: "d".into(),
+                    kind,
+                    id,
+                    size: if kind == EntryKind::File { 4 } else { 0 },
+                };
+                id = crate::test_support::add_listing(packs, vec![entry]).0;
+                kind = EntryKind::Folder;
+            }
+            let deep = Entry {
+                name: "d".into(),
+                kind,
+                id,
+                size: 0,
+            };
+            let moved = Entry {
+                name: "a.txt".into(),
+                kind: EntryKind::File,
+                id: packs.add_content(b"hello").unwrap(),
+                size: 5,
+            };
+            crate::test_support::add_listing(packs, vec![moved, deep]).0
+        });
+        write(dir.path(), "b.txt", b"hello");
+        let outcome = save_now(&mut repo).unwrap();
+        let SaveOutcome::Saved { warnings, .. } = &outcome else {
+            panic!("nothing was saved");
+        };
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.kind == warning::CHANGED_FILES_NOT_COUNTED),
+            "{warnings:?}"
+        );
+        assert_eq!(changed(outcome), None);
+        assert!(newest_save(&repo).1.move_notes.is_empty());
+    }
+
+    #[test]
+    #[ignore = "nightly: 100,001 files"]
+    fn a_save_moving_more_than_100000_files_notes_the_first_100000() {
+        let (dir, mut repo) = project();
+        let count = MAX_MOVE_NOTES + 1;
+        fs::create_dir(dir.path().join("a")).unwrap();
+        for i in 0..count {
+            fs::write(dir.path().join(format!("a/f{i:06}")), i.to_string()).unwrap();
+        }
+        saved_root(save_now(&mut repo).unwrap());
+        fs::rename(dir.path().join("a"), dir.path().join("b")).unwrap();
+        saved_root(save_now(&mut repo).unwrap());
+        let notes = newest_save(&repo).1.move_notes;
+        assert_eq!(notes.len() as u64, MAX_MOVE_NOTES);
+        assert_eq!(notes.first(), Some(&note("a/f000000", "b/f000000")));
+        assert_eq!(notes.last(), Some(&note("a/f099999", "b/f099999")));
     }
 
     #[test]

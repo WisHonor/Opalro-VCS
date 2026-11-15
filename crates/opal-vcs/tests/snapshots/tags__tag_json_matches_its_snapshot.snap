@@ -18,6 +18,9 @@ expression: "json_of(&env, &[\"tag\", \"v1.0\", \"First playable\"])"
     "id": "[redacted]",
     "line": "main",
     "message": "A",
+    "parents": [
+      "[redacted]"
+    ],
     "saver": {
       "email": "test@example.com",
       "name": "Test",

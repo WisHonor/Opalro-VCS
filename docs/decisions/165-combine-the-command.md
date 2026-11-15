@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 8 planning)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 012](012-lines.md) (fast-forward behaviour and the combine commands are designed before v0.2); [decision 006](006-save-object.md) (a combined save's first parent is the line you were on); [decision 003](003-working-copy-model.md) (`combine` never overwrites unsaved work without a safety copy); [decision 017](017-commands-and-output.md) (`combine <line>`); [decision 116](116-gits-words-as-shortcuts.md) (Git's word `merge`)
+- **Refined by:** [decision 170](170-what-building-milestone-8-refined.md) (a refused combine stores nothing, the result's limits included; Git's `merge` with two lines is explained)
 
 ## Context
 

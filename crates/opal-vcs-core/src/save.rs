@@ -58,6 +58,21 @@ pub struct Save {
     pub extra: BTreeMap<String, Vec<u8>>,
 }
 
+/// What a walk over history needs of a save.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Links {
+    pub parents: Vec<Id>,
+    /// The saver's time.
+    pub time_ms: i64,
+    pub change_id: ChangeId,
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many move notes reading saves on this thread built.
+    pub(crate) static NOTES_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 pub(crate) fn write_person(w: &mut Writer, p: &Person) {
     w.string(&p.name);
     w.string(&p.email);
@@ -104,6 +119,26 @@ impl Save {
     }
 
     pub fn decode(bytes: &[u8], signatures_allowed: bool) -> Result<Save, DecodeError> {
+        Save::parse(bytes, signatures_allowed, true)
+    }
+
+    /// A save's place in history, from a record checked exactly as `decode` checks it, its move
+    /// notes included, without building the notes.
+    pub fn links(bytes: &[u8], signatures_allowed: bool) -> Result<Links, DecodeError> {
+        let save = Save::parse(bytes, signatures_allowed, false)?;
+        Ok(Links {
+            parents: save.parents,
+            time_ms: save.saver.time_ms,
+            change_id: save.change_id,
+        })
+    }
+
+    /// Reads and checks a save; its move notes are kept only with `keep_notes`.
+    fn parse(
+        bytes: &[u8],
+        signatures_allowed: bool,
+        keep_notes: bool,
+    ) -> Result<Save, DecodeError> {
         let mut r = Reader::new(bytes);
         if r.u8()? != 1 {
             return Err(DecodeError::Invalid("unknown save version"));
@@ -124,15 +159,24 @@ impl Save {
         let change_id = r.change_id()?;
         let n = r.count(MAX_MOVE_NOTES, "move-note count")?;
         let mut move_notes: Vec<MoveNote> = Vec::new();
+        let mut last: Option<&str> = None;
         for _ in 0..n {
-            let from = r.string(MAX_PATH_BYTES, "move-note path")?.to_owned();
-            let to = r.string(MAX_PATH_BYTES, "move-note path")?.to_owned();
-            if move_notes.last().is_some_and(|l| l.to >= to) {
+            let from = r.string(MAX_PATH_BYTES, "move-note path")?;
+            let to = r.string(MAX_PATH_BYTES, "move-note path")?;
+            if last.is_some_and(|l| l >= to) {
                 return Err(DecodeError::Invalid(
                     "move notes not strictly sorted by `to`",
                 ));
             }
-            move_notes.push(MoveNote { from, to });
+            last = Some(to);
+            if keep_notes {
+                #[cfg(test)]
+                NOTES_BUILT.set(NOTES_BUILT.get() + 1);
+                move_notes.push(MoveNote {
+                    from: from.to_owned(),
+                    to: to.to_owned(),
+                });
+            }
         }
         let signature = r.bytes(MAX_SIGNATURE_BYTES, "signature")?;
         if !signature.is_empty() && !signatures_allowed {
@@ -221,31 +265,73 @@ mod tests {
         assert_eq!(hex(&minimal().encode()), expected);
     }
 
+    /// `Save::decode`, after checking that `Save::links` gives the same answer.
+    fn decoded(bytes: &[u8], signatures_allowed: bool) -> Result<Save, DecodeError> {
+        let save = Save::decode(bytes, signatures_allowed);
+        let links = Save::links(bytes, signatures_allowed);
+        match (&save, links) {
+            (Ok(s), Ok(l)) => {
+                assert_eq!((&s.parents, s.saver.time_ms), (&l.parents, l.time_ms));
+                assert_eq!(s.change_id, l.change_id);
+            }
+            (Err(e), Err(f)) => assert_eq!(*e, f),
+            (s, l) => panic!("decode gave {s:?}, links {l:?}"),
+        }
+        save
+    }
+
+    #[test]
+    fn both_entries_agree_on_a_save_cut_anywhere() {
+        let mut s = minimal();
+        s.parents = vec![Id([1; 32])];
+        s.move_notes = vec![
+            MoveNote {
+                from: "a".into(),
+                to: "b".into(),
+            },
+            MoveNote {
+                from: "c".into(),
+                to: "d".into(),
+            },
+        ];
+        let bytes = s.encode();
+        for len in 0..=bytes.len() {
+            let _ = decoded(&bytes[..len], false);
+        }
+        assert_eq!(decoded(&bytes, false).unwrap(), s);
+        // Only `decode` builds the notes.
+        NOTES_BUILT.set(0);
+        Save::links(&bytes, false).unwrap();
+        assert_eq!(NOTES_BUILT.get(), 0);
+        Save::decode(&bytes, false).unwrap();
+        assert_eq!(NOTES_BUILT.get(), 2);
+    }
+
     #[test]
     fn decode_rejects_bad_saves() {
         let mut s = minimal();
         s.parents = vec![Id([1; 32]), Id([1; 32])];
-        assert!(Save::decode(&s.encode(), false).is_err()); // duplicate parents
+        assert!(decoded(&s.encode(), false).is_err()); // duplicate parents
         let mut s = minimal();
         s.signature = vec![1, 2, 3];
-        assert!(Save::decode(&s.encode(), false).is_err()); // signature without the feature
-        assert!(Save::decode(&s.encode(), true).is_ok());
+        assert!(decoded(&s.encode(), false).is_err()); // signature without the feature
+        assert!(decoded(&s.encode(), true).is_ok());
         let mut s = minimal();
         s.message = "x".repeat(MAX_MESSAGE_BYTES + 1);
         assert!(matches!(
-            Save::decode(&s.encode(), false),
+            decoded(&s.encode(), false),
             Err(DecodeError::LimitExceeded { .. })
         ));
         let mut s = minimal();
         s.parents = vec![Id([2; 32]); 1025];
         assert!(matches!(
-            Save::decode(&s.encode(), false),
+            decoded(&s.encode(), false),
             Err(DecodeError::LimitExceeded { .. })
         ));
         let mut bytes = minimal().encode();
         bytes.pop(); // drop "0 extra fields"
         bytes.extend(unhex("02016200016100")); // keys "b" then "a"
-        assert!(Save::decode(&bytes, false).is_err());
+        assert!(decoded(&bytes, false).is_err());
     }
 
     #[test]
@@ -261,14 +347,14 @@ mod tests {
                 to: "c".into(),
             },
         ];
-        assert!(Save::decode(&s.encode(), false).is_err());
+        assert!(decoded(&s.encode(), false).is_err());
     }
 
     #[test]
     fn unknown_version_is_rejected() {
         let mut bytes = minimal().encode();
         bytes[0] = 2;
-        assert!(Save::decode(&bytes, false).is_err());
+        assert!(decoded(&bytes, false).is_err());
     }
 
     #[test]

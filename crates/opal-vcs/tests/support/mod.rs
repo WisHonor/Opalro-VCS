@@ -6,7 +6,10 @@ pub mod corpus;
 mod vs_git;
 
 #[allow(unused_imports)]
-pub use vs_git::{assert_ancestry_matches_git, assert_matches_git, assert_matches_git_counting};
+pub use vs_git::{
+    assert_ancestry_matches_git, assert_matches_git, assert_matches_git_counting,
+    assert_starts_match_git,
+};
 
 use std::collections::BTreeMap;
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -658,6 +661,42 @@ pub fn plant_save(root: &Path, build: impl FnOnce(&mut PackSet) -> Id) {
         folder_change: None,
     };
     repo.commit(&lock, pack, &diary).unwrap();
+}
+
+/// Commits, through Opalro's own library, a save on `main` with `main`'s save as its first parent
+/// and `others` after it, holding the same folder; its ID. The others need not be stored.
+pub fn plant_combined(root: &Path, message: &str, others: &[Id]) -> Id {
+    let mut repo = Repository::open(root).unwrap();
+    let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
+    let (head, entry) = repo.current().unwrap();
+    let first = entry.state.lines["main"];
+    let made_on = repo.store().save(&first, false).unwrap();
+    let save = Save {
+        root: made_on.root,
+        parents: [first].into_iter().chain(others.iter().copied()).collect(),
+        author: made_on.author.clone(),
+        saver: made_on.saver,
+        message: message.into(),
+        change_id: ChangeId::random().unwrap(),
+        move_notes: vec![],
+        signature: vec![],
+        extra: made_on.extra,
+    };
+    let mut pack = repo.new_packs().unwrap();
+    let save_id = pack.add_record(ObjectKind::Save, &save.encode()).unwrap();
+    let mut state = entry.state.clone();
+    state.lines.insert("main".into(), save_id);
+    let diary = DiaryEntry {
+        parent: Some(head),
+        action: Action::Command,
+        command: "save".into(),
+        who: made_on.author,
+        opal_version: "0.1.0".into(),
+        state,
+        folder_change: None,
+    };
+    repo.commit(&lock, pack, &diary).unwrap();
+    save_id
 }
 
 // Big files as Opalro stores them, and chunk lists no honest writer makes.

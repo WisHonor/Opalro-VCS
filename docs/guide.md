@@ -30,7 +30,7 @@ Opalro keeps every version of your project: the code and the big files together,
 - **Undo.** Opalro keeps a diary of every command that changed something. `opalro undo` takes back the last one, like Ctrl+Z in an editor. Before a command throws away work you haven't saved, Opalro keeps a copy of it, so undo can bring it back.
 - **Big files.** Files of 1 MiB or more are cut into pieces, called chunks. When you change part of a big file, only the pieces that changed are stored again.
 
-**What v0.1 is.** Opalro v0.1 is for one person on one computer. Everything stays in your project folder, in a hidden folder named `.opalro`. There is no server yet, so you can't share a project through Opalro or work on one with other people. Combining two lines into one is planned for v0.2, and syncing with a server and locking files for v0.3 (see [section 13](#13-what-v01-doesnt-do-yet)).
+**What v0.1 is.** Opalro v0.1 is for one person on one computer. Everything stays in your project folder, in a hidden folder named `.opalro`. There is no server yet, so you can't share a project through Opalro or work on one with other people. You can bring one line's work into another with `opalro combine`; syncing with a server and locking files are planned for v0.3 (see [section 13](#13-what-v01-doesnt-do-yet)).
 
 ## 2. Installing
 
@@ -382,6 +382,7 @@ undo      Take back your last step   (and: redo)
 Lines, shelves and details
 line      List, make, rename and delete lines
 tag       Name a save, like v1.0, or list your tags
+combine   Bring another line's work into yours
 shelf     Set your unsaved changes aside   (and: unshelf)
 discard   Throw away your unsaved changes; undo brings them back
 show      Show everything about one save
@@ -542,7 +543,18 @@ Saves on line main, newest first:
   kxqmr  5 days ago  Ben Okafor  Add rock textures
 ```
 
-Each row is the change ID, when the save was made, who made it, and the first line of its message. The `▸` marks the save you are at.
+Each row is the change ID, when the save was made, who made it, and the first line of its message. The `▸` marks the save you are at. A row ends with the lines whose newest save it is (`[main]`) and its tags (`[tag v1.0]`). A combined save, made by `opalro combine`, is one row that ends with `[combined 3f9a0c2e7b04]`: the first 12 digits of the fingerprint of the save it brought in. The saves made on the other line aren't listed one by one; to see them, list from that save.
+
+Name a line, a tag or a save, as `opalro goto` takes them, to list from there instead. `opalro history 3f9a0c2e7b04` gives, for example:
+
+```text
+Saves back from save kxqmzrtwvnlp "Climb walls", newest first:
+
+  kxqmzrtwvnlp  1 day ago   Ben Okafor  Climb walls
+  kxqmrlpsoqkt  5 days ago  Ben Okafor  Add rock textures
+```
+
+Listed from anywhere but your own line, the change IDs are 12 letters long, so each of them can be typed back into `opalro show` or `opalro goto` from where you are.
 
 ### `opalro goto`
 
@@ -709,6 +721,39 @@ opalro tag --delete v1.0 --yes
 
 See [Lines](#8-lines) for more on tags.
 
+### `opalro combine`
+
+Bring another line's work into the line you're on. Start a line, save something on it, then go back to `main` and save something there too:
+
+```sh
+opalro line new wall-run
+echo "run along walls" > wall.txt
+opalro save "Try wall running"
+opalro goto main
+echo "buy milk, eggs and bread" > todo.txt
+opalro save "Bread too"
+opalro combine wall-run
+```
+
+```text
+Combined wall-run into main: save pmzt "Combine wall-run into main".
+
+    1 file written.
+
+Changed your mind? opalro undo
+```
+
+Both lines had work the other lacked, so Opalro made a **combined save**: one that holds both, with two saves before it, `main`'s newest and `wall-run`'s. Give it your own message after the line's name, as in `opalro combine wall-run "Wall running is in"`; otherwise Opalro writes `Combine wall-run into main`.
+
+The target is anything `opalro goto` takes: a line, a server line, a tag, or a save by its ID. Two other things can happen:
+
+- **The line only moves forward.** If `main` had nothing `wall-run` lacks (no save since `wall-run` started), `wall-run`'s newest save already holds everything, so `main` moves forward to it and no save is made: `Moved main forward to wall-run: save …`.
+- **Nothing to combine.** If `main` already has everything `wall-run` has, Opalro says so and changes nothing.
+
+When both lines changed a file, Opalro merges the two versions line by line, and says how many files it merged. Where both changed the same lines, or a file that isn't text, Opalro can't keep both yet: it stops, names each file and what happened to it on the two lines, and changes nothing. Make the two lines agree on those files, save, and combine again.
+
+Your unsaved changes come along, as with `opalro goto`; where the combine would change a file you have unsaved work in, it stops and changes nothing. `opalro undo` takes a combine back: the line goes back to where it was, and your files with it. See [Lines](#8-lines) for combining and then deleting a line.
+
 ### `opalro shelf` and `opalro unshelf`
 
 Set your unsaved changes aside, and bring them back later. Think of a shelf as a drawer: your folder goes back to how the last save has it, and your half-done work waits in the drawer.
@@ -805,7 +850,7 @@ Save ptvz "Add double jump"
 Next: see its lines with: opalro changes --save ptvz
 ```
 
-The **fingerprint** is a save's full, permanent name, worked out from everything in it. `After` names the save before this one by the first 12 digits of its fingerprint, and its message. `opalro show` and `opalro goto` take those digits back whenever the history of one of your lines, server lines or tags leads back to that save, which is nearly always. Only some saves brought in from Git are out of reach: the other side of a Git merge whose branch was gone before the import, or the save before one where the import left you away from every line.
+The **fingerprint** is a save's full, permanent name, worked out from everything in it. `After` names the save before this one by the first 12 digits of its fingerprint, and its message. A combined save has a `Combined` row under it for each save it brought in, named the same way; its changes are shown against the save on `After`. `opalro show` and `opalro goto` take those digits back whenever the history of one of your lines, server lines or tags, or of the save you're at, leads back to that save, through the saves a combine brought in too, which is nearly always: only a save that nothing but a shelf or an undone step holds is out of reach.
 
 ### `opalro start`
 
@@ -918,7 +963,7 @@ They are ordinary files: they go into your saves like any other file, so a copy 
 
 **Custom** writes no file. A project with no `opalro.toml` uses Opalro's own values. That includes an imported project, unless its Git history held an `opalro.toml` of its own.
 
-"Lockable" and "conflict markers" are only recorded in v0.1: locking a file arrives with syncing, and conflict markers with combining lines. The presets write them now so a project has them from its first save.
+"Lockable" is only recorded: locking a file arrives with syncing. "Conflict markers" already decides one thing: `opalro combine` never merges a file line by line when its rule says `false`, so the Game preset's Unity scenes, prefabs and `.meta` files stop a combine when both lines changed them differently; the markers themselves arrive when a combine can keep a conflict. The presets write both now so a project has them from its first save.
 
 ### `opalro.toml`, key by key
 
@@ -948,7 +993,7 @@ ask-before-saving-files-over = 10000
 Each `[[rule]]` has `files`, a list of one or more patterns written as in `.opalroignore`, and either or both of these, each `true` or `false`:
 
 - `lockable` (`false` when no rule says): the file can be locked, once locking arrives.
-- `conflict-markers` (`true` when no rule says): whether a conflict inside the file is shown with markers, once combining arrives. Scene files that an engine must read whole are better off without them.
+- `conflict-markers` (`true` when no rule says): whether `opalro combine` may merge the file line by line when both lines changed it; with `false`, it never does, and different changes on both lines stop the combine. Once a combine can keep a conflict, it also says whether the conflict is shown with markers inside the file. Scene files that an engine must read whole are better off without them. Where several rules match a file and give this key, the last one decides; a rule's patterns ignore the letter case of A to Z on every system, so `*.unity` also covers `Main.UNITY`.
 
 ```toml
 [[rule]]
@@ -1066,7 +1111,7 @@ opalro shelf --list
 No shelves: opalro shelf sets your unsaved changes aside on one.
 ```
 
-If your folder already differs from the shelf's save at a path the shelf changes, `opalro unshelf` stops and changes nothing, since combining two versions of a file comes later. Save, shelve or discard what is there first.
+If your folder already differs from the shelf's save at a path the shelf changes, `opalro unshelf` stops and changes nothing, since bringing a shelf back doesn't merge two versions of a file. Save, shelve or discard what is there first.
 
 Making a shelf and bringing one back are steps that `opalro undo` takes back. Shelving only some files, keeping a shelf while bringing it back, and dropping a shelf aren't built yet; to drop one, bring it back and then `opalro discard`.
 
@@ -1122,7 +1167,27 @@ Deleting a line keeps its saves: `opalro undo` brings the line back for as long 
 
 **Tags.** A tag names one save for good, such as the build you shipped: `opalro tag v1.0 "First playable"` tags the save you're at, and `opalro tag` lists the tags. A line moves on with each save; a tag stays put until you move it. Tag names follow the same rules as line names, and a tag can't share a line's name. Naming a tag that is at another save moves it there, and deleting one (`opalro tag --delete <name>`) takes it away; Opalro asks before either (`--yes` answers for you), and `opalro undo` takes each back. Tags a Git import brought in are listed too, with their messages. `opalro history` ends a save's row with `[tag v1.0]` for each tag at it, and `opalro show` names them in a `Tags` row. As long as a tag holds a save, `opalro tidy` keeps it and the saves before it.
 
-**Not yet:** two lines can't be combined into one.
+**Combining a line, then deleting it.** When the work on a line is done, go to the line it should join, combine it in, and delete the line you no longer need. As `main` now holds its saves, the delete asks nothing:
+
+```sh
+opalro line new climbing
+echo "climb walls" > climb.txt
+opalro save "Climb walls"
+opalro goto main
+opalro combine climbing
+opalro line delete climbing
+```
+
+```text
+Moved main forward to climbing: save qwnt "Climb walls".
+
+    main had nothing climbing lacks, so no combined save was needed.
+    1 file written.
+
+Changed your mind? opalro undo
+```
+
+Here `main` had no save of its own since `climbing` started, so it only moved forward. Had it moved on too, `opalro combine` would have made a combined save, as in [`opalro combine`](#opalro-combine). `opalro history` on `main` follows the first save before each save, so after a combined save it lists that save, not the other line's saves one by one; its row ends with `[combined <id>]`, and `opalro history <id>` lists the other line's saves from there, even once that line is deleted.
 
 ## 9. Coming from Git
 
@@ -1208,7 +1273,8 @@ hint: in Opalro, commit is save; it takes new files too: opalro save "message"
 | `git reset` | `opalro undo`, `opalro discard` or `opalro goto <save>` | explained |
 | `git branch <name>`; `git checkout -b`, `git switch -c` with a starting point | `opalro goto <save>`, then `opalro line new <name>` | explained |
 | `git revert` | `opalro reverse`, in v0.3; until then `opalro undo` | explained |
-| `git merge`, `blame` | coming later in v0.2 | explained |
+| `git merge <target>` | `opalro combine <target>` | runs; `merge --abort`, `--no-ff`, `--squash` and more than one line are explained, and other options refused |
+| `git blame` | not yet; until then `opalro history` | explained |
 | `git rebase`, `cherry-pick` | not yet: moving saves between lines comes after v0.2; until then `opalro save --amend` or `opalro undo` | explained |
 | `git clone`, `fetch`, `pull`, `push`, `remote` | coming in v0.3 | explained |
 | `git clean` | none: Opalro never deletes files it doesn't keep | explained |
@@ -1388,7 +1454,7 @@ The `--json` reference, published on https://opalro.com, describes every documen
 ## 13. What v0.1 doesn't do yet
 
 - **No server, no sharing.** v0.1 is one person on one computer. Opalro can't yet copy a project from a server, or send and get changes (syncing is planned for v0.3).
-- **No merging.** Two lines can't be combined into one yet, and Opalro can't yet show who changed each line of a file (both v0.2).
+- **No keeping conflicts.** `opalro combine` stops when both lines changed the same place in a file, and Opalro can't yet show who changed each line of a file.
 - **No locking.** Rules can mark files lockable, but nothing locks them until syncing arrives (v0.3).
 - **No repair.** `opalro verify` finds damage but can't fix it.
 - **No export to Git yet,** and an import happens once: bringing in Git's newer commits later comes after v0.1.
@@ -1454,7 +1520,7 @@ Removing Opalro doesn't touch your projects: each keeps its files and its `.opal
 
 A project's files are ordinary files in an ordinary folder. Opalro keeps everything else in the hidden `.opalro` folder beside them.
 
-**The folder holds only the files of the save you are on,** with your unsaved changes and the files Opalro leaves out (those stay where they are). Everything else lives only in `.opalro`, and goes when `.opalro` goes: every earlier save, the other lines and their saves, the newest saves of your line if you went back to an older one, your shelves, and everything `opalro undo` could take back. v0.1 can't combine lines or export to Git, so nothing carries that work out for you. Before you delete anything:
+**The folder holds only the files of the save you are on,** with your unsaved changes and the files Opalro leaves out (those stay where they are). Everything else lives only in `.opalro`, and goes when `.opalro` goes: every earlier save, the other lines and their saves, the newest saves of your line if you went back to an older one, your shelves, and everything `opalro undo` could take back. Combining a line into another keeps its saves, but only inside `.opalro`, and Opalro can't export to Git, so nothing carries that work out for you. Before you delete anything:
 
 1. **Go to the files you want to keep.** `opalro line` lists your lines, and `opalro status` says where you are. Go to the line or save whose files you want in the folder, such as `opalro goto main`.
 2. **Bring back your shelves.** `opalro shelf --list` shows them: bring each back with `opalro unshelf` and save it. If `opalro unshelf` stops, the shelf was made on another save and changes a file that differs here; it changes nothing, and the shelf stays safe in the copy of step 3, which you then must make. Then `opalro status` should say "Nothing changed since then"; if not, save.

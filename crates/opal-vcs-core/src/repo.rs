@@ -1522,7 +1522,8 @@ impl Repository {
         &self.rules
     }
 
-    /// Reads the project's `opalro.toml` now, for a command that takes no lock.
+    /// Reads the project's `opalro.toml` now: for a command that takes no lock, or after a command
+    /// changed the folder.
     #[must_use]
     pub fn read_rules(&self) -> RulesRead {
         match Dir::open_top(&self.root) {

@@ -1,13 +1,40 @@
-//! Which saves one line has in its history that others don't, following every parent.
+//! Which saves one line has in its history that others don't, and where two lines parted,
+//! following every parent.
 
 use std::collections::hash_map::Entry;
-use std::collections::{BTreeMap, BinaryHeap, HashMap};
+use std::collections::{BTreeMap, BinaryHeap, HashMap, HashSet};
 
 use crate::id::Id;
 use crate::repo::{RepoError, Repository};
 
 const TIP: u8 = 1;
 const OTHERS: u8 = 2;
+
+const OURS: u8 = 1;
+const THEIRS: u8 = 2;
+const BOTH: u8 = OURS | THEIRS;
+/// Under a save both sides have.
+const BELOW: u8 = 4;
+
+/// The most common starting points a combine takes at one level.
+pub const MAX_STARTS: usize = 16;
+
+#[cfg(test)]
+thread_local! {
+    /// How many candidates the last `common_starts` on this thread left before dropping.
+    pub(crate) static CANDIDATES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// How many times `common_starts` on this thread dropped its candidates in one pass.
+    pub(crate) static ONE_PASS_DROPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// What `common_starts` found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Starts {
+    /// The common starting points, in ID order; empty when the histories never met.
+    Found(Vec<Id>),
+    /// The lines have more than `MAX_STARTS` common starting points: how many.
+    TooMany(usize),
+}
 
 struct Node {
     marks: u8,
@@ -33,6 +60,12 @@ impl Node {
     }
 }
 
+/// What a walk keeps count of, told of each node before and after it changes.
+trait Watch {
+    fn add(&mut self, node: &Node);
+    fn remove(&mut self, node: &Node);
+}
+
 /// What decides whether the walk must go on, kept up to date as nodes change.
 #[derive(Default)]
 struct Tally {
@@ -42,7 +75,7 @@ struct Tally {
     counted: BTreeMap<i64, usize>,
 }
 
-impl Tally {
+impl Watch for Tally {
     fn add(&mut self, node: &Node) {
         self.one_side_waiting += usize::from(node.one_side_waiting());
         self.correcting += usize::from(node.correcting());
@@ -63,7 +96,9 @@ impl Tally {
             }
         }
     }
+}
 
+impl Tally {
     /// Whether a waiting save of this time must still spread. A shared save older than every
     /// counted one can't sit above any of them when no save is older than its parent.
     fn must_go_on(&self, time: i64) -> bool {
@@ -76,81 +111,208 @@ impl Tally {
     }
 }
 
-struct Walk<'r> {
+/// How many waiting saves aren't under a save both sides have.
+#[derive(Default)]
+struct Unsettled(usize);
+
+impl Watch for Unsettled {
+    fn add(&mut self, node: &Node) {
+        self.0 += usize::from(node.waiting() && node.marks & BELOW == 0);
+    }
+
+    fn remove(&mut self, node: &Node) {
+        self.0 -= usize::from(node.waiting() && node.marks & BELOW == 0);
+    }
+}
+
+struct Walk<'r, W> {
     repo: &'r Repository,
-    tip: Id,
     nodes: HashMap<Id, Node>,
     /// Newest first: every waiting node, and stale entries skipped when met.
     heap: BinaryHeap<(i64, Id)>,
-    tally: Tally,
+    watch: W,
 }
 
-impl Walk<'_> {
-    /// Adds `marks` to a save, reading it the first time it is met. True once the tip is held.
-    fn mark(&mut self, id: Id, marks: u8) -> Result<bool, RepoError> {
+impl<'r, W: Watch> Walk<'r, W> {
+    fn new(repo: &'r Repository, watch: W) -> Self {
+        Walk {
+            repo,
+            nodes: HashMap::new(),
+            heap: BinaryHeap::new(),
+            watch,
+        }
+    }
+
+    /// Adds `marks` to a save, reading it the first time it is met. Returns all it holds.
+    fn mark(&mut self, id: Id, marks: u8) -> Result<u8, RepoError> {
         let node = match self.nodes.entry(id) {
             Entry::Occupied(e) => e.into_mut(),
             Entry::Vacant(e) => {
                 let save = self
                     .repo
                     .store()
-                    .save(&id, self.repo.signatures_allowed())?;
+                    .save_links(&id, self.repo.signatures_allowed())?;
                 e.insert(Node {
                     marks: 0,
                     spread: 0,
-                    time: save.saver.time_ms,
+                    time: save.time_ms,
                     parents: save.parents,
                 })
             }
         };
-        if node.marks | marks == node.marks {
-            return Ok(false);
+        if node.marks | marks != node.marks {
+            self.watch.remove(node);
+            node.marks |= marks;
+            self.watch.add(node);
+            self.heap.push((node.time, id));
         }
-        self.tally.remove(node);
-        node.marks |= marks;
-        self.tally.add(node);
-        self.heap.push((node.time, id));
-        Ok(id == self.tip && node.marks & OTHERS != 0)
+        Ok(node.marks)
+    }
+
+    /// Takes the newest waiting save while `go_on` says so for its time, and returns the marks it
+    /// now gives its parents, with them.
+    fn next(&mut self, go_on: impl Fn(&W, i64) -> bool) -> Option<(u8, Vec<Id>)> {
+        while let Some(&(time, id)) = self.heap.peek() {
+            let Some(node) = self.nodes.get_mut(&id).filter(|n| n.waiting()) else {
+                self.heap.pop();
+                continue;
+            };
+            if !go_on(&self.watch, time) {
+                return None;
+            }
+            self.heap.pop();
+            // A mark gained after spreading is passed on too.
+            self.watch.remove(node);
+            node.spread = node.marks;
+            self.watch.add(node);
+            return Some((node.marks, node.parents.clone()));
+        }
+        None
     }
 }
 
 /// How many saves `tip` has in its history, itself included, that no save of `others` has in
 /// its own. 0 exactly when one of `others` is `tip` or has `tip` in its history.
 pub fn only_in(repo: &Repository, tip: Id, others: &[Id]) -> Result<u64, RepoError> {
-    let mut walk = Walk {
-        repo,
-        tip,
-        nodes: HashMap::new(),
-        heap: BinaryHeap::new(),
-        tally: Tally::default(),
-    };
+    let mut walk = Walk::new(repo, Tally::default());
     walk.mark(tip, TIP)?;
     for &other in others {
-        if walk.mark(other, OTHERS)? {
+        walk.mark(other, OTHERS)?;
+        if other == tip {
             return Ok(0);
         }
     }
-    while let Some(&(time, id)) = walk.heap.peek() {
-        let Some(node) = walk.nodes.get_mut(&id).filter(|n| n.waiting()) else {
-            walk.heap.pop();
-            continue;
-        };
-        if !walk.tally.must_go_on(time) {
-            break;
-        }
-        walk.heap.pop();
-        // A mark gained after spreading is passed on too.
-        walk.tally.remove(node);
-        node.spread = node.marks;
-        walk.tally.add(node);
-        let (marks, parents) = (node.marks, node.parents.clone());
+    while let Some((marks, parents)) = walk.next(|tally, time| tally.must_go_on(time)) {
         for parent in parents {
-            if walk.mark(parent, marks)? {
+            if walk.mark(parent, marks)? & OTHERS != 0 && parent == tip {
                 return Ok(0);
             }
         }
     }
     Ok(walk.nodes.values().filter(|n| n.marks == TIP).count() as u64)
+}
+
+/// The saves both sides have in their history that no other such save has in its history;
+/// each side is a set of tips. Exact whatever the saves' clocks say, whenever it is `Found`.
+pub fn common_starts(repo: &Repository, ours: &[Id], theirs: &[Id]) -> Result<Starts, RepoError> {
+    let mut walk = Walk::new(repo, Unsettled::default());
+    for (tips, side) in [(ours, OURS), (theirs, THEIRS)] {
+        for &tip in tips {
+            walk.mark(tip, side)?;
+        }
+    }
+    // Every path down to a starting point runs through saves only one side has, which keep the
+    // walk going until both marks arrive.
+    while let Some((marks, parents)) = walk.next(|unsettled, _| unsettled.0 > 0) {
+        let marks = if marks & BOTH == BOTH {
+            marks | BELOW
+        } else {
+            marks
+        };
+        for parent in parents {
+            walk.mark(parent, marks)?;
+        }
+    }
+    let mut candidates: Vec<Id> = walk
+        .nodes
+        .iter()
+        .filter(|(_, node)| node.marks == BOTH)
+        .map(|(&id, _)| id)
+        .collect();
+    candidates.sort();
+    #[cfg(test)]
+    CANDIDATES.set(candidates.len());
+    // Where saves are dated alike or before a parent, a candidate can be under another.
+    let starts = if candidates.len() > MAX_STARTS {
+        #[cfg(test)]
+        ONE_PASS_DROPS.set(ONE_PASS_DROPS.get() + 1);
+        drop_held_at_once(repo, &candidates, &walk.nodes)?
+    } else {
+        drop_held_each(repo, &candidates)?
+    };
+    if starts.len() > MAX_STARTS {
+        return Ok(Starts::TooMany(starts.len()));
+    }
+    Ok(Starts::Found(starts))
+}
+
+/// `candidates` without those another of them has in its history, by one `only_in` each.
+fn drop_held_each(repo: &Repository, candidates: &[Id]) -> Result<Vec<Id>, RepoError> {
+    if candidates.len() < 2 {
+        return Ok(candidates.to_vec());
+    }
+    let mut starts = Vec::with_capacity(candidates.len());
+    for &c in candidates {
+        let others: Vec<Id> = candidates.iter().copied().filter(|&d| d != c).collect();
+        if only_in(repo, c, &others)? != 0 {
+            starts.push(c);
+        }
+    }
+    Ok(starts)
+}
+
+/// `candidates` without those another of them has in its history, in one pass down from all
+/// their parents that reads each save at most once; saves in `known` are not read again. Keeps
+/// the candidates' order.
+fn drop_held_at_once(
+    repo: &Repository,
+    candidates: &[Id],
+    known: &HashMap<Id, Node>,
+) -> Result<Vec<Id>, RepoError> {
+    let parents_of = |id: &Id| -> Result<Vec<Id>, RepoError> {
+        Ok(match known.get(id) {
+            Some(node) => node.parents.clone(),
+            None => {
+                repo.store()
+                    .save_links(id, repo.signatures_allowed())?
+                    .parents
+            }
+        })
+    };
+    let all: HashSet<Id> = candidates.iter().copied().collect();
+    let mut unreached = all.clone();
+    let mut seen: HashSet<Id> = HashSet::new();
+    let mut todo: Vec<Id> = Vec::new();
+    for c in candidates {
+        todo.extend(parents_of(c)?);
+    }
+    // The last one left can't be under another: some candidate is under none.
+    while unreached.len() > 1
+        && let Some(id) = todo.pop()
+    {
+        if seen.insert(id) {
+            unreached.remove(&id);
+            // A candidate's parents are on their way already.
+            if !all.contains(&id) {
+                todo.extend(parents_of(&id)?);
+            }
+        }
+    }
+    Ok(candidates
+        .iter()
+        .copied()
+        .filter(|c| unreached.contains(c))
+        .collect())
 }
 
 #[cfg(test)]
@@ -159,7 +321,7 @@ mod tests {
     use super::*;
     use crate::diary::{Action, DiaryEntry};
     use crate::pack::ObjectKind;
-    use crate::save::{Person, Save};
+    use crate::save::{MoveNote, NOTES_BUILT, Person, Save};
     use proptest::prelude::*;
     use std::collections::{BTreeSet, HashSet};
 
@@ -175,9 +337,21 @@ mod tests {
         (dir, repo)
     }
 
+    /// Saves to plant: each one's parents, as indexes of earlier ones, and its time.
+    type Saves = Vec<(Vec<usize>, i64)>;
+
     /// Stores one save per `(parents, time)`, its parents given as indexes of earlier ones, all
     /// in one command. Returns their IDs in order.
     fn plant(repo: &mut Repository, saves: &[(Vec<usize>, i64)]) -> Vec<Id> {
+        plant_noted(repo, saves, &[])
+    }
+
+    /// `plant`, each save holding `notes`.
+    fn plant_noted(
+        repo: &mut Repository,
+        saves: &[(Vec<usize>, i64)],
+        notes: &[MoveNote],
+    ) -> Vec<Id> {
         let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
         let (head, entry) = repo.current().unwrap();
         let start = repo
@@ -194,6 +368,7 @@ mod tests {
                     ..start.saver.clone()
                 },
                 message: n.to_string(),
+                move_notes: notes.to_vec(),
                 ..start.clone()
             };
             ids.push(packs.add_record(ObjectKind::Save, &save.encode()).unwrap());
@@ -414,15 +589,15 @@ mod tests {
         assert!(read <= 6, "{read} saves read");
     }
 
-    #[test]
-    fn an_older_side_line_does_not_send_the_walk_to_the_start() {
-        let (_dir, mut repo) = project();
+    /// A main line of 1,000 saves with a side line from save 900, dated before save 950 and
+    /// combined at 951, and a feature from save 990. Returns the saves, main's saves and the
+    /// feature's tip.
+    fn side_line_history() -> (Saves, Vec<usize>, usize) {
         let mut saves: Vec<(Vec<usize>, i64)> = Vec::new();
         let mut main: Vec<usize> = Vec::new();
         for k in 0..1000 {
             let mut parents: Vec<usize> = main.last().copied().into_iter().collect();
             if k == 951 {
-                // A side line from save 900, dated before save 950, combined here.
                 let mut side = main[900];
                 for j in 1..=3 {
                     saves.push((vec![side], at(900) + 600_000 * j));
@@ -434,11 +609,303 @@ mod tests {
             main.push(saves.len() - 1);
         }
         let feature = feature_after(&mut saves, main[990]);
+        (saves, main, feature)
+    }
+
+    #[test]
+    fn an_older_side_line_does_not_send_the_walk_to_the_start() {
+        let (_dir, mut repo) = project();
+        let (saves, main, feature) = side_line_history();
         let ids = plant(&mut repo, &saves);
         let before = repo.store().saves_read();
         assert_eq!(only_in(&repo, ids[feature], &[ids[main[999]]]).unwrap(), 3);
         let read = repo.store().saves_read() - before;
         assert!(read <= 140, "{read} saves read");
+        let before = repo.store().saves_read();
+        assert_eq!(
+            common_starts(&repo, &[ids[feature]], &[ids[main[999]]]).unwrap(),
+            Starts::Found(vec![ids[main[990]]])
+        );
+        let read = repo.store().saves_read() - before;
+        // 14: the two tips, main 998 down to 990, the feature's other two, and main 989, which
+        // 990 marks as under a shared save before the walk stops. The side line is never read.
+        assert!(read <= 16, "{read} saves read by common_starts");
+    }
+
+    fn found(mut ids: Vec<Id>) -> Starts {
+        ids.sort();
+        Starts::Found(ids)
+    }
+
+    #[test]
+    fn the_save_two_lines_parted_at_is_their_starting_point() {
+        let (_dir, mut repo) = project();
+        // base, a1, a2, b1
+        let [base, _a1, a2, b1] = plant(
+            &mut repo,
+            &[
+                (vec![], 1000),
+                (vec![0], 2000),
+                (vec![1], 3000),
+                (vec![0], 2500),
+            ],
+        )[..] else {
+            panic!()
+        };
+        assert_eq!(
+            common_starts(&repo, &[a2], &[b1]).unwrap(),
+            found(vec![base])
+        );
+    }
+
+    #[test]
+    fn a_line_the_other_holds_is_its_own_starting_point() {
+        let (_dir, mut repo) = project();
+        let mut saves = Vec::new();
+        chain_after(&mut saves, None, 3, 0);
+        let [_a, b, c] = plant(&mut repo, &saves)[..] else {
+            panic!()
+        };
+        assert_eq!(common_starts(&repo, &[b], &[c]).unwrap(), found(vec![b]));
+        assert_eq!(common_starts(&repo, &[c], &[b]).unwrap(), found(vec![b]));
+        assert_eq!(common_starts(&repo, &[c], &[c]).unwrap(), found(vec![c]));
+    }
+
+    #[test]
+    fn histories_that_never_met_have_none() {
+        let (_dir, mut repo) = project();
+        let [a, b] = plant(&mut repo, &[(vec![], 1000), (vec![], 2000)])[..] else {
+            panic!()
+        };
+        assert_eq!(common_starts(&repo, &[a], &[b]).unwrap(), found(vec![]));
+    }
+
+    /// base, x1 and y1 after it, then x2 and y2 each combining both. Returns all five and z after y2.
+    fn criss_cross(repo: &mut Repository) -> [Id; 6] {
+        let ids = plant(
+            repo,
+            &[
+                (vec![], 1000),
+                (vec![0], 2000),
+                (vec![0], 2000),
+                (vec![1, 2], 3000),
+                (vec![2, 1], 3000),
+                (vec![4], 4000),
+            ],
+        );
+        ids.try_into().unwrap()
+    }
+
+    #[test]
+    fn a_criss_cross_has_two_starting_points_in_id_order() {
+        let (_dir, mut repo) = project();
+        let [_base, x1, y1, x2, y2, _z] = criss_cross(&mut repo);
+        assert_eq!(
+            common_starts(&repo, &[x2], &[y2]).unwrap(),
+            found(vec![x1, y1])
+        );
+    }
+
+    #[test]
+    fn a_set_of_tips_is_one_side() {
+        let (_dir, mut repo) = project();
+        let [_base, x1, y1, _x2, _y2, z] = criss_cross(&mut repo);
+        assert_eq!(
+            common_starts(&repo, &[x1, y1], &[z]).unwrap(),
+            found(vec![x1, y1])
+        );
+        assert_eq!(
+            common_starts(&repo, &[x1, y1], &[x1]).unwrap(),
+            found(vec![x1])
+        );
+    }
+
+    fn note() -> MoveNote {
+        MoveNote {
+            from: "a".into(),
+            to: "b".into(),
+        }
+    }
+
+    /// `roots` saves W after a first save, combined into V, then Z after V, and two sides that
+    /// part at Z and each combine every W again, one save at a time. The first save, V and Z are
+    /// dated `t`, the Ws `w` and the sides' saves `s`. Returns the saves, Z and the two tips.
+    fn parted_once(roots: usize, [t, w, s]: [i64; 3]) -> (Saves, usize, [usize; 2]) {
+        let mut saves: Saves = vec![(vec![], t)];
+        let ws: Vec<usize> = (0..roots)
+            .map(|_| {
+                saves.push((vec![0], w));
+                saves.len() - 1
+            })
+            .collect();
+        saves.push((ws.clone(), t));
+        saves.push((vec![saves.len() - 1], t));
+        let z = saves.len() - 1;
+        let mut tips = [z, z];
+        for tip in &mut tips {
+            saves.push((vec![*tip], s));
+            *tip = saves.len() - 1;
+            for &w_save in &ws {
+                saves.push((vec![*tip, w_save], s));
+                *tip = saves.len() - 1;
+            }
+        }
+        (saves, z, tips)
+    }
+
+    #[test]
+    fn lines_that_parted_once_have_one_starting_point_however_their_saves_are_dated() {
+        // The W saves dated after Z, as by a clock run ahead.
+        let (_dir, mut repo) = project();
+        let t = 1_700_000_000_000;
+        let (saves, z, [ours, theirs]) = parted_once(16, [t, t + 100_000, t + 300_000]);
+        // Every save holds a note, which no walk here builds.
+        let ids = plant_noted(&mut repo, &saves, &[note()]);
+        NOTES_BUILT.set(0);
+        let (before, drops) = (repo.store().saves_read(), ONE_PASS_DROPS.get());
+        assert_eq!(
+            common_starts(&repo, &[ids[ours]], &[ids[theirs]]).unwrap(),
+            found(vec![ids[z]])
+        );
+        assert_eq!(ONE_PASS_DROPS.get(), drops + 1, "the candidates were few");
+        let read = repo.store().saves_read() - before;
+        assert!(read <= saves.len(), "{read} saves read");
+        assert_eq!(NOTES_BUILT.get(), 0);
+    }
+
+    #[test]
+    fn lines_that_parted_once_with_saves_dated_alike_have_one_starting_point() {
+        // Only about one history in eight leaves many candidates, as the IDs fall; go on until
+        // one has. Each project's first save is new, so every round's IDs differ.
+        let drops = ONE_PASS_DROPS.get();
+        let mut crowded = 0;
+        for k in 0..128 {
+            if crowded > 0 && k >= 8 {
+                break;
+            }
+            let (_dir, mut repo) = project();
+            let mut saves = filler(k % 8);
+            let (more, z, tips) = parted_once(40, [5, 5, 5]);
+            let first = saves.len();
+            let shift = |s: &usize| s + first;
+            saves.extend(
+                more.into_iter()
+                    .map(|(parents, time)| (parents.iter().map(shift).collect(), time)),
+            );
+            let [ours, theirs] = tips.map(|s| s + first);
+            let ids = plant(&mut repo, &saves);
+            assert_eq!(
+                common_starts(&repo, &[ids[ours]], &[ids[theirs]]).unwrap(),
+                found(vec![ids[z + first]]),
+                "history {k}"
+            );
+            crowded = ONE_PASS_DROPS.get() - drops;
+        }
+        assert!(crowded > 0, "no history left many candidates");
+    }
+
+    #[test]
+    fn dropping_many_candidates_reads_each_save_behind_them_once() {
+        let (_dir, mut repo) = project();
+        let (saves, z, _) = parted_once(16, [1000, 2000, 3000]);
+        let ids = plant_noted(&mut repo, &saves, &[note()]);
+        NOTES_BUILT.set(0);
+        // The 17 candidates are read for their parents. Z last: its parent V is taken first, and
+        // through it every W, so nothing more is read. Z first: the first save, which every W is
+        // on, is reached 16 times and read once, then V.
+        for (z_first, want) in [(false, 18), (true, 19)] {
+            let mut candidates: Vec<Id> = ids[1..=16].to_vec();
+            if z_first {
+                candidates.insert(0, ids[z]);
+            } else {
+                candidates.push(ids[z]);
+            }
+            let before = repo.store().saves_read();
+            let got = drop_held_at_once(&repo, &candidates, &HashMap::new()).unwrap();
+            assert_eq!(got, [ids[z]]);
+            assert_eq!(
+                repo.store().saves_read() - before,
+                want,
+                "Z first: {z_first}"
+            );
+            assert_eq!(drop_held_each(&repo, &candidates).unwrap(), [ids[z]]);
+            assert_eq!(NOTES_BUILT.get(), 0);
+        }
+    }
+
+    #[test]
+    fn seventeen_starting_points_are_too_many() {
+        for (roots, want) in [(17, None), (16, Some(16))] {
+            let (_dir, mut repo) = project();
+            let mut saves: Vec<(Vec<usize>, i64)> =
+                (0..roots).map(|r| (vec![], r as i64)).collect();
+            let all: Vec<usize> = (0..roots).collect();
+            saves.push((all.clone(), 1000));
+            saves.push((all, 1000));
+            let ids = plant(&mut repo, &saves);
+            let got = common_starts(&repo, &[ids[roots]], &[ids[roots + 1]]).unwrap();
+            match want {
+                None => assert_eq!(got, Starts::TooMany(17)),
+                Some(n) => assert_eq!(got, found(ids[..n].to_vec())),
+            }
+        }
+    }
+
+    #[test]
+    fn a_start_under_another_dated_alike_is_dropped() {
+        // C <- X <- D, and O and T each with parents [D, C], all at once. D is the one starting
+        // point; when C is taken before D, D's mark never reaches C and only the drop removes it.
+        let mut extra = HashSet::new();
+        for k in 0..16 {
+            let (_dir, mut repo) = project();
+            let mut saves = filler(k);
+            let c = saves.len();
+            let (x, d, o, t) = (c + 1, c + 2, c + 3, c + 4);
+            saves.extend([
+                (vec![], 5),
+                (vec![c], 5),
+                (vec![x], 5),
+                (vec![d, c], 5),
+                (vec![d, c], 5),
+            ]);
+            let ids = plant(&mut repo, &saves);
+            let got = common_starts(&repo, &[ids[o]], &[ids[t]]).unwrap();
+            assert_eq!(got, found(vec![ids[d]]), "history {k}");
+            extra.insert(CANDIDATES.get());
+        }
+        assert_eq!(extra, HashSet::from([1, 2]), "both tie orders");
+    }
+
+    #[test]
+    fn the_walk_stops_where_the_lines_parted() {
+        let mut orders = HashSet::new();
+        for k in 0..16 {
+            let (_dir, mut repo) = project();
+            let mut saves = filler(k);
+            chain_after(&mut saves, None, 1000, 0);
+            let parted = saves.len() - 1;
+            let from = saves[parted].1;
+            chain_after(&mut saves, Some(parted), 3, from);
+            let ours = saves.len() - 1;
+            // The other side starts at the very time they parted.
+            let other_first = saves.len();
+            let mut theirs = parted;
+            for later in [0, 20_000] {
+                saves.push((vec![theirs], from + later));
+                theirs = saves.len() - 1;
+            }
+            let ids = plant(&mut repo, &saves);
+            let before = repo.store().saves_read();
+            assert_eq!(
+                common_starts(&repo, &[ids[ours]], &[ids[theirs]]).unwrap(),
+                found(vec![ids[parted]]),
+                "history {k}"
+            );
+            let read = repo.store().saves_read() - before;
+            assert!(read <= 8, "history {k}: {read} saves read");
+            orders.insert(ids[parted] > ids[other_first]);
+        }
+        assert_eq!(orders.len(), 2, "both tie orders");
     }
 
     /// Every save reachable from `starts`, themselves included.
@@ -463,6 +930,213 @@ mod tests {
         Backwards,
         /// Each save as late as its newest parent, often to the millisecond.
         Ties,
+        /// Each save at the clock's very ends, or at zero.
+        Ends,
+    }
+
+    /// The time of the next save after `saves`, with these parents, from a drawn `t`.
+    fn dated(clock: Clock, saves: &[(Vec<usize>, i64)], parents: &[usize], t: i64) -> i64 {
+        match clock {
+            Clock::Forwards => saves.len() as i64,
+            Clock::Random => t,
+            Clock::Backwards => -(saves.len() as i64),
+            Clock::Ties => {
+                let newest = parents.iter().map(|&p| saves[p].1).max().unwrap_or(0);
+                newest + i64::from(t % 4 == 0)
+            }
+            Clock::Ends => [i64::MIN, i64::MIN + 1, 0, i64::MAX - 1, i64::MAX][(t % 5) as usize],
+        }
+    }
+
+    /// A history drawn as each save's picks among earlier saves, and a time: the parents table
+    /// and the saves to plant.
+    type Shape = Vec<(Vec<prop::sample::Index>, i64)>;
+    fn drawn(shape: &Shape, clock: Clock) -> (Vec<Vec<usize>>, Saves) {
+        let parents: Vec<Vec<usize>> = shape
+            .iter()
+            .enumerate()
+            .map(|(n, (picks, _))| {
+                if n == 0 {
+                    return Vec::new();
+                }
+                let set: BTreeSet<usize> = picks.iter().map(|p| p.index(n)).collect();
+                set.into_iter().collect()
+            })
+            .collect();
+        let mut saves: Vec<(Vec<usize>, i64)> = Vec::new();
+        for (p, (_, t)) in parents.iter().zip(shape) {
+            let time = dated(clock, &saves, p, *t);
+            saves.push((p.clone(), time));
+        }
+        (parents, saves)
+    }
+
+    /// First saves added to a drawn history, each side holding all of them as parents.
+    #[derive(Clone, Copy, Debug)]
+    struct Crowd {
+        roots: usize,
+        /// Each side holds them through one save or two.
+        split: [bool; 2],
+        /// The roots are combined into one save Z, after which each side's save holds Z and every
+        /// root again, the roots dated after everything as by a clock run ahead: one starting
+        /// point, with many candidates.
+        joined: bool,
+    }
+
+    /// Adds `crowd` to the history and to the sides' tips.
+    fn add_crowd(
+        crowd: Crowd,
+        clock: Clock,
+        parents: &mut Vec<Vec<usize>>,
+        saves: &mut Saves,
+        sides: [&mut Vec<usize>; 2],
+    ) {
+        let first = saves.len();
+        for r in 0..crowd.roots {
+            let time = if crowd.joined {
+                i64::MAX
+            } else {
+                dated(clock, saves, &[], r as i64 * 37)
+            };
+            parents.push(Vec::new());
+            saves.push((Vec::new(), time));
+        }
+        let all: Vec<usize> = (first..first + crowd.roots).collect();
+        // Dated as if its parents were `by` alone.
+        let push =
+            |parents: &mut Vec<Vec<usize>>, saves: &mut Saves, group: Vec<usize>, by: &[usize]| {
+                let time = dated(clock, saves, by, 500);
+                parents.push(group.clone());
+                saves.push((group, time));
+                saves.len() - 1
+            };
+        if crowd.joined {
+            let v = push(parents, saves, all.clone(), &[]);
+            let z = push(parents, saves, vec![v], &[v]);
+            for side in sides {
+                let mut group = vec![z];
+                group.extend(&all);
+                side.push(push(parents, saves, group, &[z]));
+            }
+            return;
+        }
+        for (split, side) in crowd.split.into_iter().zip(sides) {
+            let groups = if split {
+                let (a, b) = all.split_at(crowd.roots / 2);
+                vec![a.to_vec(), b.to_vec()]
+            } else {
+                vec![all.clone()]
+            };
+            for group in groups {
+                let by = group.clone();
+                side.push(push(parents, saves, group, &by));
+            }
+        }
+    }
+
+    #[test]
+    fn common_starts_agrees_with_a_full_walk() {
+        use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
+        let strategy = (
+            prop::collection::vec(
+                (
+                    prop::collection::vec(any::<prop::sample::Index>(), 0..=3),
+                    0..1000i64,
+                ),
+                1..=40,
+            ),
+            prop::collection::vec(any::<prop::sample::Index>(), 1..=3),
+            prop::collection::vec(any::<prop::sample::Index>(), 1..=3),
+            prop_oneof![
+                Just(Clock::Forwards),
+                Just(Clock::Ties),
+                Just(Clock::Random),
+                Just(Clock::Ends),
+            ],
+            // More first saves than a combine takes.
+            prop::option::weighted(
+                0.25,
+                (17..=20usize, any::<[bool; 2]>(), any::<bool>()).prop_map(
+                    |(roots, split, joined)| Crowd {
+                        roots,
+                        split,
+                        joined,
+                    },
+                ),
+            ),
+        );
+        // Histories `common_starts` dropped more than 16 candidates of in one pass, to few enough.
+        let crowded_but_few = std::cell::Cell::new(0usize);
+        // The seed is fixed, so every run draws the same shapes and a failure found once is
+        // drawn again; only the IDs differ, with each project's first save.
+        let config = Config {
+            cases: 256,
+            failure_persistence: None,
+            ..Config::default()
+        };
+        let rng = TestRng::deterministic_rng(RngAlgorithm::ChaCha);
+        let mut runner = TestRunner::new_with_rng(config, rng);
+        let result = runner.run(&strategy, |(shape, ours, theirs, clock, crowd)| {
+            let (mut parents, mut saves) = drawn(&shape, clock);
+            let mut ours: Vec<usize> = ours.iter().map(|o| o.index(saves.len())).collect();
+            let mut theirs: Vec<usize> = theirs.iter().map(|t| t.index(saves.len())).collect();
+            if let Some(crowd) = crowd {
+                add_crowd(
+                    crowd,
+                    clock,
+                    &mut parents,
+                    &mut saves,
+                    [&mut ours, &mut theirs],
+                );
+            }
+
+            let common: HashSet<usize> = ancestors(&parents, &ours)
+                .intersection(&ancestors(&parents, &theirs))
+                .copied()
+                .collect();
+            let (_dir, mut repo) = project();
+            let ids = plant(&mut repo, &saves);
+            let mut answer: Vec<Id> = common
+                .iter()
+                .filter(|&&c| {
+                    !common
+                        .iter()
+                        .any(|&d| d != c && ancestors(&parents, &[d]).contains(&c))
+                })
+                .map(|&c| ids[c])
+                .collect();
+            answer.sort();
+
+            let side = |tips: &[usize]| tips.iter().map(|&s| ids[s]).collect::<Vec<Id>>();
+            let drops = ONE_PASS_DROPS.get();
+            let got = common_starts(&repo, &side(&ours), &side(&theirs)).unwrap();
+            if answer.len() > MAX_STARTS {
+                prop_assert_eq!(got, Starts::TooMany(answer.len()));
+            } else {
+                prop_assert_eq!(got, Starts::Found(answer.clone()));
+                if ONE_PASS_DROPS.get() > drops {
+                    crowded_but_few.set(crowded_but_few.get() + 1);
+                }
+            }
+
+            // Both ways of dropping the saves under another, from every save the sides share,
+            // give the answer.
+            let mut shared: Vec<Id> = common.iter().map(|&c| ids[c]).collect();
+            shared.sort();
+            prop_assert_eq!(&drop_held_each(&repo, &shared).unwrap(), &answer);
+            let at_once = drop_held_at_once(&repo, &shared, &HashMap::new()).unwrap();
+            prop_assert_eq!(&at_once, &answer);
+            Ok(())
+        });
+        if let Err(e) = result {
+            panic!("{e}");
+        }
+        println!(
+            "{} histories dropped more than {MAX_STARTS} candidates in one pass, to {MAX_STARTS} \
+             starting points or fewer",
+            crowded_but_few.get()
+        );
+        assert!(crowded_but_few.get() > 0, "no history had many candidates");
     }
 
     proptest! {
@@ -484,39 +1158,14 @@ mod tests {
             // Random times of a chain of new saves after the tip, its last one held by the others.
             under in prop::option::of(prop::collection::vec(0..1000i64, 1..=3)),
         ) {
-            // The time of the next save after `saves`, with these parents.
-            let dated = |saves: &[(Vec<usize>, i64)], parents: &[usize], t: i64| match clock {
-                Clock::Forwards => saves.len() as i64,
-                Clock::Random => t,
-                Clock::Backwards => -(saves.len() as i64),
-                Clock::Ties => {
-                    let newest = parents.iter().map(|&p| saves[p].1).max().unwrap_or(0);
-                    newest + i64::from(t % 4 == 0)
-                }
-            };
-            let mut parents: Vec<Vec<usize>> = shape
-                .iter()
-                .enumerate()
-                .map(|(n, (picks, _))| {
-                    if n == 0 {
-                        return Vec::new();
-                    }
-                    let set: BTreeSet<usize> = picks.iter().map(|p| p.index(n)).collect();
-                    set.into_iter().collect()
-                })
-                .collect();
-            let mut saves: Vec<(Vec<usize>, i64)> = Vec::new();
-            for (p, (_, t)) in parents.iter().zip(&shape) {
-                let time = dated(&saves, p, *t);
-                saves.push((p.clone(), time));
-            }
+            let (mut parents, mut saves) = drawn(&shape, clock);
             let tip = tip.index(saves.len());
             let mut others: Vec<usize> = others.iter().map(|o| o.index(saves.len())).collect();
             if let Some(times) = under {
                 let mut parent = tip;
                 for t in times {
                     parents.push(vec![parent]);
-                    let time = dated(&saves, &[parent], t);
+                    let time = dated(clock, &saves, &[parent], t);
                     saves.push((vec![parent], time));
                     parent = saves.len() - 1;
                 }

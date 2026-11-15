@@ -1,0 +1,54 @@
+//! RT20 exploration: rules in opalro.toml during a combine.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+mod support;
+use support::{Env, text};
+
+fn run(env: &Env, args: &[&str]) -> (i32, String, String) {
+    let out = env.opalro().args(args).output().unwrap();
+    (
+        out.status.code().unwrap_or(-1),
+        text(&out.stdout),
+        text(&out.stderr),
+    )
+}
+
+fn ok(env: &Env, args: &[&str]) -> String {
+    let (c, o, e) = run(env, args);
+    assert_eq!(c, 0, "{args:?}: {o}{e}");
+    format!("{o}{e}")
+}
+
+const RULES: &str = "[[rule]]\nfiles = [\"*.unity\"]\nconflict-markers = false\n";
+const SCENE: &str = "1\n2\n3\n4\n5\n6\n7\n8\n";
+
+#[test]
+fn rt20_rules_during_a_combine() {
+    let env = Env::empty();
+    ok(&env, &["start", "--preset", "custom"]);
+    support::write(&env, "opalro.toml", RULES);
+    support::write(&env, "Main.unity", SCENE);
+    ok(&env, &["save", "A"]);
+    // The other line breaks the rules file, and nothing else.
+    ok(&env, &["line", "new", "side"]);
+    support::write(&env, "opalro.toml", "[[rule]\nfiles = [\"*.unity\"]\n");
+    eprintln!("save on side: {}", ok(&env, &["save", "Tidy the rules"]));
+    ok(&env, &["goto", "main"]);
+    support::write(&env, "notes.txt", "n\n");
+    ok(&env, &["save", "N"]);
+    eprintln!("combine 1: {}", ok(&env, &["combine", "side", "--json"]));
+    // Both lines now change the scene, on lines apart.
+    ok(&env, &["line", "new", "art"]);
+    support::write(&env, "Main.unity", "one\n2\n3\n4\n5\n6\n7\n8\n");
+    ok(&env, &["save", "Art"]);
+    ok(&env, &["goto", "main"]);
+    support::write(&env, "Main.unity", "1\n2\n3\n4\n5\n6\n7\neight\n");
+    let (c, o, e) = run(&env, &["save", "Level", "--json"]);
+    eprintln!("save on main: {c} {o}{e}");
+    let (c, o, e) = run(&env, &["status", "--json"]);
+    eprintln!("status: {c} {o}{e}");
+    let (c, o, e) = run(&env, &["combine", "art", "--json"]);
+    eprintln!("combine 2: {c} {o}{e}");
+    let scene = std::fs::read_to_string(env.root().join("Main.unity")).unwrap();
+    eprintln!("scene now: {scene:?}");
+}

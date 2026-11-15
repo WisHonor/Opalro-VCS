@@ -228,6 +228,9 @@ fn changes_json_matches_its_snapshot() {
     for key in ["id", "change_id", "change_id_short"] {
         redact(&mut save[key]);
     }
+    for parent in save["parents"].as_array_mut().unwrap() {
+        redact(parent);
+    }
     for person in ["author", "saver"] {
         for key in ["time_ms", "tz_offset_min"] {
             redact(&mut save[person][key]);

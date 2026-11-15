@@ -1,0 +1,156 @@
+//! RT19 exploration: two lines that parted once, over a history whose saves share one time.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+use opal_core::diary::{Action, DiaryEntry};
+use opal_core::id::{ChangeId, Id};
+use opal_core::pack::ObjectKind;
+use opal_core::repo::Repository;
+use opal_core::save::Save;
+
+mod support;
+use support::{Env, text};
+
+fn run(env: &Env, args: &[&str]) -> (i32, String) {
+    let out = env.opalro().args(args).output().unwrap();
+    (
+        out.status.code().unwrap_or(-1),
+        format!("{}{}", text(&out.stdout), text(&out.stderr)),
+    )
+}
+
+/// Plants a chain of `count` saves on main's save, then `main` and `side` one save each past it;
+/// each save's time from `time(i)`.
+fn plant(env: &Env, count: usize, time: impl Fn(usize) -> i64) {
+    let mut repo = Repository::open(env.root()).unwrap();
+    let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
+    let (head, entry) = repo.current().unwrap();
+    let first = entry.state.lines["main"];
+    let made_on = repo.store().save(&first, false).unwrap();
+    let mut pack = repo.new_packs().unwrap();
+    let mut add = |parent: Id, i: usize, message: &str| {
+        let mut who = made_on.author.clone();
+        who.time_ms = time(i);
+        let save = Save {
+            root: made_on.root,
+            parents: vec![parent],
+            author: who.clone(),
+            saver: who,
+            message: message.into(),
+            change_id: ChangeId::random().unwrap(),
+            move_notes: vec![],
+            signature: vec![],
+            extra: made_on.extra.clone(),
+        };
+        pack.add_record(ObjectKind::Save, &save.encode()).unwrap()
+    };
+    let mut tip = first;
+    for i in 0..count {
+        tip = add(tip, i, &format!("c{i}"));
+    }
+    let main = add(tip, count, "main");
+    let side = add(tip, count + 1, "side");
+    let mut state = entry.state.clone();
+    state.lines.insert("main".into(), main);
+    state.lines.insert("side".into(), side);
+    let diary = DiaryEntry {
+        parent: Some(head),
+        action: Action::Command,
+        command: "save".into(),
+        who: made_on.author,
+        opal_version: "0.1.0".into(),
+        state,
+        folder_change: None,
+    };
+    repo.commit(&lock, pack, &diary).unwrap();
+}
+
+fn project() -> Env {
+    let env = Env::empty();
+    assert_eq!(run(&env, &["start", "--preset", "custom"]).0, 0);
+    support::write(&env, "a.txt", "a\n");
+    assert_eq!(run(&env, &["save", "A"]).0, 0);
+    env
+}
+
+/// `n` saves W on main's save; V combining them all; Z on V; then `main` and `side` each a save
+/// with parents Z and every W. All at `time`. The lines parted once, at Z.
+fn plant_wide(env: &Env, n: usize, time: i64) {
+    let mut repo = Repository::open(env.root()).unwrap();
+    let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
+    let (head, entry) = repo.current().unwrap();
+    let first = entry.state.lines["main"];
+    let made_on = repo.store().save(&first, false).unwrap();
+    let mut pack = repo.new_packs().unwrap();
+    let mut add = |parents: Vec<Id>, message: &str| {
+        let mut who = made_on.author.clone();
+        who.time_ms = time;
+        let save = Save {
+            root: made_on.root,
+            parents,
+            author: who.clone(),
+            saver: who,
+            message: message.into(),
+            change_id: ChangeId::random().unwrap(),
+            move_notes: vec![],
+            signature: vec![],
+            extra: made_on.extra.clone(),
+        };
+        pack.add_record(ObjectKind::Save, &save.encode()).unwrap()
+    };
+    let ws: Vec<Id> = (0..n).map(|i| add(vec![first], &format!("w{i}"))).collect();
+    let v = add(ws.clone(), "v");
+    let z = add(vec![v], "z");
+    let tip = |name: &str, add: &mut dyn FnMut(Vec<Id>, &str) -> Id| {
+        add([z].into_iter().chain(ws.iter().copied()).collect(), name)
+    };
+    let main = tip("main", &mut add);
+    let side = tip("side", &mut add);
+    let mut state = entry.state.clone();
+    state.lines.insert("main".into(), main);
+    state.lines.insert("side".into(), side);
+    let diary = DiaryEntry {
+        parent: Some(head),
+        action: Action::Command,
+        command: "save".into(),
+        who: made_on.author,
+        opal_version: "0.1.0".into(),
+        state,
+        folder_change: None,
+    };
+    repo.commit(&lock, pack, &diary).unwrap();
+}
+
+#[test]
+fn rt19_wide_history_dated_alike() {
+    for n in [4, 17, 40] {
+        for round in 0..3 {
+            let env = project();
+            plant_wide(&env, n, 1_700_000_000_000);
+            let said = run(&env, &["combine", "side"]);
+            eprintln!("wide alike {n} round {round}: {said:?}");
+        }
+        let env = project();
+        plant_wide(&env, n, 1_700_000_000_000);
+        let _ = &env;
+    }
+}
+
+#[test]
+fn rt19_saves_dated_alike() {
+    for count in [5, 20, 40, 200] {
+        let env = project();
+        plant(&env, count, |_| 1_700_000_000_000);
+        let said = run(&env, &["combine", "side"]);
+        eprintln!("alike, chain {count}: {said:?}");
+    }
+}
+
+#[test]
+fn rt19_saves_dated_backwards() {
+    for count in [5, 20, 40, 200] {
+        let env = project();
+        plant(&env, count, |i| 1_700_000_000_000 - i as i64 * 1000);
+        let said = run(&env, &["combine", "side"]);
+        eprintln!("backwards, chain {count}: {said:?}");
+    }
+}

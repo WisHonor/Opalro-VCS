@@ -18,6 +18,9 @@ expression: "json_of(&env, &[\"line\", \"delete\", \"side\", \"--yes\"])"
     "id": "[redacted]",
     "line": "side",
     "message": "X",
+    "parents": [
+      "[redacted]"
+    ],
     "saver": {
       "email": "test@example.com",
       "name": "Test",

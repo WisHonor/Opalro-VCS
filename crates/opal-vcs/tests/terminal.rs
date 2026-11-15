@@ -173,6 +173,11 @@ fn without_a_terminal_opals_own_words_are_plain() {
     ] {
         run(args);
     }
+    run(&["line", "new", "side"]);
+    std::fs::write(env.root().join("b.txt"), "b\n").unwrap();
+    run(&["save", "on side"]);
+    run(&["goto", "main"]);
+    run(&["combine", "side"]);
     std::fs::write(env.root().join("a.txt"), "abcd\n").unwrap();
     run(&["shelf", "wip"]);
     run(&["shelf", "--list"]);
@@ -599,6 +604,46 @@ fn history_keeps_tag_marks_whole_and_cuts_the_message() {
     assert!(row.ends_with("...  [main]  [tag v1]  [tag v2]"), "{shown}");
     assert!(row.contains("  word"), "{shown}");
     assert!(shown.lines().all(|l| l.len() <= 60), "{shown}");
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn history_keeps_combined_marks_whole_and_cuts_the_message() {
+    let env = started();
+    put(&env, "a.txt", "a\n");
+    run_at(&env, None, &["save", "A"]);
+    run_at(&env, None, &["line", "new", "side"]);
+    put(&env, "b.txt", "b\n");
+    run_at(&env, None, &["save", "B"]);
+    let side = env.state().1.lines["side"].to_hex();
+    run_at(&env, None, &["goto", "main"]);
+    put(&env, "c.txt", "c\n");
+    run_at(&env, None, &["save", "C"]);
+    run_at(
+        &env,
+        None,
+        &["combine", "side", "word ".repeat(30).trim_end()],
+    );
+    let (shown, _) = run_at(&env, Some(70), &["history"]);
+    let row = shown.lines().nth(2).unwrap();
+    let marks = format!("...  [main]  [combined {}]", &side[..12]);
+    assert!(row.ends_with(&marks), "{shown}");
+    assert!(row.contains("  word"), "{shown}");
+    assert!(shown.lines().all(|l| l.len() <= 70), "{shown}");
+
+    // With more marks than fit, the message is cut to nothing and the marks run long, whole.
+    let others: Vec<opal_core::id::Id> = (1..40)
+        .map(|n| opal_core::id::hash_content(format!("parent {n}").as_bytes()))
+        .collect();
+    support::plant_combined(env.root(), "Octopus", &others);
+    let (shown, _) = run_at(&env, Some(70), &["history"]);
+    let row = shown.lines().nth(2).unwrap();
+    let marks: String = (others.iter())
+        .map(|p| format!("  [combined {}]", p.short_hex()))
+        .collect();
+    assert!(row.ends_with(&format!("  [main]{marks}")), "{shown}");
+    assert!(!row.contains("Octopus"), "{shown}");
+    assert!(shown.lines().skip(3).all(|l| l.len() <= 70), "{shown}");
 }
 
 #[test]
@@ -1175,8 +1220,14 @@ fn changed_your_mind_shows_only_on_a_terminal() {
     put(&env, "a.txt", "mine\n");
     run_at(&env, None, &["shelf"]);
     assert!(on_terminal(&["unshelf"]).ends_with(offered));
-    // Nothing thrown away is nothing to change your mind about; other commands don't offer it.
     run_at(&env, None, &["discard"]);
+    run_at(&env, None, &["line", "new", "side"]);
+    put(&env, "side.txt", "side\n");
+    run_at(&env, None, &["save", "On side"]);
+    run_at(&env, None, &["goto", "main"]);
+    assert!(on_terminal(&["combine", "side"]).ends_with(offered));
+    // Nothing thrown away is nothing to change your mind about; other commands don't offer it.
+    assert_eq!(on_terminal(&["combine", "side"]), "");
     assert_eq!(on_terminal(&["discard"]), "");
     put(&env, "a.txt", "third\n");
     for args in [&["save", "Third"][..], &["undo"], &["redo"], &["tidy"]] {
@@ -1792,6 +1843,16 @@ fn project_text_is_escaped_with_colour_on() {
     for part in [shown_name, shown_message, author, shown_tag] {
         assert!(said.contains(part), "{part}: {said}");
     }
+    // Listed from a save, its message is in the heading too.
+    let tip = support::main_tip(&env).to_hex();
+    let said = same_with_colour_on(&env, &["history", &tip[..12]], 0);
+    assert!(
+        said.contains(&format!("\"{shown_message}\", newest first:")),
+        "{said}"
+    );
+    for part in [author, shown_tag] {
+        assert!(said.contains(part), "{part}: {said}");
+    }
     let said = same_with_colour_on(&env, &["undo", "--list"], 0);
     assert!(said.contains("\"\\x1b[2J"), "{said}");
     let said = same_with_colour_on(&env, &["setup"], 0);
@@ -2030,6 +2091,113 @@ fn cutting_a_path_never_cuts_through_an_escaped_character() {
     // With colour on, the cut forms are escaped the same.
     let said = same_with_colour_on(&env, &["history"], 0);
     assert!(said.contains('…'), "{said}");
+}
+
+/// `combine` paints as `goto` does: the outcome's verb green and bold, a line's or a tag's name
+/// blue, a change ID magenta and bold; and on a terminal it shows its progress.
+#[cfg(feature = "fault-injection")]
+#[test]
+fn combine_paints_its_outcome_and_shows_progress() {
+    let env = started();
+    put(&env, "a.txt", "a\n");
+    run_at(&env, None, &["save", "First"]);
+    run_at(&env, None, &["line", "new", "side"]);
+    let on_side = |env: &Env, file: &str, message: &str| {
+        run_at(env, None, &["goto", "side"]);
+        put(env, file, "side\n");
+        run_at(env, None, &["save", message]);
+        run_at(env, None, &["goto", "main"]);
+    };
+    on_side(&env, "b.txt", "On side");
+    let combine = |target: &str| {
+        let out = opal_on_a_terminal(&env, env.root())
+            .env("OPALRO_PROGRESS_QUIET_MS", "0")
+            .args(["combine", target])
+            .output()
+            .unwrap();
+        let said = text(&out.stderr);
+        assert_eq!(out.status.code(), Some(0), "{said}");
+        assert!(said.starts_with("\rCombining"), "{said:?}");
+        text(&out.stdout)
+    };
+    let shown = combine("side");
+    assert!(
+        shown.starts_with(
+            "\x1b[1;32mMoved\x1b[0m \x1b[34mmain\x1b[0m forward to \x1b[34mside\x1b[0m: save \
+             \x1b[1;35m"
+        ),
+        "{shown:?}"
+    );
+    // A tag's name is painted as a line's.
+    on_side(&env, "c.txt", "Side two");
+    run_at(&env, None, &["tag", "v1.0", "--save", "side"]);
+    put(&env, "d.txt", "main\n");
+    run_at(&env, None, &["save", "Main two"]);
+    let shown = combine("v1.0");
+    assert!(
+        shown.starts_with(
+            "\x1b[1;32mCombined\x1b[0m \x1b[34mv1.0\x1b[0m into \x1b[34mmain\x1b[0m: save \
+             \x1b[1;35m"
+        ),
+        "{shown:?}"
+    );
+    // A save named by its ID is named by its change ID.
+    on_side(&env, "e.txt", "Side three");
+    let shown = combine(&tip_of(&env, "side"));
+    assert!(
+        shown.starts_with("\x1b[1;32mCombined\x1b[0m \x1b[1;35m"),
+        "{shown:?}"
+    );
+    assert!(
+        shown.contains("\x1b[0m into \x1b[34mmain\x1b[0m: save \x1b[1;35m"),
+        "{shown:?}"
+    );
+}
+
+/// A long line name or target on a narrow terminal: as with `goto`, the outcome line is kept
+/// whole and the details wrap within the width, saying what a log says.
+#[cfg(feature = "fault-injection")]
+#[test]
+fn combine_with_a_long_line_name_on_a_narrow_terminal_wraps_as_goto_does() {
+    // `LONG_LINE` one save ahead of `main`; with `both`, `main` one save ahead of where they part.
+    let setup = |both: bool, on: &'static str| {
+        move |env: &Env| {
+            put(env, "a.txt", "a\n");
+            run_at(env, None, &["save", "First"]);
+            run_at(env, None, &["line", "new", LONG_LINE]);
+            put(env, "b.txt", "b\n");
+            run_at(env, None, &["save", "Away"]);
+            run_at(env, None, &["goto", "main"]);
+            if both {
+                put(env, "c.txt", "c\n");
+                run_at(env, None, &["save", "Here"]);
+            }
+            run_at(env, None, &["goto", on]);
+        }
+    };
+    // Each project has its own change IDs: the word after `save` is left out.
+    let words = |s: &str| {
+        let words: Vec<&str> = s.split_whitespace().collect();
+        let kept = (0..words.len()).filter(|&n| n == 0 || words[n - 1] != "save");
+        kept.map(|n| words[n]).collect::<Vec<_>>().join(" ")
+    };
+    for (setup, args, wraps) in [
+        (setup(true, "main"), &["goto", LONG_LINE][..], false),
+        (setup(true, "main"), &["combine", LONG_LINE], false),
+        (setup(true, LONG_LINE), &["combine", "main"], false),
+        // Forward: the detail names both, and wraps.
+        (setup(false, "main"), &["combine", LONG_LINE], true),
+    ] {
+        let (logged, shown) = in_a_log_and_at_60(setup, args);
+        let first = |s: &str| words(s.lines().next().unwrap());
+        assert_eq!(first(&logged), first(&shown), "{args:?}");
+        for line in shown.lines().skip(1) {
+            assert!(line.chars().count() <= 60, "{args:?}: {shown}");
+        }
+        assert_eq!(words(&logged), words(&shown), "{args:?}");
+        let more_rows = shown.lines().count() > logged.lines().count();
+        assert_eq!(more_rows, wraps, "{args:?}: {shown}");
+    }
 }
 
 /// Runs `setup` in a project just started, then `args`, in a log and on a terminal 60 columns

@@ -266,16 +266,25 @@ pub(crate) fn overlay(
     changes: &BTreeMap<String, Option<Put>>,
     packs: &mut PackSet,
 ) -> Result<Id, SaveError> {
-    overlay_with(store, base_root, changes, &mut |listing| {
-        store_listing(store, packs, listing)
-    })
+    overlay_with(
+        store,
+        &HashMap::new(),
+        base_root,
+        changes,
+        false,
+        &mut |listing| store_listing(store, packs, listing),
+    )
 }
 
-/// [`overlay`], with each listing it builds handed to `keep`, which gives its ID.
-fn overlay_with(
+/// [`overlay`], with the base's folders read from `unstored` first, and each listing it builds
+/// handed to `keep`, which gives its ID. With `drop_emptied`, a folder the changes leave empty
+/// goes too.
+pub(crate) fn overlay_with(
     store: &Store,
+    unstored: &HashMap<Id, Listing>,
     base_root: Id,
     changes: &BTreeMap<String, Option<Put>>,
+    drop_emptied: bool,
     keep: &mut dyn FnMut(&Listing) -> Result<Id, SaveError>,
 ) -> Result<Id, SaveError> {
     let is_folder = |c: &Option<Put>| matches!(c, Some((EntryKind::Folder, ..)));
@@ -304,8 +313,7 @@ fn overlay_with(
             .or_default()
             .push((name.to_owned(), entry));
     }
-    let unstored = HashMap::new();
-    let mut base = Tree::new(store, &unstored, base_root, EXACT);
+    let mut base = Tree::new(store, unstored, base_root, EXACT);
     let mut paths: Vec<String> = todo.keys().filter(|p| !p.is_empty()).cloned().collect();
     // The deepest first, so each folder is built before the one holding it.
     paths.sort_by_key(|p| std::cmp::Reverse(p.len()));
@@ -315,11 +323,16 @@ fn overlay_with(
         let had = folder.is_some();
         let listing = changed(folder.map(|f| &f.listing), here)?;
         // Made only on the way to changes that put nothing in it, it doesn't come to be.
-        if !had && listing.entries().is_empty() && !changes.contains_key(&path) {
+        let (up, name) = path.rsplit_once('/').unwrap_or(("", &path));
+        if (!had || drop_emptied) && listing.entries().is_empty() && !changes.contains_key(&path) {
+            if had {
+                todo.entry(up.to_owned())
+                    .or_default()
+                    .push((name.to_owned(), None));
+            }
             continue;
         }
         let id = keep(&listing)?;
-        let (up, name) = path.rsplit_once('/').unwrap_or(("", &path));
         let entry = Entry {
             name: name.to_owned(),
             kind: EntryKind::Folder,
@@ -436,11 +449,18 @@ fn placeholders(
                 .collect()
         };
         let mut listings = HashMap::new();
-        let root = overlay_with(store, base_root, &held, &mut |listing| {
-            let id = listing.id();
-            listings.insert(id, listing.clone());
-            Ok(id)
-        })?;
+        let root = overlay_with(
+            store,
+            &HashMap::new(),
+            base_root,
+            &held,
+            false,
+            &mut |listing| {
+                let id = listing.id();
+                listings.insert(id, listing.clone());
+                Ok(id)
+            },
+        )?;
         let mut kept = Tree::new(store, &listings, root, EXACT);
         let mut more = Vec::new();
         for (path, target) in links {

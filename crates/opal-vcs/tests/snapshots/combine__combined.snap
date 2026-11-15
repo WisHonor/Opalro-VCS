@@ -1,0 +1,45 @@
+---
+source: crates/opal-vcs/tests/combine.rs
+expression: "support::masked(combined)"
+---
+{
+  "line": "main",
+  "merged_files": [
+    "a.txt"
+  ],
+  "not_written": [],
+  "opalro_json": 1,
+  "placeholders": [],
+  "removed": 0,
+  "result": "combined",
+  "safety_copies": 0,
+  "save": {
+    "author": {
+      "email": "test@example.com",
+      "name": "Test",
+      "time_ms": "[redacted]",
+      "tz_offset_min": "[redacted]"
+    },
+    "change_id": "[redacted]",
+    "change_id_short": "[redacted]",
+    "id": "[redacted]",
+    "line": "main",
+    "message": "Combine side into main",
+    "parents": [
+      "[redacted]",
+      "[redacted]"
+    ],
+    "saver": {
+      "email": "test@example.com",
+      "name": "Test",
+      "time_ms": "[redacted]",
+      "tz_offset_min": "[redacted]"
+    }
+  },
+  "starts": [
+    "[redacted]"
+  ],
+  "warnings": [],
+  "with": "[redacted]",
+  "written": 1
+}

@@ -45,6 +45,7 @@ pub fn save_json(id: &Id, save: &Save, short: &str) -> Value {
         "author": person_json(&save.author),
         "saver": person_json(&save.saver),
         "line": save.line(),
+        "parents": save.parents.iter().map(Id::to_hex).collect::<Vec<_>>(),
     })
 }
 

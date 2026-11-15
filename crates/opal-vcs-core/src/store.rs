@@ -8,7 +8,7 @@ use crate::encoding::DecodeError;
 use crate::id::{ContentHasher, Id};
 use crate::listing::Listing;
 use crate::pack::{HashingWriter, IndexEntry, ObjectKind, PackError, PackReader};
-use crate::save::Save;
+use crate::save::{Links, Save};
 use crate::text::escape;
 use crate::warning::{self, Warning};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
@@ -899,6 +899,22 @@ impl Store {
         self.saves_read
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(Save::decode(
+            &self.read_record(id, ObjectKind::Save)?,
+            signatures_allowed,
+        )?)
+    }
+
+    /// A save's parents, time and change ID, read and checked as `save` does, without building
+    /// its move notes.
+    pub(crate) fn save_links(
+        &self,
+        id: &Id,
+        signatures_allowed: bool,
+    ) -> Result<Links, StoreError> {
+        #[cfg(test)]
+        self.saves_read
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        Ok(Save::links(
             &self.read_record(id, ObjectKind::Save)?,
             signatures_allowed,
         )?)

@@ -24,6 +24,9 @@ expression: doc
     "id": "[redacted]",
     "line": null,
     "message": "Feature\n",
+    "parents": [
+      "[redacted]"
+    ],
     "saver": {
       "email": "test@example.com",
       "name": "Test",

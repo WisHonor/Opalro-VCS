@@ -277,7 +277,6 @@ fn each_explained_word_explains() {
         "rm",
         "mv",
         "reset",
-        "merge",
         "rebase",
         "cherry-pick",
         "blame",
@@ -302,6 +301,111 @@ fn each_explained_word_explains() {
         assert!(said.contains("after v0.2"), "{word}: {said}");
         assert!(said.contains("opalro save --amend"), "{word}: {said}");
     }
+}
+
+/// The project with a line `side` one save ahead of `main`, which it is on.
+fn with_side_ahead() -> Env {
+    let env = project();
+    ok(&env, &["line", "new", "side"]);
+    write(&env, "c.txt", "c\n");
+    ok(&env, &["save", "C"]);
+    ok(&env, &["goto", "main"]);
+    env
+}
+
+#[test]
+fn merge_runs_combine() {
+    let env = with_side_ahead();
+    let shown = ok(&env, &["merge", "side"]);
+    assert!(
+        shown.starts_with("Moved main forward to side: save "),
+        "{shown}"
+    );
+    assert_eq!(head(&env).1.command, "combine");
+    let doc = doc(&run(&env, &["merge", "side", "--json"]).stdout);
+    assert_eq!(doc["result"], "nothing", "{doc}");
+}
+
+#[test]
+fn merge_abort_is_explained() {
+    let env = with_side_ahead();
+    let said = explained(&env, &["merge", "--abort"]);
+    assert!(said.contains("nothing to abort"), "{said}");
+    assert!(said.contains("opalro undo"), "{said}");
+}
+
+#[test]
+fn merge_no_ff_and_squash_are_explained() {
+    let env = with_side_ahead();
+    let said = explained(&env, &["merge", "--no-ff", "side"]);
+    assert!(
+        said.contains("can't make a combined save every time"),
+        "{said}"
+    );
+    let said = explained(&env, &["merge", "side", "--squash"]);
+    assert!(said.contains("as one plain save"), "{said}");
+    assert_eq!(
+        env.state().1.lines["main"],
+        support::main_tip(&env),
+        "nothing moved"
+    );
+    assert_ne!(env.state().1.lines["main"], env.state().1.lines["side"]);
+}
+
+#[test]
+fn merge_with_another_option_is_refused_as_unknown() {
+    let env = with_side_ahead();
+    let before = head(&env);
+    let out = run(&env, &["merge", "--edit", "side"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(text(&out.stdout), "");
+    assert!(
+        text(&out.stderr).contains("--edit"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(head(&env), before);
+}
+
+#[test]
+fn merge_of_two_lines_is_explained_and_changes_nothing() {
+    let env = with_side_ahead();
+    ok(&env, &["line", "new", "other"]);
+    ok(&env, &["goto", "main"]);
+    let lines = env.state().1.lines;
+    for args in [
+        &["merge", "side", "other"][..],
+        &["merge", "--json", "side", "other"],
+        &["merge", "-m", "x", "side"],
+    ] {
+        let said = explained(&env, args);
+        assert_eq!(
+            said,
+            "Opalro combines one line at a time.\n\
+             `opalro combine <line>` brings one line's work into the line you're on;\n\
+             a second word after it is the combined save's message.\n",
+            "{args:?}"
+        );
+    }
+    assert_eq!(env.state().1.lines, lines, "no line moved");
+    // One line is still combined, and none is refused as `combine` with none is.
+    ok(&env, &["merge", "side"]);
+    assert_eq!(head(&env).1.command, "combine");
+    let merge = run(&env, &["merge"]);
+    let combine = run(&env, &["combine"]);
+    assert_eq!(merge.status.code(), Some(2));
+    assert_eq!(merge.status.code(), combine.status.code());
+    assert_eq!(text(&merge.stdout), "");
+    assert_eq!(text(&merge.stderr), text(&combine.stderr));
+}
+
+#[test]
+fn blame_is_still_explained() {
+    let env = project();
+    let said = explained(&env, &["blame", "a.txt"]);
+    assert!(said.contains("who changed each line"), "{said}");
+    assert!(said.contains("opalro history"), "{said}");
+    assert!(!said.contains("v0."), "{said}");
 }
 
 /// The project's lines, and the one it is on.
@@ -686,7 +790,7 @@ fn help_never_names_a_git_word() {
     ];
     for command in [
         "start", "setup", "import", "save", "status", "changes", "history", "show", "line", "goto",
-        "discard", "undo", "redo", "shelf", "unshelf", "tidy", "verify",
+        "combine", "discard", "undo", "redo", "shelf", "unshelf", "tidy", "verify",
     ] {
         helps.push(ok(&env, &[command, "--help"]));
         helps.push(ok(&env, &["help", command]));

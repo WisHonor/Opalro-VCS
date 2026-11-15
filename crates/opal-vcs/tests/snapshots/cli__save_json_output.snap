@@ -20,6 +20,9 @@ expression: json
     "id": "[redacted]",
     "line": "main",
     "message": "Add a",
+    "parents": [
+      "[redacted]"
+    ],
     "saver": {
       "email": "test@example.com",
       "name": "Test",

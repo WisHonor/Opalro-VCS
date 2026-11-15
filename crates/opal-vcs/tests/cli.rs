@@ -630,6 +630,9 @@ fn start_json_output() {
     for key in ["id", "change_id", "change_id_short"] {
         redact(&mut save[key]);
     }
+    for parent in save["parents"].as_array_mut().unwrap() {
+        redact(parent);
+    }
     for person in ["author", "saver"] {
         for key in ["time_ms", "tz_offset_min"] {
             redact(&mut save[person][key]);
@@ -1260,6 +1263,9 @@ fn save_json_output() {
     for key in ["id", "change_id", "change_id_short"] {
         redact(&mut save[key]);
     }
+    for parent in save["parents"].as_array_mut().unwrap() {
+        redact(parent);
+    }
     for person in ["author", "saver"] {
         for key in ["time_ms", "tz_offset_min"] {
             redact(&mut save[person][key]);
@@ -1321,6 +1327,9 @@ fn interrupted_save_changes_nothing_until_its_head_moves() {
 fn redact_save(save: &mut serde_json::Value) {
     for key in ["id", "change_id", "change_id_short"] {
         save[key] = "[redacted]".into();
+    }
+    for parent in save["parents"].as_array_mut().unwrap() {
+        *parent = "[redacted]".into();
     }
     for person in ["author", "saver"] {
         for key in ["time_ms", "tz_offset_min"] {
@@ -1471,21 +1480,24 @@ fn show_with_no_file_changes() {
     assert!(stdout_of(&env, &["show"]).ends_with("\n\nNo files changed.\n"));
 }
 
-/// The 12 hex digits `opalro show` names after `After`, the first parent's first.
+/// The 12 hex digits `opalro show` names after `After` and on the `Combined` rows under it, the
+/// first parent's first.
 fn after(env: &Env, what: &[&str]) -> Vec<String> {
     let out = stdout_of(env, &[&["show"], what].concat());
-    let line = out.lines().find(|l| l.starts_with("    After ")).unwrap();
-    line.split_whitespace()
-        .map(|w| w.trim_end_matches(','))
-        .filter(|w| w.len() == 12 && w.bytes().all(|b| b.is_ascii_hexdigit()))
+    (out.lines())
+        .skip_while(|l| !l.starts_with("    After "))
+        .take_while(|l| !l.starts_with("    Fingerprint "))
+        .filter_map(|l| l.split_whitespace().find(|w| w.len() == 12))
+        .filter(|w| w.bytes().all(|b| b.is_ascii_hexdigit()))
         .map(str::to_owned)
         .collect()
 }
 
-/// `opalro show` takes back the fingerprints it names after `After` where a line's history reaches
-/// that save, and only then: a merge's other parent, or the parent of a save past every line.
+/// `opalro show` takes back the fingerprints it names after `After` and on its `Combined` rows,
+/// wherever a line's history or the save the project is at reaches that save through any parent:
+/// a merge's other parent whose branch is gone, or the parent of a save past every line.
 #[test]
-fn show_takes_back_the_fingerprints_it_names_where_a_lines_history_reaches_them() {
+fn show_takes_back_the_fingerprints_it_names_through_every_parent_and_from_a_detached_save() {
     for keep_the_branch in [true, false] {
         let env = Env(support::Env::new());
         env.commit("a.txt", "a\n", "First");
@@ -1502,11 +1514,16 @@ fn show_takes_back_the_fingerprints_it_names_where_a_lines_history_reaches_them(
         assert_eq!(parents.len(), 2, "{parents:?}");
         assert_eq!(after(&env, &[&parents[0]]).len(), 1);
         let out = env.opalro().args(["show", &parents[1]]).output().unwrap();
-        let taken_back = out.status.code() == Some(0);
-        assert_eq!(taken_back, keep_the_branch, "{}", text(&out.stderr));
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        let heading = text(&out.stdout)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_owned();
+        assert!(heading.ends_with(" \"Side\""), "{heading}");
     }
-    // A detached Git HEAD two commits past main: Opalro is at its save, whose parent no line's
-    // history reaches, so the digits `show` names for it aren't taken back.
+    // A detached Git HEAD two commits past main: Opalro is at its save, whose parent only that
+    // save reaches, and the digits `show` names for it are taken back from there.
     let env = Env(support::Env::new());
     env.commit("a.txt", "a\n", "A");
     env.git(&["checkout", "-q", "--detach"]);
@@ -1516,7 +1533,13 @@ fn show_takes_back_the_fingerprints_it_names_where_a_lines_history_reaches_them(
     let b = &after(&env, &[])[0];
     assert!(stdout_of(&env, &["show"]).contains("\"B\""));
     let out = env.opalro().args(["show", b]).output().unwrap();
-    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let heading = text(&out.stdout)
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(heading.ends_with(" \"B\""), "{heading}");
     // A save made on a new line from an older one: its parent is on main's history.
     let env = project_with_two_saves();
     let history: serde_json::Value =
@@ -2867,7 +2890,7 @@ fn a_command_that_did_its_work_but_couldnt_print_says_so() {
 }
 
 /// Every command, and the options each takes besides `--json` and `--help`.
-const COMMANDS: [(&str, &[&str]); 18] = [
+const COMMANDS: [(&str, &[&str]); 19] = [
     ("status", &["--full"]),
     ("save", &["--accept-crlf", "--line", "--yes", "--amend"]),
     ("changes", &["--save"]),
@@ -2877,6 +2900,7 @@ const COMMANDS: [(&str, &[&str]); 18] = [
     ("redo", &["--shelve"]),
     ("line", &[]),
     ("tag", &["--save", "--delete", "--yes"]),
+    ("combine", &[]),
     ("shelf", &["--list"]),
     ("unshelf", &[]),
     ("discard", &[]),

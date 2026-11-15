@@ -1,0 +1,40 @@
+---
+source: crates/opal-vcs/tests/combine.rs
+expression: "support::masked(forward)"
+---
+{
+  "line": "main",
+  "merged_files": [],
+  "not_written": [],
+  "opalro_json": 1,
+  "placeholders": [],
+  "removed": 0,
+  "result": "forward",
+  "safety_copies": 0,
+  "save": {
+    "author": {
+      "email": "test@example.com",
+      "name": "Test",
+      "time_ms": "[redacted]",
+      "tz_offset_min": "[redacted]"
+    },
+    "change_id": "[redacted]",
+    "change_id_short": "[redacted]",
+    "id": "[redacted]",
+    "line": "ahead",
+    "message": "B",
+    "parents": [
+      "[redacted]"
+    ],
+    "saver": {
+      "email": "test@example.com",
+      "name": "Test",
+      "time_ms": "[redacted]",
+      "tz_offset_min": "[redacted]"
+    }
+  },
+  "starts": [],
+  "warnings": [],
+  "with": "[redacted]",
+  "written": 1
+}

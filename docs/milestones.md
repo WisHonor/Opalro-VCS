@@ -490,27 +490,29 @@ Planned on 2026-11-14 after decisions [158](decisions/158-making-renaming-and-de
 
 Planned on 2026-11-14 after decisions [164](decisions/164-where-two-lines-parted.md) to [169](decisions/169-saves-reached-through-a-combine.md), which Claude made at the owner's request while the owner was away: [plans/2026-11-14-milestone-8-combine.md](plans/2026-11-14-milestone-8-combine.md). Each step ends with tests passing on Windows, macOS and Linux; the plan's task numbers are in brackets. A ✅ marks a step that is done.
 
-**1. Where two lines parted** (Task 1)
-- Every common starting point of two saves, exact whatever the saves' clocks say ([decision 164](decisions/164-where-two-lines-parted.md)).
+**1. Where two lines parted** ✅ (2026-11-14; Task 1)
+- Every common starting point of two saves, exact whatever the saves' clocks say ([decision 164](decisions/164-where-two-lines-parted.md)): with saves dated alike or clocks running backwards the walk can find extra candidates, and an exact check drops them ([decision 170](decisions/170-what-building-milestone-8-refined.md)).
 - *Done when:* it agrees with a full walk on generated histories and with `git merge-base --all` on imported ones, and reads only what the two sides don't share.
 
-**2. Merging** (Tasks 2 to 4)
-- Which rule in `opalro.toml` decides for a file; text merged line by line ([decision 167](decisions/167-merging-text-line-by-line.md)); two versions of the project merged entry by entry ([decision 166](decisions/166-merging-two-versions-of-the-project.md)).
-- *Done when:* the text merge gives `git merge-file`'s result wherever lines don't repeat, the tree merge agrees with a model written apart from it, and nothing is stored when a merge is refused.
+**2. Merging** ✅ (2026-11-14; Tasks 2 to 4)
+- Which rule in `opalro.toml` decides for a file, its patterns matching whatever their letter case; text merged line by line ([decision 167](decisions/167-merging-text-line-by-line.md)); two versions of the project merged entry by entry, every pair of names alike the two sides bring refused ([decision 166](decisions/166-merging-two-versions-of-the-project.md)).
+- *Done when:* the text merge gives `git merge-file`'s result wherever lines don't repeat (where they repeat, the two can differ, and the differences are counted: decision 170), the tree merge agrees with a model written apart from it, and nothing is stored when a merge is refused.
 
-**3. Moves** (Tasks 5 and 6)
-- `save` notes a move when Opalro is certain of it, and a combine follows the notes ([decision 168](decisions/168-moves-in-saves-and-in-combines.md)).
+**3. Moves** ✅ (2026-11-14; Tasks 5 and 6)
+- `save` notes a move when Opalro is certain of it, within bounds, and never fails for its notes; a combine follows the notes true of their own saves, and identical contents for the files the notes don't account for, warning when that was too much to follow ([decisions 168](decisions/168-moves-in-saves-and-in-combines.md) and 170).
 - *Done when:* a change to a moved file lands where the file went, and a move against a removal is a conflict.
 
-**4. `opalro combine`** (Tasks 7 and 8)
-- Nothing to do, the line moved forward, or a combined save, switched to as `goto` switches; one diary step; Git's word `merge` ([decision 165](decisions/165-combine-the-command.md)).
+**4. `opalro combine`** ✅ (2026-11-14; Tasks 7 and 8)
+- Nothing to do, the line moved forward, or a combined save, switched to as `goto` switches; one diary step; Git's word `merge`, with two lines explained, not run ([decisions 165](decisions/165-combine-the-command.md) and 170).
 - *Done when:* a combine stopped at any point is finished or never happened, `undo` takes it back, unsaved work is never overwritten, and a combine that would leave a conflict stops and changes nothing.
 
-**5. Saves a combine brought in** (Tasks 9 and 10)
+**5. Saves a combine brought in** ✅ (2026-11-14; Tasks 9 and 10)
 - A save is found by its ID through every parent; `history` marks a combined save and lists from another place; `show` names the other parent ([decision 169](decisions/169-saves-reached-through-a-combine.md)).
 
-**6. Proof** (Tasks 11 and 12)
-- The model test combines lines among its random steps; whole combines are compared with `git merge` on generated histories.
+**6. Proof** ✅ (2026-11-14; Tasks 11 and 12)
+- The model test combines lines among its random steps; whole combines are compared with `git merge` on generated histories, which showed one accepted difference (a file moved and changed in one save, and removed on the other line, is kept without a question; decision 170) and a combine that left an emptied folder behind, now fixed.
 
-**7. Docs, red team, review and merge** (Tasks 13 to 15)
-- *Done when:* every proven finding is fixed or ruled on, every document matches the code, and the branch is merged into `v0.2`.
+**7. Docs, red team, review and merge** ✅ (2026-11-14; Tasks 13 to 15)
+- **Docs** ✅: the design, the guide, [security.md](security.md), [testing.md](testing.md) and [benchmarks.md](benchmarks.md) §12 and §13 say what is built; [terminal.md](terminal.md), [json.md](json.md) and [storage-format.md](storage-format.md) were written with the code.
+- **Red team** ✅ (2026-11-14): two sessions from the sandbox, RT19 (2 Low) and RT20 on its fixes (1 Medium), every finding fixed or ruled on ([decisions 171](decisions/171-red-team-m8-rulings.md) and [172](decisions/172-red-team-m8-session-2-rulings.md); [security.md](security.md) §6). Left for the owner: reading very large saves stays slow.
+- **Review and merge** ✅ (2026-11-14): a whole-branch review found nothing that loses or mixes what a person saved; its one open point became [decision 173](decisions/173-the-rules-of-both-lines-decide-what-a-combine-merges.md) (a combine asks the rules of both lines); the calls made on the way, with twenty-one for the owner to confirm, are in [the rulings](plans/2026-11-14-milestone-8-rulings.md); merged into `v0.2`.
