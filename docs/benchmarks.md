@@ -1121,9 +1121,29 @@ At the second save (no conflict), 12 rounds of 3 runs each, the order of the two
 - These are a laptop's times, not a gate's. What does not depend on a clock is in the engine's tests, which count what is read: `a_project_without_conflicts_reads_nothing_more` (in `crates/opal-vcs-core/src/status.rs`) and `save_in_a_project_without_conflicts_reads_nothing_more` (in `crates/opal-vcs-core/src/snapshot.rs`) ([testing.md](testing.md) §3).
 - The Nightly workflow's speed gates (Opalro against Git on the code set) passed on `6392c1b`, after the tasks that changed what `status` and `save` read ([run 43694818719](https://github.com/WisHonor/Opalro-VCS/actions/runs/43694818719)): Linux `status` at 1.887 times Git against a limit of 2.
 
+### Very many wide conflicts, measured by the red team
+
+The times above are from `2b639a4`, before [decision 182](decisions/182-red-team-m9-rulings.md) changed what `status` and `save` keep of a record. A project of very many conflicts, each naming its own record of the largest size (255 versions, all absent but one), was measured by the two red-team sessions on Linux, in their no-network container (4 GB, 4 CPUs), with a debug build: peak memory, read by the process itself. Before the fix, at `bdbfaf9` ([report](redteam/2026-11-15-milestone-9.md)):
+
+| Conflict entries | Store | `status` | `goto main` | `save` |
+|---|---|---|---|---|
+| 20,000 ordinary files (no conflict) | 4 KB | 21 MB | 21 MB | 16 MB |
+| 20,000 wide records | 3.4 MB | 306 MB, 2.4 s | 66 MB | 306 MB |
+| 250,000 ordinary files | 4 KB | 86 MB | 80 MB | 16 MB |
+| 250,000 wide records | 43 MB | stopped at 3,075 MB (`memory allocation of 12288 bytes failed`), 44 s | 95 MB | 3,107 MB |
+
+After the fix, at `76ba7bb` ([report](redteam/2026-11-15-milestone-9-session-2.md); [decision 183](decisions/183-red-team-m9-session-2-rulings.md)):
+
+| | `status` | `save` | `resolve` | `goto` | `tidy` | `verify` |
+|---|---|---|---|---|---|---|
+| 20,000 records | 84 MB | 85 MB | 84 MB | 83 MB | | |
+| 250,000 records (43 MB of store) | 196 MB | 182 MB | 196 MB | 95 MB | 111 MB | 336 MB |
+| 250,000, before the fix | stopped at 3,075 MB | 3,107 MB | | 95 MB | | |
+
+Time grows in a straight line with the number of conflicts. `goto` to the save of 250,000 took 70 s where the same save of files takes 5; its parts were not timed (the follow-ups list).
+
 ### Not measured
 
-- A project with very many conflicts (thousands), and a record of the largest size (255 versions): the red-team session measures what a planted save can cost.
-- Linux and macOS: the numbers above are from one Windows laptop.
+- Linux and macOS for the times above: they are from one Windows laptop.
 
 A Nightly run on the milestone's last commit is still to come.

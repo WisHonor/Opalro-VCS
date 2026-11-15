@@ -1372,7 +1372,7 @@ hint: in Opalro, commit is save; it takes new files too: opalro save "message"
 | `git branch <name>`; `git checkout -b`, `git switch -c` with a starting point | `opalro goto <save>`, then `opalro line new <name>` | explained |
 | `git revert` | `opalro reverse`, in v0.3; until then `opalro undo` | explained |
 | `git merge <target>` | `opalro combine <target>` | runs; `merge --no-ff`, `--squash` and more than one line are explained, and other options refused |
-| `git merge --abort` | `opalro undo`, which takes back the last combine, conflicts and all | explained |
+| `git merge --abort` | `opalro undo`, which takes back the last step: right after a combine, the combine, conflicts and all | explained |
 | `git merge --continue` | nothing to continue: `opalro resolve` records the conflicts you fixed | explained |
 | `git checkout --ours <file>`, `git restore --ours <file>` | `opalro resolve <file> --keep mine` | explained |
 | `git checkout --theirs <file>`, `git restore --theirs <file>` | `opalro resolve <file> --keep theirs` | explained |
