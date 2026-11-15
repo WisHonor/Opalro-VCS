@@ -9,6 +9,7 @@ mod import_output;
 mod line_output;
 mod output;
 mod progress;
+mod resolve_output;
 mod setup_output;
 mod shelf_output;
 mod show_output;
@@ -44,6 +45,7 @@ use opal_core::lines::{self, LineError, resolve_target};
 use opal_core::names::{GivenPathError, project_given, project_path};
 use opal_core::presets::{Looked, Preset, suggested};
 use opal_core::repo::{RepoError, Repository, elevated_only_note, resolved};
+use opal_core::resolve::{self as resolving, Pick, ResolveOutcome, ResolveRequest, Side};
 use opal_core::save::Save;
 use opal_core::setup::{SetupError, apply_setup, look_at, plan_setup};
 use opal_core::shelf::{self, Shelved};
@@ -169,6 +171,26 @@ enum Command {
         #[arg(long)]
         only_if_clean: bool,
     },
+    /// Record fixed conflicts: all the folder shows fixed, or these paths.
+    Resolve {
+        /// Files and folders in conflict; a folder means every conflict below it.
+        paths: Vec<PathBuf>,
+        /// Take this side's version, whole, at each path.
+        #[arg(long, value_enum, requires = "paths", conflicts_with = "copy")]
+        keep: Option<KeepArg>,
+        /// Write one version of one file somewhere else, to look at; records nothing.
+        #[arg(long, value_enum, requires = "to")]
+        copy: Option<CopyArg>,
+        /// Where --copy writes; it must not exist.
+        #[arg(long, value_name = "FILE", requires = "copy")]
+        to: Option<PathBuf>,
+        /// Record files that still hold marked places, or a large fix, without asking.
+        #[arg(long)]
+        yes: bool,
+        /// Record files Git rewrote with CRLF as they are.
+        #[arg(long)]
+        accept_crlf: bool,
+    },
     /// Throw away your unsaved changes: in these files and folders, or everywhere. A safety copy
     /// of each changed or new file is kept.
     Discard {
@@ -255,6 +277,38 @@ impl From<PresetArg> for Preset {
     }
 }
 
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum KeepArg {
+    Mine,
+    Theirs,
+}
+
+impl From<KeepArg> for Side {
+    fn from(k: KeepArg) -> Side {
+        match k {
+            KeepArg::Mine => Side::Mine,
+            KeepArg::Theirs => Side::Theirs,
+        }
+    }
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum CopyArg {
+    Mine,
+    Theirs,
+    Before,
+}
+
+impl From<CopyArg> for Pick {
+    fn from(c: CopyArg) -> Pick {
+        match c {
+            CopyArg::Mine => Pick::Mine,
+            CopyArg::Theirs => Pick::Theirs,
+            CopyArg::Before => Pick::Before,
+        }
+    }
+}
+
 #[derive(clap::Args)]
 struct SaveArgs {
     /// What the save holds, in a few words.
@@ -325,6 +379,16 @@ impl From<SaveError> for Failure {
 
 impl From<ResolveError> for Failure {
     fn from(e: ResolveError) -> Failure {
+        Failure {
+            hint: e.hint(),
+            message: e.to_string(),
+            printed: false,
+        }
+    }
+}
+
+impl From<resolving::ResolveError> for Failure {
+    fn from(e: resolving::ResolveError) -> Failure {
         Failure {
             hint: e.hint(),
             message: e.to_string(),
@@ -2382,6 +2446,130 @@ fn combine_named(
     ))
 }
 
+/// Asks in the terminal whether to record `path`, which still holds `left` marked places (0 when
+/// only other marker lines are left). Only a yes is one.
+fn ask_markers_left(path: &str, left: u64) -> bool {
+    let what = match left {
+        0 => "marker lines".to_owned(),
+        n => output::counted(n, "marked place", "marked places"),
+    };
+    let path = style::err().paint(style::Role::Path, &escape(path, false));
+    output::tell(&format!("{path} still has {what}."));
+    let _ = write!(std::io::stderr(), "Record it as fixed anyway? [y/N] ");
+    answered_yes()
+}
+
+fn resolve_command(
+    json: bool,
+    given: &[PathBuf],
+    keep: Option<Side>,
+    yes: bool,
+    accept_crlf: bool,
+    opened: &mut Option<Repository>,
+) -> Result<(), Failure> {
+    let here = resolved(&std::env::current_dir()?);
+    let repo = opened.insert(with_users_key(Repository::discover(&here)?));
+    let drive = repo.drive()?;
+    let paths = given
+        .iter()
+        .map(|p| project_path(repo.root(), &here, p, drive))
+        .collect::<Result<Vec<_>, _>>()?;
+    let who = now_person(&load_identity(Some(repo.root()))?);
+    let git_excludes = git_excludes_file(repo.root())?;
+    let req = ResolveRequest {
+        paths: (!paths.is_empty()).then_some(&paths[..]),
+        keep,
+        who: &who,
+        command: "resolve",
+        accept_crlf,
+        git_excludes: git_excludes.as_deref(),
+    };
+    let working = progress::Working::start("Recording");
+    // With --json, or without a terminal, nothing is asked: it stops unless --yes said yes.
+    let mut ask = |question: &resolving::Ask| {
+        if yes || json || !style::may_ask() {
+            return yes;
+        }
+        working.pause();
+        let answer = match question {
+            resolving::Ask::MarkersLeft { path, left } => ask_markers_left(path, *left),
+            resolving::Ask::Large(large) => ask_large(large).unwrap_or(false),
+        };
+        working.resume();
+        answer
+    };
+    let done = resolving::resolve(repo, &req, &mut waiting, &mut ask);
+    drop(working);
+    let done = done?;
+    let mut warnings = Vec::new();
+    if let ResolveOutcome::Recorded {
+        applied,
+        warnings: met,
+        ..
+    } = &done
+    {
+        warnings.extend(met.iter().cloned());
+        warnings.extend(applied.warnings.iter().cloned());
+    }
+    // A save that can't be read back is named by its fingerprint, as goto names one.
+    let at = match &done {
+        ResolveOutcome::NoConflicts { save_id } => {
+            let save = repo.store().save(save_id, repo.signatures_allowed()).ok();
+            let short = match &save {
+                Some(save) => short_or_whole(repo, save_id, &save.change_id, &mut warnings),
+                None => save_id.short_hex(),
+            };
+            goto_output::at_save(&short, save.as_ref())
+        }
+        _ => String::new(),
+    };
+    warnings.extend(repo.store().warnings());
+    let text = if json {
+        format!("{}\n", resolve_output::document(&done, &warnings))
+    } else {
+        resolve_output::shown(&done, keep, &at)
+    };
+    output::print_done(&text, &warnings)?;
+    if json {
+        return Ok(());
+    }
+    let left = match &done {
+        ResolveOutcome::Recorded { left, .. } | ResolveOutcome::Nothing { left, .. } => &left[..],
+        ResolveOutcome::NoConflicts { .. } => &[],
+    };
+    if let Some(next) = output::conflicts_next(left) {
+        style::next(&next);
+    }
+    if let ResolveOutcome::Recorded { .. } = done {
+        style::changed_your_mind();
+    }
+    Ok(())
+}
+
+/// `opalro resolve <path> --copy <pick> --to <to>`: `to` goes to the engine as typed, so it is
+/// read from the folder the person is in.
+fn copy_command(
+    json: bool,
+    given: &Path,
+    pick: Pick,
+    to: &Path,
+    opened: &mut Option<Repository>,
+) -> Result<(), Failure> {
+    let here = resolved(&std::env::current_dir()?);
+    let repo = opened.insert(with_users_key(Repository::discover(&here)?));
+    let path = project_path(repo.root(), &here, given, repo.drive()?)?;
+    let copied = resolving::copy_version(repo, &path, pick, to)?;
+    let warnings = repo.store().warnings();
+    let to = to.to_string_lossy();
+    let text = if json {
+        let document = resolve_output::copied_document(&path, pick, &to, copied, &warnings);
+        format!("{document}\n")
+    } else {
+        resolve_output::copied(&path, pick, &to)
+    };
+    output::print_done(&text, &warnings)
+}
+
 fn discard_command(
     json: bool,
     given: &[PathBuf],
@@ -3229,6 +3417,36 @@ fn main() -> ExitCode {
             };
             combine_command(cli.json, &target, message, keep, &mut opened)
         }
+        Command::Resolve {
+            paths,
+            copy: Some(pick),
+            to,
+            ..
+        } => {
+            let ([path], Some(to)) = (&paths[..], to) else {
+                let usage = clap::Error::raw(
+                    clap::error::ErrorKind::WrongNumberOfValues,
+                    "--copy takes one path.\n",
+                );
+                let _ = usage.print();
+                return ExitCode::from(2);
+            };
+            copy_command(cli.json, path, pick.into(), &to, &mut opened)
+        }
+        Command::Resolve {
+            paths,
+            keep,
+            yes,
+            accept_crlf,
+            ..
+        } => resolve_command(
+            cli.json,
+            &paths,
+            keep.map(Side::from),
+            yes,
+            accept_crlf,
+            &mut opened,
+        ),
         Command::Discard { paths } => discard_command(cli.json, &paths, &mut opened),
         Command::Undo {
             list: true, all, ..

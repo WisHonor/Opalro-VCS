@@ -178,6 +178,7 @@ fn without_a_terminal_opals_own_words_are_plain() {
     run(&["save", "on side"]);
     run(&["goto", "main"]);
     run(&["combine", "side"]);
+    run(&["resolve"]);
     std::fs::write(env.root().join("a.txt"), "abcd\n").unwrap();
     run(&["shelf", "wip"]);
     run(&["shelf", "--list"]);
@@ -1900,6 +1901,14 @@ fn project_text_is_escaped_with_colour_on() {
         "{said}"
     );
     assert!(said.contains("evil\\x1b[2J\\u{202e}.png"), "{said}");
+    let said = same_with_colour_on(&env, &["resolve"], 0);
+    assert!(
+        support::without_opals_codes(&said).starts_with(
+            "Nothing to record: no place in conflict is fixed in your folder.\n\n    \
+             evil\\x1b[2J\\u{202e}.png  "
+        ),
+        "{said}"
+    );
 }
 
 /// Plants a save on `main` with a conflict at each of `places`, each standing as the file it names

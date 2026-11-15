@@ -96,6 +96,9 @@ pub enum ResolveOutcome {
         short_change_id: String,
         /// The combined save it replaced, which stays stored.
         replaced: Option<Id>,
+        /// Who else shows the combined save, so the fixes couldn't go into it, as
+        /// `SaveError::AmendShared` names them; empty otherwise.
+        shown_by: Vec<String>,
         /// The places recorded, as stored.
         recorded: Vec<String>,
         /// The places it met still in conflict: the first 100, and how many in all.
@@ -328,11 +331,13 @@ fn resolve_locked(
     }
     let parent = status.save;
     let mut cache = ChangeIds::load(repo);
+    let mut shown_by = Vec::new();
     let amend = parent.parents.len() > 1 && {
         let by = shown_elsewhere(repo, &mut cache, &entry.state, &line, parent_id, &parent);
         // Kept however it ends: reading the other lines is what costs.
         cache.store(repo, &entry.state);
-        by?.is_empty()
+        shown_by = by?;
+        shown_by.is_empty()
     };
     let message = match places.as_slice() {
         _ if amend => parent.message.clone(),
@@ -404,6 +409,7 @@ fn resolve_locked(
         save,
         short_change_id,
         replaced: amend.then_some(parent_id),
+        shown_by,
         recorded: places,
         left,
         left_count,

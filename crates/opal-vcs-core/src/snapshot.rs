@@ -336,6 +336,17 @@ fn lfs_pointers_in_folder(paths: &[String], count: u64) -> String {
 
 /// Names the first few of those that show the save an amend would replace, and counts the rest.
 fn shown_too(by: &[String]) -> String {
+    format!(
+        "Opalro can't amend this save: {} it too, and two saves you can see would then share one \
+         change ID.",
+        who_shows(by)
+    )
+}
+
+/// `line b shows`, or `tag v1, tag v2 and 3 more show`: the first few of `by`, as an amend's
+/// refusal names them.
+#[must_use]
+pub fn who_shows(by: &[String]) -> String {
     let mut named: Vec<String> = by.iter().take(NAMED).cloned().collect();
     let more = by.len().saturating_sub(NAMED);
     if more > 0 {
@@ -346,10 +357,7 @@ fn shown_too(by: &[String]) -> String {
         _ => named.concat(),
     };
     let show = if by.len() == 1 { "shows" } else { "show" };
-    format!(
-        "Opalro can't amend this save: {who} {show} it too, and two saves you can see would then \
-         share one change ID."
-    )
+    format!("{who} {show}")
 }
 
 impl SaveError {

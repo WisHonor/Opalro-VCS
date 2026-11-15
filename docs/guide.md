@@ -383,6 +383,7 @@ Lines, shelves and details
 line      List, make, rename and delete lines
 tag       Name a save, like v1.0, or list your tags
 combine   Bring another line's work into yours
+resolve   Record fixed conflicts
 shelf     Set your unsaved changes aside   (and: unshelf)
 discard   Throw away your unsaved changes; undo brings them back
 show      Show everything about one save
@@ -785,6 +786,51 @@ Changed your mind? opalro undo
 A text file is marked: both versions are in it, between marker lines, for you to fix in your editor. Anything else is left as your line has it, or as nothing where your line removed it. `opalro status` lists the places in conflict until you fix them, and `opalro undo` takes the whole combine back. In a script that must not go on with a conflict, use `opalro combine wall-run --only-if-clean`: whenever your line would end up on a save that holds a conflict, whether the combine would make it or one of the lines holds it already, it stops, names each place it would make, says how many the lines hold, and changes nothing, ending with exit code 1. A project made by Opalro 0.1 can't keep conflicts until `opalro setup --upgrade` turns them on; until then a combine stops there too.
 
 Your unsaved changes come along, as with `opalro goto`; where the combine would change a file you have unsaved work in, it stops and changes nothing. `opalro undo` takes a combine back: the line goes back to where it was, and your files with it. See [Lines](#8-lines) for combining and then deleting a line.
+
+### `opalro resolve`
+
+Record the conflicts you fixed. Make one: a menu on a line of its own, and a shorter one on `main`, then combine:
+
+```sh
+opalro line new menu
+echo "start, options, quit" > menu.txt
+opalro save "Add a menu"
+opalro goto main
+echo "start, quit" > menu.txt
+opalro save "Add a short menu"
+opalro combine menu
+```
+
+Both lines added `menu.txt`, differently, so the combined save keeps a conflict there, and `menu.txt` in your folder holds both versions between marker lines. Fix it in your editor, keeping what you want and taking the marker lines out, then record it:
+
+```sh
+echo "start, options, quit" > menu.txt
+opalro resolve
+```
+
+```text
+Recorded 1 fix in save vtnq "Combine menu into main" on main.
+
+    The combined save now holds them; its ID stays the same.
+
+Changed your mind? opalro undo
+```
+
+The fix goes into the combined save itself, which keeps its change ID, so `opalro history` still shows one combined save. When a tag or another line already shows that save, or you saved after the combine, the fixes are a save of their own instead (`Fixed conflicts in menu.txt`). Places you haven't fixed yet are listed after it, as `opalro status` lists them, and stay in conflict.
+
+Without paths, `opalro resolve` records every file the folder shows fixed: a marked file with no marker lines left, or one you deleted. A file still holding marker lines is recorded only when you name it, and Opalro asks first (`Record it as fixed anyway? [y/N]`; `--yes` answers for you). A picture or anything else that can't be marked is left as your line has it; pick a side for it, whole:
+
+```text
+opalro resolve art/hero.png --keep theirs
+```
+
+`--keep mine` keeps your line's version. To look at the other line's version before you choose, write it somewhere else; this records nothing and never writes over a file:
+
+```text
+opalro resolve art/hero.png --copy theirs --to ~/Desktop/hero-theirs.png
+```
+
+`--copy before` writes the version where the two lines parted. `opalro undo` takes a resolve back, as any step; a fix you made by hand stays in your folder.
 
 ### `opalro shelf` and `opalro unshelf`
 
@@ -1232,6 +1278,14 @@ Changed your mind? opalro undo
 ```
 
 Here `main` had no save of its own since `climbing` started, so it only moved forward. Had it moved on too, `opalro combine` would have made a combined save, as in [`opalro combine`](#opalro-combine). `opalro history` on `main` follows the first save before each save, so after a combined save it lists that save, not the other line's saves one by one; its row ends with `[combined <id>]`, and `opalro history <id>` lists the other line's saves from there, even once that line is deleted. Where both lines changed the same place, the combined save keeps a conflict there, as in [`opalro combine`](#opalro-combine); the conflict holds the other line's version too, so deleting that line loses nothing you still need to fix it.
+
+**Fixing a combine.** A combine that keeps conflicts is finished in three steps, and ends as one combined save:
+
+1. `opalro status` lists each place in conflict and what it still needs.
+2. Fix each marked file in your editor, taking the marker lines out; for a picture or anything else that can't be marked, pick a side with `opalro resolve <path> --keep mine` (or `theirs`), after a look at the other one with `opalro resolve <path> --copy theirs --to <file>` if you like.
+3. Run `opalro resolve`. It records what you fixed into the combined save, keeping its change ID (unless a tag or another line shows that save, or you saved after it), and lists what is left.
+
+`opalro history` then shows one combined save, holding both lines' work and your fixes, and `opalro status` says nothing changed. Each `opalro resolve` is a step, so `opalro undo` takes it back; `opalro undo` once more takes back the combine itself. See [`opalro resolve`](#opalro-resolve).
 
 ## 9. Coming from Git
 

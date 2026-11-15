@@ -2890,7 +2890,7 @@ fn a_command_that_did_its_work_but_couldnt_print_says_so() {
 }
 
 /// Every command, and the options each takes besides `--json` and `--help`.
-const COMMANDS: [(&str, &[&str]); 19] = [
+const COMMANDS: [(&str, &[&str]); 20] = [
     ("status", &["--full"]),
     ("save", &["--accept-crlf", "--line", "--yes", "--amend"]),
     ("changes", &["--save"]),
@@ -2901,6 +2901,10 @@ const COMMANDS: [(&str, &[&str]); 19] = [
     ("line", &[]),
     ("tag", &["--save", "--delete", "--yes"]),
     ("combine", &["--only-if-clean"]),
+    (
+        "resolve",
+        &["--keep", "--copy", "--to", "--yes", "--accept-crlf"],
+    ),
     ("shelf", &["--list"]),
     ("unshelf", &[]),
     ("discard", &[]),

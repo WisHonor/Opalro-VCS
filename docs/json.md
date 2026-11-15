@@ -271,7 +271,32 @@ A refusal is the §5 error document. With `--only-if-clean`, and in a project th
 
 ### `opalro resolve --json`
 
-`opalro resolve [<path>…]` records the places in conflict that were fixed, `--keep mine` or `--keep theirs` takes one side whole at the places named, and `--copy … --to <file>` writes one version of one file out, recording nothing ([decision 177](decisions/177-recording-a-fix-save-and-resolve.md)). A refusal is the §5 error document, `error.message` and `error.hint` in the words [terminal.md](terminal.md) gives for `opalro resolve`: at a save; `--keep` without paths; a place that changed after `resolve` looked at it; a side kept whole that would take the save past a save's limits; a path with no place in conflict at or below it; a version that still stands as your line's, named without `--keep` (several named in `error.message`, each on a line of its own, the first 100 in path order, then how many more); marker lines left, which `--json` never asks about, so without `--yes` it is refused; `--keep` or `--copy` on a conflict of more than three versions; and, for `--copy`, a `<file>` that is already there, one inside `.opalro`, and a side that holds no file there, or a folder or a link. What `opalro save` checks on the files recorded stops it in `save`'s words. If any place is refused, nothing is recorded.
+`opalro resolve [<path>…]` records the places in conflict that were fixed, `--keep mine` or `--keep theirs` takes one side whole at the places named, and `--copy … --to <file>` writes one version of one file out, recording nothing ([decision 177](decisions/177-recording-a-fix-save-and-resolve.md)). A refusal is the §5 error document, `error.message` and `error.hint` in the words [terminal.md](terminal.md) gives for `opalro resolve`: at a save; `--keep` without paths; a place that changed after `resolve` looked at it; a side kept whole that would take the save past a save's limits; a path with no place in conflict at or below it; a version that still stands as your line's, named without `--keep` (several named in `error.message`, each on a line of its own, the first 100 in path order, then how many more); marker lines left, which `--json` never asks about, so without `--yes` it is refused; `--keep` or `--copy` on a conflict of more than three versions; and, for `--copy`, a `<file>` that is already there, one inside `.opalro`, and a side that holds no file there, or a folder or a link. What `opalro save` checks on the files recorded stops it in `save`'s words. If any place is refused, nothing is recorded. `--json` never asks, so a large fix stops too unless `--yes` was given. A command line Opalro couldn't use (`--keep` without paths, `--copy` without exactly one path or without `--to`) ends with exit code 2 and the command-line reader's message on stderr, as for any command.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `opalro_json` | number | `1` |
+| `result` | string | `"recorded"`, a save was made, which `opalro undo` takes back; `"nothing"`, no place in conflict is fixed in the folder, so nothing was recorded or changed; `"no_conflicts"`, the save the project is on holds no conflict. |
+| `save` | save or `null` | For `"recorded"`, the line's newest save now: the combined save with the fixes in it (same change ID), or a save of their own after the line's newest. `null` otherwise. |
+| `replaced` | string or `null` | The combined save the fixes went into, which a new one with the same change ID replaced: 64 hex digits. `null` when the fixes are a save of their own, and unless `result` is `"recorded"`. |
+| `recorded` | list of string | The places recorded, as stored, in path order. `[]` unless `result` is `"recorded"`. |
+| `conflicts` | list of place | What is left in conflict, as `opalro status --json` lists a place, the first 100 in path order. `[]` when nothing is. |
+| `more_conflicts` | number | How many more places are left than `conflicts` lists. |
+| `conflict_count` | number | Every place left in conflict in the save the project is on now. `0` for `"no_conflicts"`. |
+| `written`, `removed`, `safety_copies` | number | What `--keep` wrote, removed and kept a safety copy of, as in `opalro goto --json`; `0` without `--keep`. |
+| `warnings` | list | See §4: what `opalro save` and, with `--keep`, a switch can give. |
+
+`opalro resolve <path> --copy mine|theirs|before --to <file> --json`, which records nothing and takes no step:
+
+| Field | Type | Meaning |
+|---|---|---|
+| `opalro_json` | number | `1` |
+| `result` | string | `"copied"`. |
+| `path` | string | The place in conflict whose version was written, as stored. |
+| `version` | string | Which version: `"mine"` (your line's), `"theirs"` (the other line's) or `"before"` (where the lines parted). |
+| `to` | string | Where it was written, as it was typed: read from the folder the command ran in. |
+| `size` | number | The bytes written. |
+| `warnings` | list | See §4. |
 
 ### `opalro discard --json`
 

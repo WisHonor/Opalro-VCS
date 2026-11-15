@@ -1,0 +1,14 @@
+---
+source: crates/opal-vcs/tests/resolve.rs
+assertion_line: 467
+expression: "support::masked(copied)"
+---
+{
+  "opalro_json": 1,
+  "path": "pic.png",
+  "result": "copied",
+  "size": 13,
+  "to": "pic-theirs.png",
+  "version": "theirs",
+  "warnings": []
+}

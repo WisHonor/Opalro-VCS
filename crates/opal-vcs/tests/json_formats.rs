@@ -242,6 +242,25 @@ fn every_document() -> Vec<(&'static str, usize, Value)> {
     let conflict = combined["conflicts"][0].clone();
     docs.push(("`opalro combine --json`", 0, combined));
     docs.push(("`opalro combine --json`: A conflict", 0, conflict));
+
+    // Resolving it: nothing fixed yet, a version copied out, the fix recorded, then no conflict.
+    let resolve = "`opalro resolve --json`";
+    docs.push((resolve, 0, run(&["resolve"], 0)));
+    let to = [
+        "resolve",
+        "k.txt",
+        "--copy",
+        "theirs",
+        "--to",
+        "k-theirs.txt",
+    ];
+    docs.push((resolve, 1, run(&to, 0)));
+    std::fs::remove_file(root.join("k-theirs.txt")).unwrap();
+    kept.overwrite("k.txt", "both\n");
+    let recorded = run(&["resolve"], 0);
+    assert_eq!(recorded["result"], "recorded", "{recorded}");
+    docs.push((resolve, 0, recorded));
+    docs.push((resolve, 0, run(&["resolve"], 0)));
     docs
 }
 
