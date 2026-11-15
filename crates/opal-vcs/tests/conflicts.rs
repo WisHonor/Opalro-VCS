@@ -1257,8 +1257,8 @@ fn without_the_feature_show_names_a_planted_conflict_as_v01_does() {
     let env = started();
     plant(&env, &[], &[("yours.png", versions(Some(term(PICTURE))))]);
     support::without_conflicts_feature(env.root());
-    // Whole outputs, as v0.1 gave them: a conflict's entry is an added file of kind conflict,
-    // empty text, and no field v0.1 didn't have.
+    // Whole outputs: the text as v0.1 printed it; in `--json` a conflict's entry is an added
+    // file of kind conflict, as in v0.1, with the fields added since at `false` and `0`.
     let doc = json(&env, &["show"]);
     let save = doc["save"].clone();
     let change = serde_json::json!({
@@ -1268,10 +1268,15 @@ fn without_the_feature_show_names_a_planted_conflict_as_v01_does() {
         "old_size": null,
         "path": "yours.png",
     });
+    let mut shown_change = change.clone();
+    shown_change["in_conflict"] = false.into();
     assert_eq!(
         doc,
         serde_json::json!({
-            "changes": [change],
+            "changes": [shown_change],
+            "conflicts_changed": 0,
+            "conflicts_fixed": 0,
+            "conflicts_made": 0,
             "opalro_json": 1,
             "save": save,
             "tags": [],
@@ -1429,21 +1434,124 @@ fn a_conflict_in_a_folder_added_or_removed_is_named_at_its_place() {
 #[test]
 fn a_conflict_row_keeps_the_paths_own_trailing_spaces() {
     let env = started();
-    let (nbsp, wide) = ("b\u{a0}", "pictures\u{3000}");
+    let (nbsp, plain, wide) = ("b\u{a0}", "c ", "pictures\u{3000}");
     plant(
         &env,
         &[],
         &[
             (nbsp, versions(Some(term(PICTURE)))),
+            (plain, versions(Some(term(PICTURE)))),
             (wide, versions(Some(term(PICTURE)))),
         ],
     );
     let (shown, _) = run(&env, &["show"], 0);
     assert!(
         shown.ends_with(&format!(
-            "\n    in conflict  {nbsp}\n    in conflict  {wide}\n\n2 places became conflicts in \
-             this save.\n"
+            "\n    in conflict  {nbsp}\n    in conflict  {plain}\n    in conflict  {wide}\n\n3 \
+             places became conflicts in this save.\n"
         )),
         "{shown:?}"
     );
+}
+
+/// `main` and `side` apart from a save holding `dir/x.txt` and `sibling`, whose name sorts
+/// between `dir` and `dir/`: `side` makes `dir` a file, and both change `sibling`'s line apart;
+/// then combined, so both are places in conflict, `dir` standing as your folder.
+fn dir_and(sibling: &str) -> Env {
+    let env = started();
+    put(&env, "dir/x.txt", b"x\n");
+    put(&env, sibling, b"one\n");
+    run(&env, &["save", "Start"], 0);
+    run(&env, &["line", "new", "side"], 0);
+    std::fs::remove_dir_all(env.root().join("dir")).unwrap();
+    put(&env, "dir", b"a file now\n");
+    put(&env, sibling, b"side\n");
+    run(&env, &["save", "On side"], 0);
+    run(&env, &["goto", "main"], 0);
+    put(&env, "dir/x.txt", b"main\n");
+    put(&env, sibling, b"main\n");
+    run(&env, &["save", "On main"], 0);
+    run(&env, &["combine", "side"], 0);
+    env
+}
+
+/// The `change` and `in_conflict` of each change `--json` gives for `args`, by path.
+fn kinds(env: &Env, args: &[&str]) -> Vec<(String, String, bool)> {
+    let doc = json(env, args);
+    doc["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| {
+            (
+                c["path"].as_str().unwrap().to_owned(),
+                c["change"].as_str().unwrap().to_owned(),
+                c["in_conflict"].as_bool().unwrap(),
+            )
+        })
+        .collect()
+}
+
+#[test]
+fn a_place_is_one_row_whatever_sorts_between_it_and_its_folder() {
+    for sibling in ["dir.txt", "dir-old", "dir 2"] {
+        let env = dir_and(sibling);
+        let (shown, _) = run(&env, &["show"], 0);
+        assert!(
+            shown.ends_with(&format!(
+                "\n2 files changed:\n\n    in conflict  dir\n    in conflict  {sibling}\n\n2 places \
+                 became conflicts in this save.\n"
+            )),
+            "{sibling}: {shown}"
+        );
+        let (shown, _) = run(&env, &["changes", "--save", "main"], 0);
+        assert_eq!(
+            shown,
+            format!("in conflict  dir\n\nin conflict  {sibling}\n"),
+            "{sibling}"
+        );
+        let made = [
+            ("dir".to_owned(), "in_conflict".to_owned(), true),
+            (sibling.to_owned(), "in_conflict".to_owned(), true),
+        ];
+        assert_eq!(kinds(&env, &["show"]), made, "{sibling}");
+        assert_eq!(
+            kinds(&env, &["changes", "--save", "main"]),
+            made,
+            "{sibling}"
+        );
+        assert_eq!(json(&env, &["show"])["conflicts_made"], 2, "{sibling}");
+        // Both fixed in one save of their own.
+        put(&env, "other.txt", b"o\n");
+        run(&env, &["save", "Other", "other.txt"], 0);
+        run(&env, &["resolve", "dir", sibling, "--keep", "mine"], 0);
+        let (shown, _) = run(&env, &["show"], 0);
+        assert!(
+            shown.ends_with(&format!(
+                "\n2 files changed:\n\n    conflict fixed  dir\n    conflict fixed  {sibling}\n\n2 \
+                 conflicts were fixed in this save.\n"
+            )),
+            "{sibling}: {shown}"
+        );
+        let fixed = [
+            ("dir".to_owned(), "conflict_fixed".to_owned(), false),
+            (sibling.to_owned(), "conflict_fixed".to_owned(), false),
+        ];
+        assert_eq!(kinds(&env, &["show"]), fixed, "{sibling}");
+        assert_eq!(
+            kinds(&env, &["changes", "--save", "main"]),
+            fixed,
+            "{sibling}"
+        );
+        assert_eq!(json(&env, &["show"])["conflicts_fixed"], 2, "{sibling}");
+    }
+}
+
+#[test]
+fn a_path_at_or_below_a_place_selects_the_places_row() {
+    let env = dir_and("dir.txt");
+    for path in ["dir", "dir/x.txt"] {
+        let (shown, _) = run(&env, &["changes", "--save", "main", path], 0);
+        assert_eq!(shown, "in conflict  dir\n", "{path}");
+    }
 }

@@ -314,7 +314,10 @@ pub fn save_changes<E: From<SaveError> + From<StoreError>>(
     };
     let scope = scope(repo, paths)?;
     for_each_save_change(repo, old_root, save.root, |c| {
-        if !scope.as_ref().is_none_or(|s| s.holds(c.path)) {
+        // A conflict's place speaks for everything below it, so a path asked there selects it.
+        let asked =
+            |s: &Scope| s.holds(c.path) || (c.change.is_conflict() && s.reaches_below(c.path));
+        if !scope.as_ref().is_none_or(asked) {
             return Ok(());
         }
         let mut c = PathChange::from(c);
@@ -343,14 +346,17 @@ pub fn for_each_save_change<E: From<StoreError>>(
     mut each: impl FnMut(FileChange<'_>) -> Result<(), E>,
 ) -> Result<(), E> {
     let keeps = repo.keeps_conflicts();
-    // The place of the last conflict handed out, `/` after it: a folder on the other side is
-    // the conflict's, so its files aren't changes of their own.
-    let mut place = String::new();
+    // The places of conflicts handed out, `/` after each: a folder on the other side is the
+    // conflict's, so its files aren't changes of their own. A place's own path comes before the
+    // paths below it, but a sibling such as `dir.txt` can come between them, so a place is kept
+    // until the walk has passed everything below it.
+    let mut places: Vec<String> = Vec::new();
     for_each_change(repo.store(), old_root, new_root, |mut c| {
         if !keeps {
             return each(c);
         }
-        if !place.is_empty() && c.path.starts_with(&place) {
+        places.retain(|p| c.path.starts_with(p.as_str()) || c.path < p.as_str());
+        if places.iter().any(|p| c.path.starts_with(p.as_str())) {
             return Ok(());
         }
         let held = |k: Option<EntryKind>| k == Some(EntryKind::Conflict);
@@ -362,10 +368,7 @@ pub fn for_each_save_change<E: From<StoreError>>(
             (true, false) => ChangeKind::ConflictFixed,
             (false, false) => return each(c),
         };
-        // A place's own path comes before the paths below it.
-        place.clear();
-        place.push_str(c.path);
-        place.push('/');
+        places.push(format!("{}/", c.path));
         each(c)
     })
 }
