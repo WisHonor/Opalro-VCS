@@ -1163,7 +1163,7 @@ Every message, row, question, hint, line of help and `--json` name this plan int
 
 | Kind | Words | Task |
 |---|---|---|
-| Decode refusal (in `verify`'s "It doesn't read as a conflict record: …"; made by Task 1's decoder, documented in Task 3 with `verify`'s finding) | `unknown conflict record version`; `the term count must be odd, from 3 to 255`; `a term's kind must be 1 to 5`; `size must be 0 for a folder or a project link`; `the marker length must be 0, or from 7 to 255`; `only a file of its own can have markers`; existing words for a bad bool, a short record and bytes left over | 3 |
+| Decode refusal (in `verify`'s "It doesn't read as a conflict record: …"; made by Task 1's decoder, documented in Task 3 with `verify`'s finding) | `unknown conflict-record version`; `a conflict names an odd number of versions, from 3 to 255`; `a version in a conflict is of an unknown kind`; `a folder or project link in a conflict has a size`; `a conflict's marker length is from 1 to 6`; `a conflict has markers on a version that isn't a file` (the words Task 1's decoder has; they replace this table's first draft); existing words for a bad bool, a short record and bytes left over | 3 |
 | Upgrade, before asking | `This version of Opalro can turn on 1 feature in this project:` then `  conflicts: a combine can keep conflicts, and you fix them when you choose.` then `Once it is on, Opalro 0.1 can't open this project, and opalro undo can't turn it off.` | 2 |
 | Question | `Turn it on? [y/N]` (`Turn them on? [y/N]`) | 2 |
 | Outcome | `Turned on conflicts: this project can keep conflicts now.` | 2 |
