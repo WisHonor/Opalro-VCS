@@ -5,7 +5,7 @@
 - **Agenda topic:** none (milestone 8, its whole-branch review)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 167](167-merging-text-line-by-line.md) (the rules that decide whether a file is merged line by line were the folder's own when the combine starts); [decision 172](172-red-team-m8-session-2-rulings.md) (a rules file that can't be read whole stops automatic merging; a moved file's rule is asked under both its names)
-- **Refined by:** [decision 176](176-a-conflict-in-the-folder.md) (markers only when both lines' rules allow it)
+- **Refined by:** [decision 176](176-a-conflict-in-the-folder.md) (markers only when both lines' rules allow it); [decision 181](181-what-building-milestone-9-refined.md) (the same: nothing to merge line by line, nothing for a rule to decide)
 
 ## Context
 

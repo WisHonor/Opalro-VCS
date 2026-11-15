@@ -6,6 +6,7 @@
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 017](017-commands-and-output.md) (every command accepts `--json`, in a documented, versioned format)
 - **Superseded in part by:** [decision 150](150-the-name-is-opalro.md) (the names: Bolt is now Opalro, and `bolt` is now `opalro`)
+- **Refined by:** [decision 181](181-what-building-milestone-9-refined.md) (when a field whose values are a fixed list of codes may take a new value)
 
 ## Context
 

@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 9 planning)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 008](008-layout-and-settings.md) (a newer Opalro never upgrades a project's format by itself; it suggests, and `opalro setup` performs); [decision 121](121-format-1-freezes-at-v0.1.md) (anything new on disk arrives as a `feature` line, which a project gains only when its user asks, through `opalro setup`); [decision 148](148-what-format-1s-spec-says-before-it-freezes.md) (v0.1 refuses a project that lists `feature conflicts`); [decision 157](157-v0.2-in-four-milestones.md) ("only conflicts need something new on disk, and milestone 9 decides how that arrives")
+- **Refined by:** [decision 181](181-what-building-milestone-9-refined.md) (`setup --upgrade` never offers `chunks`)
 
 ## Context
 

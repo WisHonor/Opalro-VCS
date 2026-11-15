@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 9 planning)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 007](007-conflicts.md) (text files get markers with the ancestor section, labelled with line names and change IDs; other files keep the version of the person's own line; a rule decides which files get markers); [decision 167](167-merging-text-line-by-line.md) (which files are text, and the rule `conflict-markers`); [decision 004](004-project-contents.md) (line endings are bytes)
+- **Refined by:** [decision 181](181-what-building-milestone-9-refined.md) (a label's long name is cut, never the save's letters; what `status` reads)
 
 ## Context
 

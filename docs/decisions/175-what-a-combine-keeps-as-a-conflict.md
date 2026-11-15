@@ -4,7 +4,7 @@
 - **Date:** 2026-11-14
 - **Agenda topic:** none (milestone 9 planning)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
-- **Refined by:** [decision 180](180-a-file-that-arrived-where-the-other-line-changed-the-file.md) (a file moved onto a place whose file the other line changed; what the merge sees at a moved file's old place)
+- **Refined by:** [decision 180](180-a-file-that-arrived-where-the-other-line-changed-the-file.md) (a file moved onto a place whose file the other line changed; what the merge sees at a moved file's old place); [decision 181](181-what-building-milestone-9-refined.md) (what `--only-if-clean` promises; when a held conflict stops a combine; three or more starting points; a place both lines hold alike)
 - **Refines:** [decision 165](165-combine-the-command.md) (in milestone 8 a combine that would leave a conflict stopped; from milestone 9 it is kept); [decision 166](166-merging-two-versions-of-the-project.md) (what counts as a conflict, entry by entry); [decision 164](164-where-two-lines-parted.md) (starting points that conflict with each other); [decision 007](007-conflicts.md) (a conflicted save is a normal save)
 
 ## Context
