@@ -1,6 +1,7 @@
 //! Conflict records: every version a place in conflict holds (docs/storage-format.md section 8).
 
-use std::collections::BTreeSet;
+use std::collections::hash_map::Entry as Slot;
+use std::collections::{BTreeSet, HashMap};
 use std::io;
 
 use crate::encoding::{DecodeError, Reader, Writer};
@@ -8,7 +9,7 @@ use crate::id::{Flavor, Id, hash_record};
 use crate::listing::EntryKind;
 use crate::repo::RepoError;
 use crate::snapshot::SaveError;
-use crate::store::{StoreError, is_damage};
+use crate::store::{Store, StoreError, is_damage};
 use crate::text::escape;
 
 pub(crate) mod markers;
@@ -226,6 +227,15 @@ pub(crate) fn settled(
     }
 }
 
+/// What a save puts at the place of `c` with nothing in the folder there.
+pub(crate) fn settled_gone(c: &Record) -> Settled {
+    // With nothing there no file is scanned, so the scan is never asked for.
+    match seen(c, None, |_| Ok(Left::default())) {
+        Ok(seen) => settled(c, seen, None, false),
+        Err(_) => Settled::Kept,
+    }
+}
+
 /// `e`, met reading the record `id` of the conflict `at` (`at <path>`, or its name in a folder
 /// listing), or reading a version it names, as the damage it is. What isn't damage, such as an
 /// I/O error, stays itself.
@@ -248,6 +258,24 @@ pub(crate) fn unreadable(at: &str, id: &Id, e: StoreError) -> StoreError {
         }
         StoreError::Pack(p) if is_damage(&p) => unread(&p),
         e => return e,
+    })
+}
+
+/// The record `id` of the conflict at the project path `path`, from `records`, or else met in the
+/// store and kept in `records`: what can't be read is damage at that place.
+pub(crate) fn record_at<'r>(
+    store: &Store,
+    records: &'r mut HashMap<Id, Record>,
+    path: &str,
+    id: &Id,
+) -> Result<&'r Record, StoreError> {
+    Ok(match records.entry(*id) {
+        Slot::Occupied(r) => r.into_mut(),
+        Slot::Vacant(v) => v.insert(
+            store
+                .met_conflict(id)
+                .map_err(|e| unreadable(&at_path(path), id, e))?,
+        ),
     })
 }
 

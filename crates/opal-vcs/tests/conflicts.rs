@@ -1008,3 +1008,29 @@ fn save_json_counts_them() {
     assert_eq!(doc["conflicts"], 0, "{doc}");
     support::assert_folder_is_goto_of(&env, support::main_tip(&env));
 }
+
+#[test]
+fn a_conflict_kept_in_a_gone_folder_a_file_now_names_stops_the_save_in_its_own_words() {
+    let env = started();
+    plant(
+        &env,
+        &[],
+        &[("art/hero.png", versions(Some(term(PICTURE))))],
+    );
+    put(&env, "art", b"a file where the folder was");
+    let before = env.state().1;
+    let (shown, said) = run(&env, &["save", "Over"], 1);
+    assert_eq!(shown, "");
+    assert!(
+        said.contains(
+            "Opalro can't save art: the last save has a folder there holding art/hero.png, \
+             which is still in conflict, and a save can't hold both under one name."
+        ),
+        "{said}"
+    );
+    assert!(
+        said.contains("Nothing was saved. Rename or move art, then save again."),
+        "{said}"
+    );
+    assert_eq!(env.state().1, before);
+}

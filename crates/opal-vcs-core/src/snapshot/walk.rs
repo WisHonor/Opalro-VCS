@@ -3,7 +3,6 @@
 //! too. Each folder is opened from the one above it, a name at a time, never through a link
 //! (decision 048).
 
-use std::collections::hash_map::Entry as Slot;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::ffi::OsStr;
 use std::fs;
@@ -927,11 +926,8 @@ impl WalkState {
         }
         for e in listing.entries() {
             if e.kind == EntryKind::Conflict && !self.records.contains_key(&e.id) {
-                let at = conflict::at_path(&path_in(rel, &e.name));
-                let record = store
-                    .met_conflict(&e.id)
-                    .map_err(|err| conflict::unreadable(&at, &e.id, err))?;
-                self.records.insert(e.id, record);
+                let path = path_in(rel, &e.name);
+                conflict::record_at(store, &mut self.records, &path, &e.id)?;
             }
         }
         Ok(())
@@ -1456,6 +1452,8 @@ pub(super) struct Scan {
     /// The base save's conflicts kept as they were (kind 6), and the folders kept as they were
     /// that hold one somewhere (a folder), by path.
     pub(super) kept_conflicts: Vec<(String, EntryKind, Id)>,
+    /// The folders on disk a conflict stands as, and those below them.
+    pub(super) in_conflict: HashSet<String>,
 }
 
 /// A folder the walk is in: its project path, how many levels down it is, and what it holds that
@@ -1732,6 +1730,7 @@ fn scan_folder(
         warnings: rules.warnings,
         records: rules.records,
         kept_conflicts: rules.kept_conflicts,
+        in_conflict: rules.in_conflict,
     })
 }
 
@@ -2213,15 +2212,8 @@ fn rebuild_gone(
                     continue;
                 }
                 let path = path_below(top, &open, &name, &e.name);
-                let record = match search.records.entry(e.id) {
-                    Slot::Occupied(r) => r.into_mut(),
-                    Slot::Vacant(v) => v.insert(base.store.met_conflict(&e.id).map_err(|err| {
-                        conflict::unreadable(&conflict::at_path(&path), &e.id, err)
-                    })?),
-                };
-                let seen = conflict::seen(record, None, |_| Ok(conflict::Left::default()))
-                    .map_err(RepoError::from)?;
-                let id = match conflict::settled(record, seen, None, false) {
+                let record = conflict::record_at(base.store, search.records, &path, &e.id)?;
+                let id = match conflict::settled_gone(record) {
                     Settled::Fixed => continue,
                     Settled::Kept => e.id,
                     Settled::Again(again) => {
@@ -2231,7 +2223,7 @@ fn rebuild_gone(
                     }
                 };
                 if taken {
-                    return Err(SaveError::InTheWay {
+                    return Err(SaveError::ConflictInTheWay {
                         path: top.to_owned(),
                         kept: path,
                     });

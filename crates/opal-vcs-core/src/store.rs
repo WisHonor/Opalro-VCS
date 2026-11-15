@@ -200,13 +200,37 @@ pub(crate) mod counted {
     }
 }
 
+/// The most terms of the records one command remembers: a project could hold a million records
+/// of 255 terms each, which unpack to gigabytes from little on disk.
+const MAX_MET_TERMS: usize = 1 << 20;
+
+#[cfg(test)]
+thread_local! {
+    /// `MAX_MET_TERMS`, lowered by a test on its thread.
+    static MET_BUDGET: std::cell::Cell<usize> = const { std::cell::Cell::new(MAX_MET_TERMS) };
+}
+
+fn met_budget() -> usize {
+    #[cfg(test)]
+    return MET_BUDGET.get();
+    #[cfg(not(test))]
+    MAX_MET_TERMS
+}
+
+/// The conflict records a command has met, and how many terms they hold together.
+#[derive(Default)]
+struct Met {
+    records: HashMap<Id, conflict::Record>,
+    terms: usize,
+}
+
 pub struct Store {
     dir: Arc<Dir>,
     path: PathBuf,
     packs: Mutex<Packs>,
     checked: Mutex<Checked>,
     /// The conflict records a command has read where it met them, so each is read once.
-    met: Arc<Mutex<HashMap<Id, conflict::Record>>>,
+    met: Arc<Mutex<Met>>,
     /// The smallest file stored in chunks, as the project's rules say.
     chunk_from: AtomicU64,
     #[cfg(test)]
@@ -864,19 +888,31 @@ impl Store {
 
     /// [`Store::conflict`], remembered: a command that meets a record where its entry is met
     /// reads it once, whichever of its steps meets it. A record is its ID's for good, so what is
-    /// remembered never goes stale; one that couldn't be read is read again.
+    /// remembered never goes stale; one that couldn't be read is read again. Past
+    /// `MAX_MET_TERMS` terms remembered, a record is given back unremembered, read each time.
     pub(crate) fn met_conflict(&self, id: &Id) -> Result<conflict::Record, StoreError> {
-        let held = self.met_records().get(id).cloned();
+        let held = self.met_records().records.get(id).cloned();
         if let Some(record) = held {
             return Ok(record);
         }
         let record = self.conflict(id)?;
-        self.met_records().insert(*id, record.clone());
+        let mut met = self.met_records();
+        let terms = met.terms.saturating_add(record.terms.len());
+        if terms <= met_budget() {
+            met.terms = terms;
+            met.records.insert(*id, record.clone());
+        }
         Ok(record)
     }
 
-    fn met_records(&self) -> MutexGuard<'_, HashMap<Id, conflict::Record>> {
+    fn met_records(&self) -> MutexGuard<'_, Met> {
         self.met.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// How many records are remembered, for tests.
+    #[cfg(test)]
+    pub(crate) fn met_held(&self) -> usize {
+        self.met_records().records.len()
     }
 
     /// `listing`, given what a second handle read of `id`: the same read through the same steps,
@@ -3107,6 +3143,35 @@ mod tests {
             terms: vec![Some(file(1)), None, Some(file(2))],
             own: None,
         }
+    }
+
+    #[test]
+    fn records_met_are_remembered_only_within_the_budget() {
+        let (_root, tmp, packs) = dirs();
+        let other = conflict::Record {
+            terms: vec![None, None, None],
+            ..a_conflict()
+        };
+        let mut w = PackWriter::create(&tmp).unwrap();
+        let first = w
+            .add_record(ObjectKind::Conflict, &a_conflict().encode())
+            .unwrap();
+        let second = w.add_record(ObjectKind::Conflict, &other.encode()).unwrap();
+        w.finish(&packs).unwrap();
+        let store = Store::open(&packs).unwrap();
+        // Room for the first record's three terms, not for the second's too.
+        MET_BUDGET.set(3);
+        let read = |id: &Id| {
+            let before = store.conflicts_read();
+            let record = store.met_conflict(id).unwrap();
+            (record, store.conflicts_read() - before)
+        };
+        assert_eq!(read(&first), (a_conflict(), 1));
+        assert_eq!(read(&first), (a_conflict(), 0));
+        assert_eq!(read(&second), (other.clone(), 1));
+        assert_eq!(read(&second), (other, 1));
+        assert_eq!(store.met_held(), 1);
+        MET_BUDGET.set(MAX_MET_TERMS);
     }
 
     #[test]

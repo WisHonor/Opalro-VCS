@@ -416,3 +416,50 @@ fn an_amend_stopped_at_every_write_leaves_the_old_save_on_the_line() {
         }
     }
 }
+
+/// Moves `main` to a planted save holding `plain.txt` and a picture in conflict at `yours.png`,
+/// standing as your version.
+fn plant_conflicted(env: &Env) {
+    use opal_core::conflict::{Record, Term};
+    use opal_core::id::hash_content;
+    use opal_core::listing::EntryKind;
+    let picture: &[u8] = b"picture";
+    let term = |bytes: &[u8]| {
+        Some(Term {
+            kind: EntryKind::File,
+            id: hash_content(bytes),
+            size: bytes.len() as u64,
+        })
+    };
+    let record = Record {
+        terms: vec![term(picture), term(b"base"), term(b"theirs")],
+        own: None,
+    };
+    support::plant_save(env.root(), |pack| {
+        for bytes in [picture, b"base", b"theirs"] {
+            pack.add_content(bytes).unwrap();
+        }
+        let files: [(&str, EntryKind, &[u8]); 1] = [("plain.txt", EntryKind::File, b"one\n")];
+        support::listings_with_conflicts(pack, &files, &[("yours.png", &record)])
+    });
+}
+
+#[test]
+fn amend_says_how_many_places_are_still_in_conflict() {
+    let env = project(&[("plain.txt", "one\n")]);
+    plant_conflicted(&env);
+    write(&env, "yours.png", "painted over");
+    write(&env, "plain.txt", "two\n");
+    let shown = ok(&env, &["save", "--amend", "Painted"]);
+    assert!(shown.starts_with("Updated save "), "{shown}");
+    assert!(
+        shown.contains("\n    1 place is still in conflict: opalro status lists it.\n"),
+        "{shown}"
+    );
+    support::assert_folder_is_goto_of(&env, main_tip(&env));
+    write(&env, "plain.txt", "three\n");
+    let doc = json(&env, &["save", "--amend", "Painted"]);
+    assert_eq!(doc["result"], "saved", "{doc}");
+    assert_eq!(doc["conflicts"], 1, "{doc}");
+    support::assert_folder_is_goto_of(&env, main_tip(&env));
+}

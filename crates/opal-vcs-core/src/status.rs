@@ -1,7 +1,6 @@
 //! `opalro status`: what changed in the project folder since the save the project is on.
 
 use std::collections::HashMap;
-use std::collections::hash_map::Entry as Slot;
 use std::ffi::OsStr;
 use std::io;
 use std::path::Path;
@@ -15,7 +14,7 @@ use crate::listing::{Entry, EntryKind};
 use crate::repo::Repository;
 use crate::save::Save;
 use crate::snapshot::{FolderNow, SaveError, kept_in_the_way, read_folder};
-use crate::store::{Store, StoreError};
+use crate::store::StoreError;
 use crate::text::escape;
 use crate::warning::Warning;
 use crate::writeout::{self, Folders};
@@ -139,7 +138,7 @@ pub(crate) fn each_difference<E: From<StoreError>>(
         let Some(o) = o.filter(|o| keeps && o.kind == EntryKind::Conflict) else {
             return change_at(path, o, n).map_or(Ok(()), |c| each(Difference::File(c)));
         };
-        let record = record_at(store, records, path, &o.id)?;
+        let record = conflict::record_at(store, records, path, &o.id)?;
         let folder = |kind: Option<EntryKind>| kind == Some(EntryKind::Folder);
         if folder(stands_as(record).map(|t| t.kind)) || folder(n.map(|e| e.kind)) {
             folders.push(format!("{path}/"));
@@ -150,26 +149,6 @@ pub(crate) fn each_difference<E: From<StoreError>>(
             record,
             now: n,
         })
-    })
-}
-
-/// The record `id` of the conflict at `path`, from `records` or else the store, once.
-fn record_at<'r>(
-    store: &Store,
-    records: &'r mut HashMap<Id, Record>,
-    path: &str,
-    id: &Id,
-) -> Result<&'r Record, StoreError> {
-    Ok(match records.entry(*id) {
-        Slot::Occupied(r) => r.into_mut(),
-        Slot::Vacant(v) => {
-            let at = conflict::at_path(path);
-            v.insert(
-                store
-                    .met_conflict(id)
-                    .map_err(|e| conflict::unreadable(&at, id, e))?,
-            )
-        }
     })
 }
 
@@ -282,7 +261,7 @@ pub fn status(
     })
     .map_err(|e| e.in_save(save_id, true))?;
     for (path, id) in &now.kept_conflicts {
-        let record = record_at(repo.store(), &mut records, path, id)?;
+        let record = conflict::record_at(repo.store(), &mut records, path, id)?;
         conflicts.push(ConflictAt {
             path: path.clone(),
             record: *id,
