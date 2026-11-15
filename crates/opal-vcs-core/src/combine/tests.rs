@@ -127,7 +127,18 @@ impl Fixture {
     ) -> Result<Merged, CombineError> {
         let mut packs = self.repo.new_packs().unwrap();
         let store = self.repo.store();
-        let merged = merge_trees(store, &mut packs, made, inner, s, o, t, rules, DEADLINE);
+        let merged = merge_trees(
+            store,
+            &mut packs,
+            made,
+            inner,
+            s,
+            o,
+            t,
+            rules,
+            &BTreeMap::new(),
+            DEADLINE,
+        );
         self.repo.store_packs(&self.lock, packs).unwrap();
         merged
     }
@@ -612,7 +623,16 @@ fn nothing_is_stored_while_merging() {
     let mut made = Made::default();
     let store = fx.repo.store();
     let m = merge_trees(
-        store, &mut packs, &mut made, false, s, o, t, &rules, DEADLINE,
+        store,
+        &mut packs,
+        &mut made,
+        false,
+        s,
+        o,
+        t,
+        &rules,
+        &BTreeMap::new(),
+        DEADLINE,
     )
     .unwrap();
     assert_eq!(m.conflicts.len(), 1);
@@ -683,7 +703,16 @@ fn a_later_merge_reads_what_an_earlier_one_made() {
     let mut packs = fx.repo.new_packs().unwrap();
     let store = fx.repo.store();
     let inner = merge_trees(
-        store, &mut packs, &mut made, true, s, o, t, &rules, DEADLINE,
+        store,
+        &mut packs,
+        &mut made,
+        true,
+        s,
+        o,
+        t,
+        &rules,
+        &BTreeMap::new(),
+        DEADLINE,
     )
     .unwrap();
     // The made text is in no stored pack: only `made` has it.
@@ -699,7 +728,16 @@ fn a_later_merge_reads_what_an_earlier_one_made() {
     );
     let store = fx.repo.store();
     let m = merge_trees(
-        store, &mut packs, &mut made, false, inner.root, later[1], later[2], &rules, DEADLINE,
+        store,
+        &mut packs,
+        &mut made,
+        false,
+        inner.root,
+        later[1],
+        later[2],
+        &rules,
+        &BTreeMap::new(),
+        DEADLINE,
     )
     .unwrap();
     assert!(m.conflicts.is_empty(), "{:?}", m.conflicts);
@@ -1396,7 +1434,16 @@ fn tree_merge_agrees_with_a_path_by_path_model() {
             let rules = RuleMatcher::new(&RulesRead::default());
             let store = fx.repo.store();
             let merged = merge_trees(
-                store, &mut packs, &mut made, false, s_id, o_id, t_id, &rules, DEADLINE,
+                store,
+                &mut packs,
+                &mut made,
+                false,
+                s_id,
+                o_id,
+                t_id,
+                &rules,
+                &BTreeMap::new(),
+                DEADLINE,
             );
             match merged {
                 Err(CombineError::NamesClash { .. }) => prop_assert!(want.clash, "{want:?}"),
@@ -1587,11 +1634,21 @@ impl Hist {
     /// The merge of three versions, with the conflicts described with the sides called `main`
     /// and `side`, and its result read back.
     fn outcome(&mut self, s: Version, o: Version, t: Version) -> (Vec<String>, Tree) {
+        self.outcome_with(s, o, t, &RuleMatcher::new(&RulesRead::default()))
+    }
+
+    /// `outcome`, with `rules`.
+    fn outcome_with(
+        &mut self,
+        s: Version,
+        o: Version,
+        t: Version,
+        rules: &RuleMatcher,
+    ) -> (Vec<String>, Tree) {
         let lock = self.repo.lock_for_change("test", &mut |_| {}).unwrap();
         let mut packs = self.repo.new_packs().unwrap();
         let mut made = Made::default();
-        let rules = RuleMatcher::new(&RulesRead::default());
-        let m = merge_three(&self.repo, &mut packs, &mut made, false, &s, &o, &t, &rules).unwrap();
+        let m = merge_three(&self.repo, &mut packs, &mut made, false, &s, &o, &t, rules).unwrap();
         self.repo.store_packs(&lock, packs).unwrap();
         let described = m
             .conflicts
@@ -1763,6 +1820,95 @@ fn a_history_without_notes_is_followed_by_contents() {
         h.merged(s, o, t),
         with_folders(&moved_to(to, edit(1, "TWO")))
     );
+}
+
+/// A rule that Unity scenes are never merged line by line.
+fn scene_rule() -> RuleMatcher {
+    let text = "[[rule]]\nfiles = [\"*.unity\"]\nconflict-markers = false\n";
+    let (rules, _) = crate::rules::parse(text.as_bytes()).unwrap();
+    RuleMatcher::new(&RulesRead {
+        rules,
+        ..RulesRead::default()
+    })
+}
+
+/// `from` saved on `main`; on `main`, moved to `to` in a save of its own, then edited there; on
+/// `side`, edited in another place. Gives the three saves.
+fn moved_and_edited(h: &mut Hist, from: &str, to: &str) -> (Id, Id, Id) {
+    let first = h.first;
+    let s = h.save("main", first, &tree(&[(from, f(BODY))]));
+    let o = h.save("main", s, &tree(&[(to, f(BODY))]));
+    let o = h.save("main", o, &tree(&[(to, edit(0, "ONE"))]));
+    let t = h.save("side", s, &tree(&[(from, edit(4, "FIVE"))]));
+    (s, o, t)
+}
+
+/// Before a moved file's rule was asked under both its names, a scene renamed to a name no rule
+/// covers, and edited on both lines, was merged line by line.
+#[test]
+fn a_moved_file_is_merged_line_by_line_only_when_its_rule_allows_it_under_both_names() {
+    let mut h = Hist::new();
+    let (s, o, t) = moved_and_edited(&mut h, "Main.unity", "Main.txt");
+    let rules = scene_rule();
+    let want = [
+        "Main.txt: changed on both lines, and opalro.toml says conflict-markers = false \
+                 for it",
+    ];
+    let [vs, vo, vt] = [s, o, t].map(|id| h.version(id));
+    assert_eq!(h.outcome_with(vs, vo, vt, &rules).0, want);
+    // The move on the other line.
+    assert_eq!(h.outcome_with(vs, vt, vo, &rules).0, want);
+    // Both lines moved it to one place.
+    let both = h.save("side", s, &tree(&[("Main.txt", f(BODY))]));
+    let both = h.save("side", both, &tree(&[("Main.txt", edit(4, "FIVE"))]));
+    let vb = h.version(both);
+    assert_eq!(h.outcome_with(vs, vo, vb, &rules).0, want);
+    // Without the rule, it merges where it went.
+    let merged = h.merged(s, o, t);
+    assert_eq!(
+        merged,
+        tree(&[("Main.txt", f("ONE\ntwo\nthree\nfour\nFIVE\n"))])
+    );
+}
+
+#[test]
+fn a_file_moved_into_a_protected_name_is_not_merged() {
+    let mut h = Hist::new();
+    let (s, o, t) = moved_and_edited(&mut h, "Main.txt", "Main.unity");
+    let [vs, vo, vt] = [s, o, t].map(|id| h.version(id));
+    assert_eq!(
+        h.outcome_with(vs, vo, vt, &scene_rule()).0,
+        ["Main.unity: changed on both lines, and opalro.toml says conflict-markers = false for it"]
+    );
+}
+
+#[test]
+fn a_moved_file_whose_names_are_both_free_merges_as_before() {
+    let mut h = Hist::new();
+    let (s, o, t) = moved_and_edited(&mut h, "a.txt", "b.txt");
+    let [vs, vo, vt] = [s, o, t].map(|id| h.version(id));
+    let (conflicts, merged) = h.outcome_with(vs, vo, vt, &scene_rule());
+    assert!(conflicts.is_empty(), "{conflicts:?}");
+    assert_eq!(
+        merged,
+        tree(&[("b.txt", f("ONE\ntwo\nthree\nfour\nFIVE\n"))])
+    );
+}
+
+/// A move found by contents leaves the file as it was at the start, so only the other line
+/// changed it: nothing is merged line by line, and the rule has nothing to say.
+#[test]
+fn a_scene_moved_without_a_note_takes_the_other_lines_edit_where_it_went() {
+    let mut h = Hist::new();
+    let first = h.first;
+    let none: &[(&str, &str)] = &[];
+    let s = h.plant(&[first], &tree(&[("Main.unity", f(BODY))]), Some(none));
+    let o = h.plant(&[s], &tree(&[("Main.txt", f(BODY))]), Some(none));
+    let t = h.plant(&[s], &tree(&[("Main.unity", edit(4, "FIVE"))]), Some(none));
+    let [vs, vo, vt] = [s, o, t].map(|id| h.version(id));
+    let (conflicts, merged) = h.outcome_with(vs, vo, vt, &scene_rule());
+    assert!(conflicts.is_empty(), "{conflicts:?}");
+    assert_eq!(merged, tree(&[("Main.txt", edit(4, "FIVE"))]));
 }
 
 #[test]

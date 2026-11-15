@@ -431,6 +431,8 @@ pub(crate) fn merge_three(
     // Each version's files moved first, in the order of `Which`.
     let mut puts: [BTreeMap<String, Option<Put>>; 3] = Default::default();
     let mut clashes = Vec::new();
+    // Each followed file's name at the start, by where it went: its rule is asked under both.
+    let mut moved = BTreeMap::new();
     {
         let mut trees =
             [start, ours, theirs].map(|v| Tree::new(store, &made.listings, v.root, EXACT));
@@ -439,6 +441,7 @@ pub(crate) fn merge_three(
             let (moved_on, to, apart) = match (went[0].went.get(from), went[1].went.get(from)) {
                 (Some(o), Some(t)) if o == t => {
                     move_in(&mut trees[0], &mut puts[0], from, o)?;
+                    moved.insert(o.clone(), from.clone());
                     continue;
                 }
                 (Some(o), Some(t)) => (
@@ -478,6 +481,7 @@ pub(crate) fn merge_three(
                         Some(_) => {
                             move_in(&mut trees[0], &mut puts[0], from, to)?;
                             move_in(&mut trees[other], &mut puts[other], from, to)?;
+                            moved.insert(to.clone(), from.clone());
                             continue;
                         }
                     }
@@ -550,7 +554,7 @@ pub(crate) fn merge_three(
     }
     let [s, o, t] = roots;
     let time = made.deadline;
-    let mut merged = merge_trees(store, packs, made, inner, s, o, t, rules, time)?;
+    let mut merged = merge_trees(store, packs, made, inner, s, o, t, rules, &moved, time)?;
     merged.unfollowed = [Side::Ours, Side::Theirs]
         .into_iter()
         .zip(&went)

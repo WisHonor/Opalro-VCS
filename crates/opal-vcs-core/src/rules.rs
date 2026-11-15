@@ -121,10 +121,11 @@ impl RuleMatcher {
         }
     }
 
-    /// Whether the file at `path` (`a/b/c`) may be merged line by line.
+    /// Whether the file at `path` (`a/b/c`) may be merged line by line; `was` is the name a moved
+    /// file had at the starting point, whose rule must allow it too.
     #[must_use]
-    pub fn line_merge(&self, path: &str) -> LineMerge {
-        if !self.conflict_markers(path) {
+    pub fn line_merge(&self, path: &str, was: Option<&str>) -> LineMerge {
+        if !self.conflict_markers(path) || was.is_some_and(|was| !self.conflict_markers(was)) {
             LineMerge::RuleSaysNo
         } else if !self.whole {
             LineMerge::RulesNotWhole
@@ -810,14 +811,18 @@ mod tests {
     fn no_file_is_merged_line_by_line_while_the_rules_are_not_read_whole() {
         let rule = "[[rule]]\nfiles = [\"*.unity\"]\nconflict-markers = false\n";
         let whole = RuleMatcher::new(&read_text(rule));
-        assert_eq!(whole.line_merge("a.txt"), LineMerge::Yes);
-        assert_eq!(whole.line_merge("Main.unity"), LineMerge::RuleSaysNo);
+        assert_eq!(whole.line_merge("a.txt", None), LineMerge::Yes);
+        assert_eq!(whole.line_merge("Main.unity", None), LineMerge::RuleSaysNo);
         let none = RuleMatcher::new(&RulesRead::default());
-        assert_eq!(none.line_merge("Main.unity"), LineMerge::Yes);
+        assert_eq!(none.line_merge("Main.unity", None), LineMerge::Yes);
         // Passed over whole: no rule is known, and no file is merged.
         let skipped = RuleMatcher::new(&read_text("[[rule]\nfiles = [\"*.unity\"]\n"));
         for path in ["a.txt", "Main.unity"] {
-            assert_eq!(skipped.line_merge(path), LineMerge::RulesNotWhole, "{path}");
+            assert_eq!(
+                skipped.line_merge(path, None),
+                LineMerge::RulesNotWhole,
+                "{path}"
+            );
         }
         // One part passed over: the rules read still say no where they do.
         for part in ["colour = \"red\"\n", ""] {
@@ -832,9 +837,31 @@ mod tests {
             let read = read_text(&text);
             assert_eq!(read.ignored.len(), 1, "{text}");
             let m = RuleMatcher::new(&read);
-            assert_eq!(m.line_merge("a.txt"), LineMerge::RulesNotWhole, "{text}");
-            assert_eq!(m.line_merge("Main.unity"), LineMerge::RuleSaysNo, "{text}");
+            assert_eq!(
+                m.line_merge("a.txt", None),
+                LineMerge::RulesNotWhole,
+                "{text}"
+            );
+            assert_eq!(
+                m.line_merge("Main.unity", None),
+                LineMerge::RuleSaysNo,
+                "{text}"
+            );
         }
+    }
+
+    #[test]
+    fn a_moved_file_is_merged_only_when_both_its_names_allow_it() {
+        let m = matcher(&[(&["*.unity"], Some(false))]);
+        assert_eq!(m.line_merge("Main.txt", Some("a.txt")), LineMerge::Yes);
+        assert_eq!(
+            m.line_merge("Main.txt", Some("Main.unity")),
+            LineMerge::RuleSaysNo
+        );
+        assert_eq!(
+            m.line_merge("Main.unity", Some("Main.txt")),
+            LineMerge::RuleSaysNo
+        );
     }
 
     #[test]

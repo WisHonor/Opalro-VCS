@@ -3,7 +3,7 @@
 
 use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 use super::{Clash, CombineError, Conflict, Names, NotMerged, Side, Text, Which, merge_text};
@@ -86,7 +86,8 @@ type Three<T> = [T; 3];
 pub(super) const WHICH: Three<Which> = [Which::Start, Which::Ours, Which::Theirs];
 
 /// Merges `ours` and `theirs` against `start`, all root listings. `inner`: this merge makes a
-/// made-up starting point, whose merged texts a later merge reads.
+/// made-up starting point, whose merged texts a later merge reads. `moved` gives a followed
+/// file's name at the start, by where it is now.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn merge_trees(
     store: &Store,
@@ -97,6 +98,7 @@ pub(crate) fn merge_trees(
     ours: Id,
     theirs: Id,
     rules: &RuleMatcher,
+    moved: &BTreeMap<String, String>,
     deadline: Duration,
 ) -> Result<Merged, CombineError> {
     let mut merged = Merged {
@@ -119,6 +121,7 @@ pub(crate) fn merge_trees(
         made,
         inner,
         rules,
+        moved,
         deadline,
         limits: [(); 3].map(|()| SaveLimits::default()),
         merged,
@@ -253,6 +256,7 @@ struct Walk<'a> {
     made: &'a mut Made,
     inner: bool,
     rules: &'a RuleMatcher,
+    moved: &'a BTreeMap<String, String>,
     deadline: Duration,
     /// Each version is held to a save's limits on its own.
     limits: Three<SaveLimits>,
@@ -400,7 +404,9 @@ impl Walk<'_> {
         o: &Entry,
         t: &Entry,
     ) -> Result<Option<(Id, u64)>, CombineError> {
-        let rule = self.rules.line_merge(path);
+        let rule = self
+            .rules
+            .line_merge(path, self.moved.get(path).map(String::as_str));
         if rule == LineMerge::RuleSaysNo {
             self.conflict(path, Clash::BothChanged(NotMerged::NoMarkers));
             return Ok(None);
