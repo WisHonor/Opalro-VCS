@@ -3,6 +3,7 @@
 //! too. Each folder is opened from the one above it, a name at a time, never through a link
 //! (decision 048).
 
+use std::collections::hash_map::Entry as Slot;
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::ffi::OsStr;
 use std::fs;
@@ -16,7 +17,7 @@ use opal_platform::dir::{Dir, DirEntry, EntryMeta, EntryType, is_link_refusal};
 
 use super::{Child, Folders, Kind, NAMED, SaveError, listed};
 use crate::conflict::standing::as_it_stands;
-use crate::conflict::{self, Record};
+use crate::conflict::{self, Record, Settled};
 use crate::drive::Drive;
 use crate::id::Id;
 use crate::ignore::{Decision, InForce, Matcher, Rules};
@@ -358,6 +359,11 @@ impl Handles {
         self.make_room();
     }
 
+    /// The project folder, as a handle that can be kept.
+    pub(super) fn top(&self) -> Arc<Dir> {
+        Arc::clone(&self.top)
+    }
+
     fn deepest(&self) -> &Arc<Dir> {
         self.down.last().map_or(&self.top, |(.., dir)| dir)
     }
@@ -446,6 +452,9 @@ pub(super) struct Base<'a> {
     ahead: Option<&'a Ahead>,
     /// Whether the project keeps conflicts, so the walk follows those its listings hold.
     pub(super) conflicts: bool,
+    /// Whether the walk is a save's, which keeps a conflict standing as a version in a folder
+    /// gone from disk.
+    pub(super) settles: bool,
 }
 
 impl<'a> Base<'a> {
@@ -458,6 +467,7 @@ impl<'a> Base<'a> {
             spent: false,
             ahead: None,
             conflicts: false,
+            settles: false,
         }
     }
 
@@ -1432,6 +1442,8 @@ pub(super) struct Scan {
     pub(super) old_ids: HashMap<String, Id>,
     /// The new listings of the folders gone from disk that come back, still to be stored.
     pub(super) rebuilt: Vec<Listing>,
+    /// The new conflict records those listings name, still to be stored.
+    pub(super) rebuilt_records: Vec<Record>,
     /// The paths of the entries kept as they were in those folders.
     pub(super) gone_kept: Vec<String>,
     /// What the walk noted for the warnings about files the ignore rules match.
@@ -1611,6 +1623,7 @@ fn scan_folder(
     // A folder gone from disk comes back if something below it is kept as it was.
     let mut back = Vec::new();
     let mut rebuilt = Vec::new();
+    let mut rebuilt_records = Vec::new();
     let mut gone_kept = Vec::new();
     let gone = rules.gone(&folders);
     // All are met before any is searched, so one met again is counted whole first.
@@ -1623,16 +1636,22 @@ fn scan_folder(
         let found = |c: &[Child]| c.binary_search_by(|c| c.name.as_str().cmp(&name)).is_ok();
         let taken = folders.get(&rel).is_some_and(|c| found(c));
         let top = path_in(&rel, &name);
-        let named = &mut rules.git_names;
+        let search = Search {
+            git_names: &mut rules.git_names,
+            records: &mut rules.records,
+            in_conflict: rules.in_conflict.contains(&rel),
+        };
         let listing = (id, again);
         if let Some(gone) =
-            rebuild_gone(&mut base, &mut limits, drive, &top, listing, taken, named)?
+            rebuild_gone(&mut base, &mut limits, drive, &top, listing, taken, search)?
         {
             rebuilt.extend(gone.listings);
+            rebuilt_records.extend(gone.records);
             rules.kept_conflicts.extend(gone.conflicts);
             let kind = Kind::Back {
                 id: gone.id,
                 kept: gone.kept.len(),
+                met: gone.met,
             };
             gone_kept.extend(gone.kept);
             let child = Child {
@@ -1703,6 +1722,7 @@ fn scan_folder(
         old: rules.old,
         old_ids: rules.old_ids,
         rebuilt,
+        rebuilt_records,
         gone_kept,
         noted: Noted {
             ignored: rules.ignored,
@@ -2099,6 +2119,19 @@ struct Gone {
     listings: Vec<Listing>,
     /// The conflicts kept as they were below it, and the kept folders holding one, by path.
     conflicts: Vec<(String, EntryKind, Id)>,
+    /// The new records of the conflicts a save keeps below it, still to be stored.
+    records: Vec<Record>,
+    /// How many conflicts a save keeps below it, settled as the folder shows them.
+    met: u64,
+}
+
+/// What [`rebuild_gone`]'s search gives back to the walk: the names Git treats as `.git` it drops,
+/// and the records it reads, once. `in_conflict` when the gone folder is in a folder a conflict
+/// stands as, where a conflict is damage.
+struct Search<'r> {
+    git_names: &'r mut Named,
+    records: &'r mut HashMap<Id, Record>,
+    in_conflict: bool,
 }
 
 /// One folder open in [`rebuild_gone`]'s search.
@@ -2140,7 +2173,7 @@ fn rebuild_gone(
     top: &str,
     (id, counted): (Id, bool),
     taken: bool,
-    git_names: &mut Named,
+    search: Search,
 ) -> Result<Option<Gone>, SaveError> {
     let too_large = |detail| SaveError::TooLarge { detail };
     let depth = top.split('/').count();
@@ -2148,6 +2181,7 @@ fn rebuild_gone(
     let mut kept_in_all = Vec::new();
     let mut listings = Vec::new();
     let mut conflicts = Vec::new();
+    let (mut records, mut met) = (Vec::new(), 0u64);
     let mut read = Some((String::new(), top.len() + 1, id, counted));
     loop {
         if let Some((name, prefix, id, counted)) = read.take()
@@ -2158,10 +2192,54 @@ fn rebuild_gone(
         {
             // Only now is a path below `top` needed, to name it.
             for git_name in &dropped {
-                git_names.add(path_below(top, &open, &name, git_name));
+                search
+                    .git_names
+                    .add(path_below(top, &open, &name, git_name));
             }
             let kept = kept_as_they_were(&listing, drive);
             let mut holds = Vec::new();
+            for (e, kept) in listing.entries().iter().zip(&kept) {
+                let conflict = e.kind == EntryKind::Conflict && base.conflicts;
+                if conflict && search.in_conflict {
+                    let place = escape(&path_below(top, &open, &name, &e.name), false);
+                    return Err(conflict::nested(&place).into());
+                }
+                if *kept {
+                    continue;
+                }
+                // A save keeps a conflict standing as a version, which only the person settles;
+                // one shown with markers is fixed by its removal.
+                if !(conflict && base.settles) {
+                    continue;
+                }
+                let path = path_below(top, &open, &name, &e.name);
+                let record = match search.records.entry(e.id) {
+                    Slot::Occupied(r) => r.into_mut(),
+                    Slot::Vacant(v) => v.insert(base.store.conflict(&e.id).map_err(|err| {
+                        conflict::unreadable(&conflict::at_path(&path), &e.id, err)
+                    })?),
+                };
+                let seen = conflict::seen(record, None, |_| Ok(conflict::Left::default()))
+                    .map_err(RepoError::from)?;
+                let id = match conflict::settled(record, seen, None, false) {
+                    Settled::Fixed => continue,
+                    Settled::Kept => e.id,
+                    Settled::Again(again) => {
+                        let id = again.id();
+                        records.push(again);
+                        id
+                    }
+                };
+                if taken {
+                    return Err(SaveError::InTheWay {
+                        path: top.to_owned(),
+                        kept: path,
+                    });
+                }
+                limits.add(1).map_err(too_large)?;
+                met += 1;
+                holds.push(Entry { id, ..e.clone() });
+            }
             for (e, _) in listing.entries().iter().zip(&kept).filter(|(_, k)| **k) {
                 if taken {
                     return Err(SaveError::InTheWay {
@@ -2174,6 +2252,10 @@ fn rebuild_gone(
                     let inside = prefix + e.name.len() + 1;
                     let below = depth + open.len() + 1;
                     holds_conflict = count_kept_folder(base.store, limits, below, inside, e.id)?;
+                    if holds_conflict && base.conflicts && search.in_conflict {
+                        let place = escape(&path_below(top, &open, &name, &e.name), false);
+                        return Err(conflict::nested(&place).into());
+                    }
                 }
                 limits.add(1).map_err(too_large)?;
                 holds.push(e.clone());
@@ -2243,6 +2325,8 @@ fn rebuild_gone(
                     kept: kept_in_all,
                     listings,
                     conflicts,
+                    records,
+                    met,
                 }));
             }
         }
@@ -5261,7 +5345,7 @@ mod tests {
             Kind::Symlink => "link".to_owned(),
             Kind::Folder => "folder".to_owned(),
             Kind::Kept { kind, id, size } => format!("kept {kind:?} {id:?} {size}"),
-            Kind::Back { id, kept } => format!("back {id:?} {kept}"),
+            Kind::Back { id, kept, met } => format!("back {id:?} {kept} {met}"),
             Kind::Left { kind, id, size } => format!("left {kind:?} {id:?} {size}"),
         }
     }

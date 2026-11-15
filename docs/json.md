@@ -152,6 +152,7 @@ Saving gives one of two documents, told apart by `result`.
 | `save` | save | The new save. |
 | `changed_files` | number or `null` | How many files were added, removed or changed since the save before: for an amend, since its first parent, so every file the new save changes. It can be `0` when only folders changed. **`null` means Opalro couldn't count them.** The save was made all the same, and a `changed_files_not_counted` warning says why. |
 | `replaced` | string or `null` | The fingerprint (64 hex digits) of the save an amend replaced. `null` for any other save. |
+| `conflicts` | number | The number of places the save looked at that are still in conflict ([decision 177](decisions/177-recording-a-fix-save-and-resolve.md)): kept as they were, or with what the folder holds as the conflict's own version. A save of some paths counts only the places it looked at. `0` in a project that doesn't keep conflicts. |
 | `warnings` | list | See §4. |
 | `ignored_project_identity` | object | Only when present: see below. |
 

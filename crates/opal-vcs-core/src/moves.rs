@@ -56,7 +56,15 @@ pub(crate) fn same_contents(
     to_root: Id,
     most_left_bytes: usize,
 ) -> Moves {
-    count_and_moves(store, unstored, from_root, to_root, most_left_bytes)?.1
+    count_and_moves(
+        store,
+        unstored,
+        from_root,
+        to_root,
+        most_left_bytes,
+        &|_, _| false,
+    )?
+    .1
 }
 
 /// Moves found by contents: none at all when there were too many files to hold.
@@ -81,17 +89,20 @@ thread_local! {
 /// How many files differ between the two roots, counted as [`crate::diff::count_changes`]
 /// counts them, and [`same_contents`]' moves. The folders that differ are walked once, and again
 /// only if a file arrived and a file left with contents no other file that left has. The moves
-/// have their own result, so a second walk that fails leaves the count.
+/// have their own result, so a second walk that fails leaves the count. Where `passed_over` says
+/// so from the entries on each side, a path and everything below it never left or arrived.
 pub(crate) fn count_and_moves(
     store: &Store,
     unstored: &HashMap<Id, Listing>,
     from_root: Id,
     to_root: Id,
     most_left_bytes: usize,
+    passed_over: &PassedOver,
 ) -> Result<(usize, Moves), StoreError> {
     // The files that left first: arrivals are worth keeping only for the contents of one, and a
     // save that adds a great deal often has none.
     let (mut changed, mut left, mut left_bytes, mut arrivals) = (0, Places::new(), 0usize, false);
+    let mut passed = Passed::new(passed_over);
     for_each_entry_change_in(
         store,
         unstored,
@@ -99,6 +110,9 @@ pub(crate) fn count_and_moves(
         to_root,
         |path, old, new| {
             changed += usize::from(file_change(old, new).is_some());
+            if passed.at(path, old, new) {
+                return Ok(());
+            }
             arrivals |= matches!((old, file(new)), (None, Some(_)));
             if let (Some(f), None) = (file(old), new)
                 && left_bytes <= most_left_bytes
@@ -123,8 +137,47 @@ pub(crate) fn count_and_moves(
     let room = most_left_bytes.saturating_sub(left_bytes);
     Ok((
         changed,
-        paired(store, unstored, from_root, to_root, left, room),
+        paired(
+            store,
+            unstored,
+            (from_root, to_root),
+            left,
+            room,
+            passed_over,
+        ),
     ))
+}
+
+/// Whether a comparison passes over a path, from the entries on each side.
+pub(crate) type PassedOver = dyn Fn(Option<&Entry>, Option<&Entry>) -> bool;
+
+/// The paths a comparison passes over, as `over` names them, and what is below them, each with a
+/// `/` after it, while paths below may still come.
+struct Passed<'p> {
+    over: &'p PassedOver,
+    below: Vec<String>,
+}
+
+impl<'p> Passed<'p> {
+    fn new(over: &'p PassedOver) -> Passed<'p> {
+        Passed {
+            over,
+            below: Vec::new(),
+        }
+    }
+
+    /// Whether `path`, coming in path order with `old` and `new`, is passed over.
+    fn at(&mut self, path: &str, old: Option<&Entry>, new: Option<&Entry>) -> bool {
+        self.below.retain(|f| path.starts_with(f.as_str()));
+        if !self.below.is_empty() {
+            return true;
+        }
+        let over = (self.over)(old, new);
+        if over {
+            self.below.push(format!("{path}/"));
+        }
+        over
+    }
 }
 
 /// The moves of the files in `left` (contents to the one path that left with them), from a
@@ -133,20 +186,24 @@ pub(crate) fn count_and_moves(
 fn paired(
     store: &Store,
     unstored: &HashMap<Id, Listing>,
-    from_root: Id,
-    to_root: Id,
+    (from_root, to_root): (Id, Id),
     mut left: Places,
     room: usize,
+    passed_over: &PassedOver,
 ) -> Moves {
     #[cfg(test)]
     SECOND_WALKS.set(SECOND_WALKS.get() + 1);
     let (mut arrived, mut held) = (Places::new(), 0usize);
+    let mut passed = Passed::new(passed_over);
     for_each_entry_change_in(
         store,
         unstored,
         Some(from_root),
         to_root,
         |path, old, new| {
+            if passed.at(path, old, new) {
+                return Ok(());
+            }
             if let (None, Some(f)) = (old, file(new))
                 && left.contains_key(&f.id)
                 && held <= room
@@ -533,7 +590,8 @@ mod tests {
         let store = Store::open(dir.path()).unwrap();
         let mut unstored = HashMap::new();
         let (a, b) = (tree(&mut unstored, from), tree(&mut unstored, to));
-        let (count, notes) = count_and_moves(&store, &unstored, a, b, most_left_bytes).unwrap();
+        let (count, notes) =
+            count_and_moves(&store, &unstored, a, b, most_left_bytes, &|_, _| false).unwrap();
         let notes = notes.unwrap().unwrap_or_default();
         let notes = notes.into_iter().map(|n| (n.from, n.to)).collect();
         (count, notes)
@@ -633,7 +691,8 @@ mod tests {
                 Ok::<(), StoreError>(())
             })
             .unwrap();
-            let (got, _) = count_and_moves(&store, &unstored, a, b, usize::MAX).unwrap();
+            let (got, _) =
+                count_and_moves(&store, &unstored, a, b, usize::MAX, &|_, _| false).unwrap();
             assert_eq!(got, want, "{from:?} -> {to:?}");
         }
     }

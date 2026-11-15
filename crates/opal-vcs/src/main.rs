@@ -1067,6 +1067,7 @@ fn save(json: bool, args: SaveArgs, opened: &mut Option<Repository>) -> Result<(
             short_change_id: short,
             mut warnings,
             replaced,
+            conflicts,
         } => {
             // The save is made, so nothing from here on may fail the command.
             warnings.extend(repo.store().warnings());
@@ -1078,6 +1079,7 @@ fn save(json: bool, args: SaveArgs, opened: &mut Option<Repository>) -> Result<(
                     "save": output::save_json(&save_id, &save, &short),
                     "changed_files": changed_files,
                     "replaced": replaced.map(|id| id.to_hex()),
+                    "conflicts": conflicts,
                     "warnings": output::warnings_json(&warnings),
                 });
                 format!("{}\n", with_ignored(document, ignored.as_ref()))
@@ -1114,6 +1116,12 @@ fn save(json: bool, args: SaveArgs, opened: &mut Option<Repository>) -> Result<(
                         s.command("opalro status")
                     ));
                 }
+                let status = s.command("opalro status");
+                details.extend(output::still_in_conflict(
+                    conflicts,
+                    only.is_some(),
+                    &status,
+                ));
                 if !details.is_empty() {
                     text += "\n";
                 }

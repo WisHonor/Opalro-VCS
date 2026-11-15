@@ -269,13 +269,16 @@ While it works, a terminal's stderr shows the turning mark `Saving` (§8).
 | Saved | `Saved <id> "<message's first line>" on <line>  (2 files)` | | |
 | Saved on a new line (`--line`, or the name asked for) | the same, `on` the new line | `You're on the new line <line>.` | |
 | Saved what paths name | the same | `Only what you named was saved: opalro status lists the changes left out.` | |
+| Saved, with places still in conflict | the same | `2 places are still in conflict: opalro status lists them.` (`1 place is still in conflict: opalro status lists it.`) | |
+| Saved what paths name, with places still in conflict | the same | `2 of the places you saved are still in conflict: opalro status lists every place in conflict.` (`1 of the places you saved is still in conflict: …`), after the line above | |
 | Updated (`--amend`) | `Updated save <id> "<message's first line>" on <line>  (2 files)` | `The ID stays the same.` | |
 | The files couldn't be counted | the same, ending `(couldn't count the changed files)` | | |
 | Nothing to save | `Nothing to save: no changes since your last save, <id> "<message>".` (`Nothing to save there: it matches your last save, …` with paths) | `No line was made: opalro line new <name> makes one without saving.` when `--line` was given | |
 | Nothing to amend | `Nothing to amend: your files match your last save, <id> "<message>", and so does the message.` (`what you named matches` with paths) | | |
 
 - The count is files, never lines: counting lines would slow every save. `on <line>` is left out for a save that names no line.
-- **Colour:** `Saved` and `Updated` green and bold, the ID magenta and bold, the line blue, the count dim, the `opalro status` of the partial-save line cyan.
+- **Places in conflict** ([decision 177](decisions/177-recording-a-fix-save-and-resolve.md)): a save never asks about them and never stops for them. Where the folder shows a place untouched, the save keeps the conflict as it is; a marked text with markers left is kept as the conflict's own version; one with no markers left, or gone, is saved as fixed; a place that stands as a version and holds something else is kept as a conflict with that as its own version. The count is of the places the save looked at that are still in conflict, said only when it isn't 0; a save of some paths counts only those it looked at.
+- **Colour:** `Saved` and `Updated` green and bold, the ID magenta and bold, the line blue, the count dim, the `opalro status` of the partial-save line and of the conflict line cyan.
 - The questions and stops (a large save, a save away from a line, the first save's line endings and Git LFS pointers) keep their words and flags (§10); only their layout follows §6.
 
 ### `opalro status`

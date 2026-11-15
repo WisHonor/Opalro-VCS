@@ -1,5 +1,6 @@
 //! Conflict records: every version a place in conflict holds (docs/storage-format.md section 8).
 
+use std::collections::BTreeSet;
 use std::io;
 
 use crate::encoding::{DecodeError, Reader, Writer};
@@ -179,6 +180,50 @@ pub(crate) fn seen(
         }
         _ => Seen::Fixed,
     })
+}
+
+/// How a save records the places it meets: none fixed for `save`; for `resolve`, the places to
+/// record as the folder shows them.
+#[derive(Debug, Default)]
+pub(crate) struct Recording {
+    pub fixed: BTreeSet<String>,
+}
+
+/// What a save puts at a place in conflict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Settled {
+    /// The conflict as it is: its kind-6 entry, the same record.
+    Kept,
+    /// The conflict with a new record: the same terms, its own version what the folder holds.
+    Again(Record),
+    /// What the folder holds: an ordinary entry, or nothing.
+    Fixed,
+}
+
+/// What a save puts at the place of `c`, the folder showing `seen` there. `built` is the entry the
+/// walk built at the place, or `None` for nothing there; a new record keeps `c`'s terms and takes
+/// `built` as its own version, with `c`'s marker length while markers are left. `fixed` records
+/// the place as the folder holds it, whatever it shows.
+pub(crate) fn settled(
+    c: &Record,
+    seen: Seen,
+    built: Option<(EntryKind, Id, u64)>,
+    fixed: bool,
+) -> Settled {
+    let again = |marker| {
+        let version = built.map(|(kind, id, size)| Term { kind, id, size });
+        Settled::Again(Record {
+            terms: c.terms.clone(),
+            own: Some(Own { version, marker }),
+        })
+    };
+    match seen {
+        _ if fixed => Settled::Fixed,
+        Seen::Untouched => Settled::Kept,
+        Seen::Fixed => Settled::Fixed,
+        Seen::MarkersLeft(_) => again(c.marker()),
+        Seen::ChangedInPlace => again(0),
+    }
 }
 
 /// `e`, met reading the record `id` of the conflict `at` (`at <path>`, or its name in a folder

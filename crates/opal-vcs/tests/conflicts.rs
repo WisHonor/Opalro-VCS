@@ -821,3 +821,82 @@ fn a_goto_to_a_conflicted_save_stopped_at_every_step_is_finished_or_never_happen
     }
     assert!(stopped > 1, "no fault point was reached");
 }
+
+/// A project on `main` at a planted save holding `plain.txt`, a conflict shown with markers at
+/// `marked.txt` and one standing as your version at `yours.png`, the folder half fixed.
+fn half_fixed() -> Env {
+    let env = started();
+    plant(
+        &env,
+        &[("plain.txt", b"one\n")],
+        &[
+            ("fixed.txt", marked()),
+            ("marked.txt", marked()),
+            ("yours.png", versions(Some(term(PICTURE)))),
+        ],
+    );
+    put(&env, "plain.txt", b"two\n");
+    put(&env, "fixed.txt", FIXED);
+    put(&env, "marked.txt", HALF);
+    put(&env, "yours.png", PICTURE);
+    env
+}
+
+/// `opalro save` with `args`, which must make a save that `goto` would write as the folder is.
+fn saved(env: &Env, args: &[&str]) -> String {
+    let (shown, _) = run(env, &[&["save"], args].concat(), 0);
+    assert!(shown.starts_with("Saved "), "{shown}");
+    support::assert_folder_is_goto_of(env, support::main_tip(env));
+    shown
+}
+
+#[test]
+fn save_says_how_many_conflicts_it_met() {
+    let env = half_fixed();
+    // `fixed.txt` is fixed; `marked.txt` keeps its half-fixed text, `yours.png` stays as it is.
+    let shown = saved(&env, &["Half way"]);
+    assert!(
+        shown.contains("\n    2 places are still in conflict: opalro status lists them.\n"),
+        "{shown}"
+    );
+    // A save of some paths speaks only of those.
+    put(&env, "yours.png", b"painted over");
+    let shown = saved(&env, &["Painted", "yours.png"]);
+    assert!(
+        shown.contains(
+            "\n    1 of the places you saved is still in conflict: opalro status lists every \
+             place in conflict.\n"
+        ),
+        "{shown}"
+    );
+    put(&env, "plain.txt", b"three\n");
+    let shown = saved(&env, &["Plain", "plain.txt"]);
+    assert!(!shown.contains("conflict"), "{shown}");
+    put(&env, "marked.txt", FIXED);
+    let shown = saved(&env, &["Fixed"]);
+    assert!(
+        shown.contains("\n    1 place is still in conflict: opalro status lists it.\n"),
+        "{shown}"
+    );
+    let doc = json(&env, &["status"]);
+    let places: Vec<&str> = doc["conflicts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(places, ["yours.png"], "{doc}");
+}
+
+#[test]
+fn save_json_counts_them() {
+    let env = half_fixed();
+    let doc = json(&env, &["save", "Half way"]);
+    assert_eq!(doc["result"], "saved", "{doc}");
+    assert_eq!(doc["conflicts"], 2, "{doc}");
+    support::assert_folder_is_goto_of(&env, support::main_tip(&env));
+    put(&env, "plain.txt", b"three\n");
+    let doc = json(&env, &["save", "Plain", "plain.txt"]);
+    assert_eq!(doc["conflicts"], 0, "{doc}");
+    support::assert_folder_is_goto_of(&env, support::main_tip(&env));
+}

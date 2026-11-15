@@ -596,6 +596,28 @@ pub fn files(n: usize) -> String {
     counted(n as u64, "file", "files")
 }
 
+/// What `opalro save` says of the `n` places it met that are still in conflict, for a save of
+/// `some` paths or of everything, `status` the command shown; nothing when there are none.
+pub fn still_in_conflict(n: u64, some: bool, status: &str) -> Option<String> {
+    Some(match (n, some) {
+        (0, _) => return None,
+        (1, false) => format!("1 place is still in conflict: {status} lists it."),
+        (n, false) => format!(
+            "{} places are still in conflict: {status} lists them.",
+            thousands(n)
+        ),
+        (1, true) => format!(
+            "1 of the places you saved is still in conflict: {status} lists every place in \
+             conflict."
+        ),
+        (n, true) => format!(
+            "{} of the places you saved are still in conflict: {status} lists every place in \
+             conflict.",
+            thousands(n)
+        ),
+    })
+}
+
 /// A file's change with its lines, as `opalro changes --json` gives it. It is written as it is
 /// shown, a line at a time, never held as one value.
 pub struct LinesJson<'a> {
