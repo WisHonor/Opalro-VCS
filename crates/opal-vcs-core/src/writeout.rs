@@ -12,8 +12,9 @@ use std::sync::Arc;
 
 use opal_platform::dir::{Dir, EntryMeta, EntryType, is_link_refusal};
 
+use crate::conflict::Listings;
 use crate::diary::DiaryEntry;
-use crate::diff::{for_each_change, for_each_change_in, for_each_entry_change_in};
+use crate::diff::{for_each_change_with, for_each_entry_change_with};
 use crate::drive::{self, Drive};
 use crate::filecache::FileCache;
 use crate::fsio::{self, BETWEEN_TRIES, Done, TRIES};
@@ -51,6 +52,8 @@ pub struct Plan {
     pub carried: usize,
     /// What reading the folder found wrong.
     pub warnings: Vec<Warning>,
+    /// Whether a folder of `to` read for the switch held a conflict, whatever it stands as.
+    pub holds_conflicts: bool,
 }
 
 /// What carrying out a journal did.
@@ -103,7 +106,15 @@ fn told_whose(repo: &Repository, e: SaveError, from: Id, to: Id) -> SaveError {
     }
     let holds = || -> Result<(), RepoError> {
         let root = repo.store().save(&from, repo.signatures_allowed())?.root;
-        for_each_change(repo.store(), None, root, |_| Ok::<(), RepoError>(()))
+        let unstored = HashMap::new();
+        let standing = Listings::standing(repo, &unstored);
+        for_each_change_with(
+            &standing,
+            &standing,
+            None,
+            root,
+            |_| Ok::<(), RepoError>(()),
+        )
     };
     let named = match holds() {
         Err(RepoError::OpalName { .. }) => from,
@@ -132,8 +143,12 @@ fn planned(
     let to_root = store.save(&to, repo.signatures_allowed())?.root;
     let now = read_folder(repo, from_root, false, git_excludes, Some(drive))
         .map_err(|e| e.in_save(from, is_current(repo, from)))?;
+    // Both saves are read as they stand in the folder, each conflict as what it stands as. The
+    // target has a side of its own, so only what is read for it says it holds a conflict.
+    let here = Listings::standing(repo, &now.listings);
+    let there = here.side();
     let mut unsaved = BTreeSet::new();
-    for_each_change_in(store, &now.listings, Some(from_root), now.root, |c| {
+    for_each_change_with(&here, &here, Some(from_root), now.root, |c| {
         unsaved.insert(c.path.to_owned());
         Ok::<(), SaveError>(())
     })?;
@@ -141,18 +156,16 @@ fn planned(
     // (decision 065), and once there it is no longer unsaved.
     if !remove_new {
         let mut unlike_target = BTreeSet::new();
-        for_each_change_in(store, &now.listings, Some(to_root), now.root, |c| {
+        for_each_change_with(&there, &here, Some(to_root), now.root, |c| {
             unlike_target.insert(c.path.to_owned());
             Ok::<(), SaveError>(())
         })?;
         unsaved.retain(|p| unlike_target.contains(p));
     }
     let carried = unsaved.len();
-    // Looked up only by ID, and each was read or built under the ID it is kept by.
-    let stored = &now.listings;
     // Where the target differs from `from`, and, of those, where it holds an entry to write.
     let (mut switched, mut written) = (BTreeSet::new(), BTreeSet::new());
-    for_each_entry_change_in(store, stored, Some(from_root), to_root, |path, _, t| {
+    for_each_entry_change_with(&here, &there, Some(from_root), to_root, |path, _, t| {
         switched.insert(path.to_owned());
         if t.is_some() {
             written.insert(path.to_owned());
@@ -162,8 +175,8 @@ fn planned(
 
     // Compared as the drive compares names, so a path given in another case still matches.
     let only = only.map(|o| Scope::paths(o, drive));
-    let mut target = Tree::new(store, stored, to_root, drive);
-    let mut folder = Tree::new(store, &now.listings, now.root, drive);
+    let mut target = Tree::new(&there, to_root, drive);
+    let mut folder = Tree::new(&here, now.root, drive);
     let mut refused = BTreeSet::new();
     let mut plan = Plan {
         carried,
@@ -172,78 +185,72 @@ fn planned(
     };
     // Every path where the folder differs from the target.
     let mut visited = BTreeSet::new();
-    for_each_entry_change_in(
-        store,
-        &now.listings,
-        Some(now.root),
-        to_root,
-        |path, n, t| {
-            visited.insert(path.to_owned());
-            if !in_scope(path, only.as_ref(), t) {
-                return Ok(());
-            }
-            if let Some(at) = refused_at(path, &mut target, &mut folder)? {
-                refused.insert(at);
-                return Ok(());
-            }
-            // Project links and what their folders hold are never touched (decision 050).
-            if [n, t].into_iter().flatten().any(not_ours)
-                || below_project_link(path, &mut target, &mut folder)?
-            {
-                return Ok(());
-            }
-            if !remove_new {
-                if !switched.contains(path) {
-                    // A folder the target holds and the user removed is made again when the
-                    // switch writes something of the target's into it; making it overwrites
-                    // nothing. Removals below it don't count: the folder stays gone.
-                    let needed = n.is_none()
-                        && t.is_some_and(|e| e.kind == EntryKind::Folder)
-                        && any_below(path, &written);
-                    if !needed {
-                        return Ok(()); // unsaved work the switch doesn't reach comes along
-                    }
-                } else if collides(path, &unsaved) {
-                    plan.collisions.push(path.to_owned());
-                    return Ok(());
+    for_each_entry_change_with(&here, &there, Some(now.root), to_root, |path, n, t| {
+        visited.insert(path.to_owned());
+        if !in_scope(path, only.as_ref(), t) {
+            return Ok(());
+        }
+        if let Some(at) = refused_at(path, &mut target, &mut folder)? {
+            refused.insert(at);
+            return Ok(());
+        }
+        // Project links and what their folders hold are never touched (decision 050).
+        if [n, t].into_iter().flatten().any(not_ours)
+            || below_project_link(path, &mut target, &mut folder)?
+        {
+            return Ok(());
+        }
+        if !remove_new {
+            if !switched.contains(path) {
+                // A folder the target holds and the user removed is made again when the
+                // switch writes something of the target's into it; making it overwrites
+                // nothing. Removals below it don't count: the folder stays gone.
+                let needed = n.is_none()
+                    && t.is_some_and(|e| e.kind == EntryKind::Folder)
+                    && any_below(path, &written);
+                if !needed {
+                    return Ok(()); // unsaved work the switch doesn't reach comes along
                 }
+            } else if collides(path, &unsaved) {
+                plan.collisions.push(path.to_owned());
+                return Ok(());
             }
-            let expected = n.map(expected_of);
-            let change = match t {
-                None if n.is_some_and(|e| e.kind == EntryKind::Folder) => Change::RemoveFolder,
-                None => Change::RemoveFile,
-                Some(e) => {
-                    let c = Content {
-                        id: e.id,
-                        size: e.size,
-                    };
-                    match e.kind {
-                        EntryKind::Folder => Change::MakeFolder,
-                        EntryKind::Executable => Change::Executable(c),
-                        EntryKind::Symlink => {
-                            let shape = match link_target(store, c)? {
-                                Some(bytes) => link_shape(&mut target, path, &bytes)?,
-                                None => None,
-                            };
-                            if shape.is_some() {
-                                Change::Link(c)
-                            } else {
-                                plan.placeholders.push(path.to_owned());
-                                Change::File(c)
-                            }
+        }
+        let expected = n.map(expected_of);
+        let change = match t {
+            None if n.is_some_and(|e| e.kind == EntryKind::Folder) => Change::RemoveFolder,
+            None => Change::RemoveFile,
+            Some(e) => {
+                let c = Content {
+                    id: e.id,
+                    size: e.size,
+                };
+                match e.kind {
+                    EntryKind::Folder => Change::MakeFolder,
+                    EntryKind::Executable => Change::Executable(c),
+                    EntryKind::Symlink => {
+                        let shape = match link_target(store, c)? {
+                            Some(bytes) => link_shape(&mut target, path, &bytes)?,
+                            None => None,
+                        };
+                        if shape.is_some() {
+                            Change::Link(c)
+                        } else {
+                            plan.placeholders.push(path.to_owned());
+                            Change::File(c)
                         }
-                        _ => Change::File(c),
                     }
+                    _ => Change::File(c),
                 }
-            };
-            plan.actions.push(Action {
-                path: path.to_owned(),
-                change,
-                expected,
-            });
-            Ok::<(), SaveError>(())
-        },
-    )?;
+            }
+        };
+        plan.actions.push(Action {
+            path: path.to_owned(),
+            change,
+            expected,
+        });
+        Ok::<(), SaveError>(())
+    })?;
     // Where the target differs from `from` but not from the folder, at the path and below it.
     let matched: BTreeSet<&str> = switched
         .iter()
@@ -326,6 +333,7 @@ fn planned(
     plan.collisions.sort_unstable();
     plan.collisions.dedup();
     plan.not_written = refused.into_iter().collect();
+    plan.holds_conflicts = there.met_conflict();
     Ok(plan)
 }
 
@@ -339,8 +347,9 @@ pub fn spellings(
 ) -> Result<Vec<String>, SaveError> {
     let store = repo.store();
     let root = store.save(&save, repo.signatures_allowed())?.root;
-    let stored = HashMap::new();
-    let mut tree = Tree::new(store, &stored, root, drive);
+    let unstored = HashMap::new();
+    let standing = Listings::standing(repo, &unstored);
+    let mut tree = Tree::new(&standing, root, drive);
     let mut found = vec![String::new()];
     for name in path.split('/') {
         let wanted = drive.compared(name);
@@ -385,8 +394,9 @@ pub fn keep_safety_copies(
 ) -> Result<Vec<SafetyCopy>, SaveError> {
     let store = repo.store();
     let from_root = store.save(&from, repo.signatures_allowed())?.root;
-    let stored = HashMap::new();
-    let mut saved = Tree::new(store, &stored, from_root, drive);
+    let unstored = HashMap::new();
+    let standing = Listings::standing(repo, &unstored);
+    let mut saved = Tree::new(&standing, from_root, drive);
     let top = Dir::open_top(repo.root()).map_err(|e| unreadable("the project folder", e))?;
     let top = Arc::new(top);
     // Looked up in turn, as each is reached, so a problem reading the save is that entry's.
@@ -1317,7 +1327,8 @@ impl Run<'_> {
                     ignores_case: false,
                     composes_unicode: false,
                 };
-                let mut tree = Tree::new(self.repo.store(), &self.stored, root, exact);
+                let standing = Listings::standing(self.repo, &self.stored);
+                let mut tree = Tree::new(&standing, root, exact);
                 link_shape(&mut tree, &a.path, bytes)?
             }
             None => None,
@@ -1945,11 +1956,9 @@ impl Folders {
     }
 }
 
-/// One save's folders, read as needed: from the store, or from `unstored` for a folder read but
-/// not saved.
+/// One save's folders, read as needed through `listings`: as stored, or as they stand.
 pub(crate) struct Tree<'a> {
-    store: &'a Store,
-    unstored: &'a HashMap<Id, Listing>,
+    listings: &'a Listings<'a>,
     root: Id,
     drive: Drive,
     folders: HashMap<String, Option<Folder>>,
@@ -1962,15 +1971,9 @@ pub(crate) struct Folder {
 }
 
 impl<'a> Tree<'a> {
-    pub(crate) fn new(
-        store: &'a Store,
-        unstored: &'a HashMap<Id, Listing>,
-        root: Id,
-        drive: Drive,
-    ) -> Tree<'a> {
+    pub(crate) fn new(listings: &'a Listings<'a>, root: Id, drive: Drive) -> Tree<'a> {
         Tree {
-            store,
-            unstored,
+            listings,
             root,
             drive,
             folders: HashMap::new(),
@@ -2025,10 +2028,7 @@ impl<'a> Tree<'a> {
         let Some(id) = id else {
             return Ok(None);
         };
-        let listing = match self.unstored.get(&id) {
-            Some(listing) => listing.clone(),
-            None => self.store.listing(&id)?,
-        };
+        let listing = self.listings.read(&id)?;
         let mut twins = HashSet::new();
         if self.drive.ignores_case || self.drive.composes_unicode {
             let mut first: HashMap<String, &str> = HashMap::new();

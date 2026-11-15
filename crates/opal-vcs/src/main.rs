@@ -9,6 +9,7 @@ mod import_output;
 mod line_output;
 mod output;
 mod progress;
+mod resolve_output;
 mod setup_output;
 mod shelf_output;
 mod show_output;
@@ -25,14 +26,14 @@ use std::process::ExitCode;
 
 use clap::{CommandFactory, Parser, Subcommand};
 use git_words::Typed;
-use opal_core::changes::{Lines, save_changes, unsaved_changes};
+use opal_core::changes::{Lines, for_each_save_change, save_changes, unsaved_changes};
 use opal_core::combine::{self, CombineError, Combined, Named};
 use opal_core::config::{
     ConfigError, Identity, git_excludes_file, git_import_settings, ignored_identity_note,
     ignored_project_identity, load_identity, now_person, undo_window_days,
 };
 use opal_core::diary::{Action, DiaryEntry, Position, is_plain};
-use opal_core::diff::{count_changes, for_each_change};
+use opal_core::diff::{ChangeKind, count_changes};
 use opal_core::fsio::fault_point;
 use opal_core::history::{
     LineIds, ResolveError, current_save, for_each_from, for_each_on_line, id_for_command, resolve,
@@ -44,6 +45,7 @@ use opal_core::lines::{self, LineError, resolve_target};
 use opal_core::names::{GivenPathError, project_given, project_path};
 use opal_core::presets::{Looked, Preset, suggested};
 use opal_core::repo::{RepoError, Repository, elevated_only_note, resolved};
+use opal_core::resolve::{self as resolving, Pick, ResolveOutcome, ResolveRequest, Side};
 use opal_core::save::Save;
 use opal_core::setup::{SetupError, apply_setup, look_at, plan_setup};
 use opal_core::shelf::{self, Shelved};
@@ -84,12 +86,16 @@ enum Command {
         preset: Option<PresetArg>,
     },
     /// Show the project's rules as Opalro reads them, or change them to a preset's.
+    #[command(group = clap::ArgGroup::new("change").args(["preset", "upgrade"]).multiple(false))]
     Setup {
         /// Show the lines this preset would change, then change them.
         #[arg(long, value_enum, value_name = "PRESET")]
         preset: Option<PresetArg>,
+        /// Turn on the features this version of Opalro knows that this project doesn't use yet.
+        #[arg(long, conflicts_with = "preset")]
+        upgrade: bool,
         /// Make the changes without asking.
-        #[arg(long, requires = "preset")]
+        #[arg(long, requires = "change")]
         yes: bool,
     },
     /// Bring the Git repository in this folder into Opalro, with all its history.
@@ -161,6 +167,32 @@ enum Command {
         target: String,
         /// The combined save's message; Opalro writes one if you leave it out.
         message: Option<String>,
+        /// Stop and change nothing if the combine would leave a conflict.
+        #[arg(long)]
+        only_if_clean: bool,
+    },
+    /// Record fixed conflicts: every one your folder shows fixed, or those at or below the paths
+    /// you name.
+    Resolve {
+        /// Files, folders and patterns (such as "*.png"), as save takes them. A file is recorded as
+        /// it stands; a folder or a pattern records only the fixed conflicts in it, or, with
+        /// --keep, every one.
+        paths: Vec<PathBuf>,
+        /// Take this side's version, whole, at each path.
+        #[arg(long, value_enum, requires = "paths", conflicts_with = "copy")]
+        keep: Option<KeepArg>,
+        /// Write one version of one file somewhere else, to look at; records nothing.
+        #[arg(long, value_enum, requires = "to")]
+        copy: Option<CopyArg>,
+        /// Where --copy writes; it must not exist.
+        #[arg(long, value_name = "FILE", requires = "copy")]
+        to: Option<PathBuf>,
+        /// Record files that still hold marked places, or a large fix, without asking.
+        #[arg(long)]
+        yes: bool,
+        /// Record files Git rewrote with CRLF as they are.
+        #[arg(long)]
+        accept_crlf: bool,
     },
     /// Throw away your unsaved changes: in these files and folders, or everywhere. A safety copy
     /// of each changed or new file is kept.
@@ -248,6 +280,38 @@ impl From<PresetArg> for Preset {
     }
 }
 
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum KeepArg {
+    Mine,
+    Theirs,
+}
+
+impl From<KeepArg> for Side {
+    fn from(k: KeepArg) -> Side {
+        match k {
+            KeepArg::Mine => Side::Mine,
+            KeepArg::Theirs => Side::Theirs,
+        }
+    }
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum CopyArg {
+    Mine,
+    Theirs,
+    Before,
+}
+
+impl From<CopyArg> for Pick {
+    fn from(c: CopyArg) -> Pick {
+        match c {
+            CopyArg::Mine => Pick::Mine,
+            CopyArg::Theirs => Pick::Theirs,
+            CopyArg::Before => Pick::Before,
+        }
+    }
+}
+
 #[derive(clap::Args)]
 struct SaveArgs {
     /// What the save holds, in a few words.
@@ -318,6 +382,16 @@ impl From<SaveError> for Failure {
 
 impl From<ResolveError> for Failure {
     fn from(e: ResolveError) -> Failure {
+        Failure {
+            hint: e.hint(),
+            message: e.to_string(),
+            printed: false,
+        }
+    }
+}
+
+impl From<resolving::ResolveError> for Failure {
+    fn from(e: resolving::ResolveError) -> Failure {
         Failure {
             hint: e.hint(),
             message: e.to_string(),
@@ -665,15 +739,19 @@ fn setup_command(
     let Some(preset) = preset else {
         let read = repo.read_rules();
         let block = opal_core::setup::opalroignore_block_lines(repo.root())?;
+        let upgrades = repo.features_to_turn_on();
         let mut warnings = read.warnings();
         warnings.extend(repo.store().warnings());
         if json {
             let mut document = setup_output::rules_json(&read, block);
             document["opalro_json"] = OPALRO_JSON.into();
+            document["upgrades"] = upgrades.into();
             document["warnings"] = output::warnings_json(&warnings);
             return output::print_quietly(&format!("{document}\n"), &warnings);
         }
-        output::print_quietly(&setup_output::rules_shown(&read, block), &warnings)?;
+        let mut text = setup_output::rules_shown(&read, block);
+        text += &setup_output::upgrade_row(&upgrades);
+        output::print_quietly(&text, &warnings)?;
         let e = style::err();
         style::next(&format!(
             "edit opalro.toml or .opalroignore to change a rule, or switch presets with: {}",
@@ -762,6 +840,84 @@ fn setup_command(
         style::changed_your_mind();
     }
     Ok(())
+}
+
+/// `opalro setup --upgrade`: says what each feature allows and costs, asks, then turns them on.
+/// Not a diary step, so there is no "Changed your mind?".
+fn upgrade_command(json: bool, yes: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
+    let repo = opened.insert(with_users_key(Repository::discover(
+        &std::env::current_dir()?,
+    )?));
+    let mut asked = false;
+    let mut confirm = |features: &[&'static str]| {
+        if !json {
+            output::print_out(&setup_output::upgrade_offer(features));
+        }
+        if yes || !style::may_ask() {
+            return yes;
+        }
+        asked = true;
+        let _ = write!(
+            std::io::stderr(),
+            "{} [y/N] ",
+            if features.len() == 1 {
+                "Turn it on?"
+            } else {
+                "Turn them on?"
+            }
+        );
+        answered_yes()
+    };
+    let result = opal_core::setup::upgrade(repo, &mut waiting, &mut confirm);
+    let warnings = repo.store().warnings();
+    let document = |result: &str, features: &[&str]| {
+        json!({
+            "opalro_json": OPALRO_JSON,
+            "result": result,
+            "features": features,
+        })
+    };
+    match result {
+        Ok(done) if done.turned_on.is_empty() => {
+            let text = if json {
+                let mut document = document("nothing", &[]);
+                document["warnings"] = output::warnings_json(&warnings);
+                format!("{document}\n")
+            } else {
+                "Nothing to turn on: this project has every feature this version of Opalro knows.\n"
+                    .to_owned()
+            };
+            output::print_quietly(&text, &warnings)
+        }
+        Ok(done) => {
+            let text = if json {
+                let mut document = document("upgraded", &done.turned_on);
+                document["warnings"] = output::warnings_json(&warnings);
+                format!("{document}\n")
+            } else {
+                setup_output::upgraded(&done.turned_on)
+            };
+            output::print_done(&text, &warnings)
+        }
+        Err(SetupError::UpgradeDeclined) if asked => {
+            output::print_quietly("\nNothing was changed.\n", &warnings)
+        }
+        Err(e @ SetupError::UpgradeDeclined) => {
+            let failure = Failure::from(e);
+            if !json {
+                return Err(failure);
+            }
+            let wanted = document("nothing", &repo.features_to_turn_on());
+            let document = output::failed_document(wanted, &failure, &warnings);
+            output::print_out(&format!("{document}\n"));
+            let in_document = Failure {
+                printed: true,
+                ..failure
+            };
+            output::ended(Some(in_document), String::new, &warnings, None)
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Asks in the terminal whether to apply a preset's changes. Only a yes is one.
@@ -881,13 +1037,13 @@ fn ask_line_name(working: &progress::Working) -> Result<Option<String>, Failure>
     Ok(Some(answer.to_owned()))
 }
 
-/// Asks in the terminal whether to make a save that adds this much; `None` if there is no
-/// terminal to ask in. An answer that can't be read is a no.
-fn ask_large(large: &LargeSave) -> Option<bool> {
+/// Asks in the terminal whether to `go` on ("Save", "Record") with what adds this much; `None` if
+/// there is no terminal to ask in. An answer that can't be read is a no.
+fn ask_large(large: &LargeSave, go: &str) -> Option<bool> {
     if !style::may_ask() {
         return None;
     }
-    let _ = write!(std::io::stderr(), "{large} Save them? [y/N] ");
+    let _ = write!(std::io::stderr(), "{large} {go} them? [y/N] ");
     let mut answer = String::new();
     if std::io::stdin().lock().read_line(&mut answer).is_err() {
         return Some(false);
@@ -947,7 +1103,7 @@ fn save(json: bool, args: SaveArgs, opened: &mut Option<Repository>) -> Result<(
             return yes;
         }
         working.pause();
-        let answer = ask_large(large);
+        let answer = ask_large(large, "Save");
         working.resume();
         said_no = answer == Some(false);
         answer.unwrap_or(false)
@@ -981,6 +1137,7 @@ fn save(json: bool, args: SaveArgs, opened: &mut Option<Repository>) -> Result<(
             short_change_id: short,
             mut warnings,
             replaced,
+            conflicts,
         } => {
             // The save is made, so nothing from here on may fail the command.
             warnings.extend(repo.store().warnings());
@@ -992,6 +1149,7 @@ fn save(json: bool, args: SaveArgs, opened: &mut Option<Repository>) -> Result<(
                     "save": output::save_json(&save_id, &save, &short),
                     "changed_files": changed_files,
                     "replaced": replaced.map(|id| id.to_hex()),
+                    "conflicts": conflicts,
                     "warnings": output::warnings_json(&warnings),
                 });
                 format!("{}\n", with_ignored(document, ignored.as_ref()))
@@ -1028,6 +1186,12 @@ fn save(json: bool, args: SaveArgs, opened: &mut Option<Repository>) -> Result<(
                         s.command("opalro status")
                     ));
                 }
+                let status = s.command("opalro status");
+                details.extend(output::still_in_conflict(
+                    conflicts,
+                    only.is_some(),
+                    &status,
+                ));
                 if !details.is_empty() {
                     text += "\n";
                 }
@@ -1175,6 +1339,7 @@ fn status_command(json: bool, full: bool, opened: &mut Option<Repository>) -> Re
                     "changes": changes,
                     "not_written": found.not_written_here,
                     "unfinished_switch": found.unfinished_switch.is_some(),
+                    "conflicts": found.conflicts.iter().map(output::conflict_json).collect::<Vec<_>>(),
                     "warnings": output::warnings_json(&warnings),
                 })
             );
@@ -1194,9 +1359,18 @@ fn status_command(json: bool, full: bool, opened: &mut Option<Repository>) -> Re
             }
             Position::AtSave(_) => writeln!(out, "At save {at}, not on a line  {when}")?,
         }
-        if found.changes.is_empty() {
+        if found.changes.is_empty() && found.conflicts.is_empty() {
             writeln!(out, "Nothing changed since then.")?;
-        } else {
+        }
+        if !found.conflicts.is_empty() {
+            let count = output::counted(found.conflicts.len() as u64, "place", "places");
+            let count = s.paint(style::Role::Dim, &format!("({count})"));
+            writeln!(out, "\nIn conflict {count}:\n")?;
+            for row in output::conflict_rows(s, &found.conflicts) {
+                writeln!(out, "{row}")?;
+            }
+        }
+        if !found.changes.is_empty() {
             let count = output::files(found.changes.len());
             let count = s.paint(style::Role::Dim, &format!("({count})"));
             writeln!(out, "\nChanged since then {count}:\n")?;
@@ -1212,13 +1386,17 @@ fn status_command(json: bool, full: bool, opened: &mut Option<Repository>) -> Re
                 writeln!(out, "{}", columns.line(s, row))?;
             }
         }
-        if !found.not_written_here.is_empty() {
+        // A place in conflict kept so already says it in its own row.
+        let not_written: Vec<&String> = (found.not_written_here.iter())
+            .filter(|p| !found.conflicts.iter().any(|c| &c.path == *p))
+            .collect();
+        if !not_written.is_empty() {
             writeln!(
                 out,
                 "\nNot written here, because this computer can't hold them as they are (saves keep \
                  them as they were):\n"
             )?;
-            for path in &found.not_written_here {
+            for path in not_written {
                 let room = s.width.map_or(usize::MAX, |w| w.saturating_sub(4));
                 let path = s.fit_path(&escape(path, false), room);
                 writeln!(out, "    {}", s.paint(style::Role::Path, &path))?;
@@ -1227,11 +1405,14 @@ fn status_command(json: bool, full: bool, opened: &mut Option<Repository>) -> Re
         Ok(())
     })();
     output::ended(None, String::new, &warnings, None)?;
-    if !json && !found.changes.is_empty() {
-        style::next(&format!(
-            "save them with: {}",
-            style::err().command("opalro save \"describe your change\"")
-        ));
+    let next = output::conflicts_next(&found.conflicts).or_else(|| {
+        (!found.changes.is_empty()).then(|| {
+            let save = style::err().command("opalro save \"describe your change\"");
+            format!("save them with: {save}")
+        })
+    });
+    if let (false, Some(next)) = (json, next) {
+        style::next(&next);
     }
     Ok(())
 }
@@ -1343,6 +1524,7 @@ fn changes_command(
                     let file = output::LinesJson {
                         change: &file_change(c),
                         lines: &lines,
+                        in_conflict: c.in_conflict,
                     };
                     item(&file).map_err(Stop::Write)
                 })
@@ -1360,6 +1542,16 @@ fn changes_command(
             note(path, &lines);
             if shown.get() > 1 {
                 wrote(writeln!(out, "{}", output::between_files()))?;
+            }
+            // Between two saves no file is compared with what a conflict stands as.
+            if c.in_conflict && save.is_none() {
+                let s = style::out();
+                let path = s.paint(style::Role::Path, &escape(path, false));
+                wrote(writeln!(
+                    out,
+                    "In conflict: {path} (compared with what your folder held for it after the \
+                     last save)"
+                ))?;
             }
             wrote(output::write_lines(&mut out, &file_change(c), &lines))
         })
@@ -1545,8 +1737,19 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
     // printed, so a save that can't be listed prints only the error. It also sets the table's
     // columns. The changes are then printed as the walk finds them, and none is kept.
     let (mut count, mut columns) = (0_usize, output::Columns::default());
-    for_each_change(store, old_root, save.root, |c| {
+    // The places it made, kept with another version, and fixed.
+    let mut conflicts = [0_u64; 3];
+    for_each_save_change(repo, old_root, save.root, |c| {
         count += 1;
+        let at = match c.change {
+            ChangeKind::InConflict => Some(0),
+            ChangeKind::StillInConflict => Some(1),
+            ChangeKind::ConflictFixed => Some(2),
+            _ => None,
+        };
+        if let Some(n) = at.and_then(|at| conflicts.get_mut(at)) {
+            *n += 1;
+        }
         if !json {
             columns.fit(&output::Row::of(&c));
         }
@@ -1561,8 +1764,15 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
                 &mut out,
                 "{\"changes\":[",
                 |each| {
-                    for_each_change(store, old_root, save.root, |c| {
-                        each(&output::change_json(&c))
+                    for_each_save_change(repo, old_root, save.root, |c| {
+                        let mut change = output::change_json(&c);
+                        // Whether the save holds a conflict at the place.
+                        change["in_conflict"] = matches!(
+                            c.change,
+                            ChangeKind::InConflict | ChangeKind::StillInConflict
+                        )
+                        .into();
+                        each(&change)
                     })
                 },
                 || {
@@ -1571,14 +1781,15 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
                     let mut warnings: Vec<Warning> = unfinished.into_iter().collect();
                     let short = short_or_whole(repo, &id, &save.change_id, &mut warnings);
                     warnings.extend(store.warnings());
-                    (
-                        json!({
-                            "opalro_json": OPALRO_JSON,
-                            "save": output::save_json(&id, &save, &short),
-                            "tags": tags,
-                        }),
-                        warnings,
-                    )
+                    let doc = json!({
+                        "conflicts_changed": conflicts[1],
+                        "conflicts_fixed": conflicts[2],
+                        "conflicts_made": conflicts[0],
+                        "opalro_json": OPALRO_JSON,
+                        "save": output::save_json(&id, &save, &short),
+                        "tags": tags,
+                    });
+                    (doc, warnings)
                 },
             );
         }
@@ -1594,10 +1805,11 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
         };
         show_output::write_head(&mut out, &head, count, now_ms())?;
         let s = style::out();
-        for_each_change(store, old_root, save.root, |c| {
+        for_each_save_change(repo, old_root, save.root, |c| {
             writeln!(out, "{}", columns.line(s, &output::Row::of(&c)))?;
             Ok::<(), Failure>(())
         })?;
+        show_output::write_conflicts(&mut out, conflicts)?;
         warnings.extend(store.warnings());
         Ok(warnings)
     })();
@@ -2069,6 +2281,7 @@ fn goto_command(json: bool, text: &str, opened: &mut Option<Repository>) -> Resu
             "placeholders": done.applied.placeholders,
             "safety_copies": done.safety_copies,
             "recorded": done.recorded,
+            "holds_conflicts": done.holds_conflicts,
             "warnings": output::warnings_json(&warnings),
         });
         format!("{document}\n")
@@ -2111,6 +2324,7 @@ fn combine_command(
     json: bool,
     text: &str,
     message: Option<String>,
+    keep: combine::Keep,
     opened: &mut Option<Repository>,
 ) -> Result<(), Failure> {
     let message = given_message(message);
@@ -2131,6 +2345,7 @@ fn combine_command(
             message.as_deref(),
             &who,
             git_excludes.as_deref(),
+            keep,
             &mut waiting,
         )
     }?;
@@ -2146,18 +2361,29 @@ fn combine_command(
     };
     warnings.extend(repo.store().warnings());
     let text = if json {
-        let (result, starts, merged_files) = match &done.result {
-            Combined::Nothing => ("nothing", vec![], vec![]),
-            Combined::Forward => ("forward", vec![], vec![]),
+        let none: &[combine::Conflict] = &[];
+        let (result, starts, merged_files, conflicts, more, count) = match &done.result {
+            Combined::Nothing => ("nothing", vec![], vec![], none, 0, None),
+            Combined::Forward => ("forward", vec![], vec![], none, 0, None),
             Combined::Made {
                 starts,
                 merged_files,
+                conflicts,
+                more,
+                conflict_count,
             } => (
                 "combined",
                 starts.iter().map(Id::to_hex).collect(),
                 merged_files.clone(),
+                &conflicts[..],
+                *more,
+                Some(*conflict_count),
             ),
         };
+        let conflicts: Vec<serde_json::Value> = conflicts
+            .iter()
+            .map(combine_output::conflict_json)
+            .collect();
         let document = json!({
             "opalro_json": OPALRO_JSON,
             "result": result,
@@ -2166,6 +2392,15 @@ fn combine_command(
             "with": done.with.to_hex(),
             "starts": starts,
             "merged_files": merged_files,
+            "conflicts": conflicts,
+            "more_conflicts": more,
+            "conflict_count": count,
+            // Nothing to combine looks at no save, so it can't say.
+            "holds_conflicts": match done.result {
+                Combined::Nothing => None,
+                Combined::Forward => Some(done.holds_conflicts),
+                Combined::Made { conflict_count, .. } => Some(conflict_count > 0),
+            },
             "written": done.applied.written,
             "removed": done.applied.removed,
             "not_written": done.applied.not_written,
@@ -2179,6 +2414,19 @@ fn combine_command(
         combine_output::combined(&done, &named.shown, by_id, &short, save.as_ref(), given)
     };
     output::print_done(&text, &warnings)?;
+    if let Combined::Made {
+        conflict_count: 1..,
+        ..
+    } = done.result
+    {
+        let e = style::err();
+        style::next(&format!(
+            "fix the marked files and pick a version for the rest, then run {}. {} lists what is \
+             left.",
+            e.command("opalro resolve"),
+            e.command("opalro status")
+        ));
+    }
     if !json && done.result != Combined::Nothing {
         style::changed_your_mind();
     }
@@ -2220,6 +2468,144 @@ fn combine_named(
         },
         true,
     ))
+}
+
+/// Asks in the terminal whether to record `path`, which still holds `left` marked places (0 when
+/// only other marker lines are left). Only a yes is one.
+fn ask_markers_left(path: &str, left: u64) -> bool {
+    let what = match left {
+        0 => "marker lines".to_owned(),
+        n => output::counted(n, "marked place", "marked places"),
+    };
+    let path = style::err().paint(style::Role::Path, &escape(path, false));
+    output::tell(&format!("{path} still has {what}."));
+    let _ = write!(std::io::stderr(), "Record it as fixed anyway? [y/N] ");
+    answered_yes()
+}
+
+fn resolve_command(
+    json: bool,
+    given: &[PathBuf],
+    keep: Option<Side>,
+    yes: bool,
+    accept_crlf: bool,
+    opened: &mut Option<Repository>,
+) -> Result<(), Failure> {
+    let here = resolved(&std::env::current_dir()?);
+    let repo = opened.insert(with_users_key(Repository::discover(&here)?));
+    let drive = repo.drive()?;
+    let paths = given
+        .iter()
+        .map(|p| project_given(repo.root(), &here, p, drive))
+        .collect::<Result<Vec<_>, _>>()?;
+    let who = now_person(&load_identity(Some(repo.root()))?);
+    let git_excludes = git_excludes_file(repo.root())?;
+    let req = ResolveRequest {
+        paths: (!paths.is_empty()).then_some(&paths[..]),
+        keep,
+        who: &who,
+        command: "resolve",
+        accept_crlf,
+        git_excludes: git_excludes.as_deref(),
+    };
+    let working = progress::Working::start("Recording");
+    let mut said_no_to_large = false;
+    // With --json, or without a terminal, nothing is asked: it stops unless --yes said yes.
+    let mut ask = |question: &resolving::Ask| {
+        if yes || json || !style::may_ask() {
+            return yes;
+        }
+        working.pause();
+        let answer = match question {
+            resolving::Ask::MarkersLeft { path, left } => ask_markers_left(path, *left),
+            resolving::Ask::Large(large) => {
+                let answer = ask_large(large, "Record").unwrap_or(false);
+                said_no_to_large = !answer;
+                answer
+            }
+        };
+        working.resume();
+        answer
+    };
+    let done = resolving::resolve(repo, &req, &mut waiting, &mut ask);
+    drop(working);
+    let done = match done {
+        Err(resolving::ResolveError::Save(SaveError::LargeSave(_))) if said_no_to_large => {
+            return Err(Failure {
+                message: "Nothing was recorded: you answered no.".into(),
+                hint: None,
+                printed: false,
+            });
+        }
+        done => done?,
+    };
+    let mut warnings = Vec::new();
+    if let ResolveOutcome::Recorded {
+        applied,
+        warnings: met,
+        ..
+    } = &done
+    {
+        warnings.extend(met.iter().cloned());
+        warnings.extend(applied.warnings.iter().cloned());
+    }
+    // A save that can't be read back is named by its fingerprint, as goto names one.
+    let at = match &done {
+        ResolveOutcome::NoConflicts { save_id } => {
+            let save = repo.store().save(save_id, repo.signatures_allowed()).ok();
+            let short = match &save {
+                Some(save) => short_or_whole(repo, save_id, &save.change_id, &mut warnings),
+                None => save_id.short_hex(),
+            };
+            goto_output::at_save(&short, save.as_ref())
+        }
+        _ => String::new(),
+    };
+    warnings.extend(repo.store().warnings());
+    let text = if json {
+        format!("{}\n", resolve_output::document(&done, &warnings))
+    } else {
+        resolve_output::shown(&done, keep, &at)
+    };
+    output::print_done(&text, &warnings)?;
+    if json {
+        return Ok(());
+    }
+    let left = match &done {
+        ResolveOutcome::Recorded { left, .. } | ResolveOutcome::Nothing { left, .. } => &left[..],
+        ResolveOutcome::NoConflicts { .. } => &[],
+    };
+    if let Some(next) = output::conflicts_next(left) {
+        style::next(&next);
+    }
+    if let ResolveOutcome::Recorded { .. } = done {
+        style::changed_your_mind();
+    }
+    Ok(())
+}
+
+/// `opalro resolve <path> --copy <pick> --to <to>`: `to` goes to the engine as typed, so it is
+/// read from the folder the person is in.
+fn copy_command(
+    json: bool,
+    given: &Path,
+    pick: Pick,
+    to: &Path,
+    opened: &mut Option<Repository>,
+) -> Result<(), Failure> {
+    let here = resolved(&std::env::current_dir()?);
+    let repo = opened.insert(with_users_key(Repository::discover(&here)?));
+    let path = project_path(repo.root(), &here, given, repo.drive()?)?;
+    let copied = resolving::copy_version(repo, &path, pick, to)?;
+    let warnings = repo.store().warnings();
+    let to = to.to_string_lossy();
+    let text = if json {
+        let document = resolve_output::copied_document(&path, pick, &to, copied, &warnings);
+        format!("{document}\n")
+    } else {
+        resolve_output::copied(&path, pick, &to)
+    };
+    output::print_done(&text, &warnings)
 }
 
 fn discard_command(
@@ -3016,7 +3402,10 @@ fn main() -> ExitCode {
     let mut opened = None;
     let result = match cli.command {
         Command::Start { preset } => start(cli.json, preset.map(Preset::from), &mut opened),
-        Command::Setup { preset, yes } => {
+        Command::Setup {
+            upgrade: true, yes, ..
+        } => upgrade_command(cli.json, yes, &mut opened),
+        Command::Setup { preset, yes, .. } => {
             setup_command(cli.json, preset.map(Preset::from), yes, &mut opened)
         }
         Command::Import => import(cli.json, &mut opened),
@@ -3054,9 +3443,48 @@ fn main() -> ExitCode {
         Command::History { from } => history(cli.json, from.as_deref(), &mut opened),
         Command::Show { save } => show(cli.json, save.as_deref(), &mut opened),
         Command::Goto { target } => goto_command(cli.json, &target, &mut opened),
-        Command::Combine { target, message } => {
-            combine_command(cli.json, &target, message, &mut opened)
+        Command::Combine {
+            target,
+            message,
+            only_if_clean,
+        } => {
+            let keep = if only_if_clean {
+                combine::Keep::OnlyIfClean
+            } else {
+                combine::Keep::Conflicts
+            };
+            combine_command(cli.json, &target, message, keep, &mut opened)
         }
+        Command::Resolve {
+            paths,
+            copy: Some(pick),
+            to,
+            ..
+        } => {
+            let ([path], Some(to)) = (&paths[..], to) else {
+                let usage = clap::Error::raw(
+                    clap::error::ErrorKind::WrongNumberOfValues,
+                    "--copy takes one path.\n",
+                );
+                let _ = usage.print();
+                return ExitCode::from(2);
+            };
+            copy_command(cli.json, path, pick.into(), &to, &mut opened)
+        }
+        Command::Resolve {
+            paths,
+            keep,
+            yes,
+            accept_crlf,
+            ..
+        } => resolve_command(
+            cli.json,
+            &paths,
+            keep.map(Side::from),
+            yes,
+            accept_crlf,
+            &mut opened,
+        ),
         Command::Discard { paths } => discard_command(cli.json, &paths, &mut opened),
         Command::Undo {
             list: true, all, ..

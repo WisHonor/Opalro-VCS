@@ -475,6 +475,7 @@ pub struct RulesRead {
 const A_LINK: &str = "it is a link, which Opalro doesn't follow here";
 const NOT_A_FILE: &str = "it is a folder or special file, not a regular file";
 const TOO_LARGE: &str = "it is larger than 1 MiB";
+const SEVERAL: &str = "several files have its name but for letter case";
 
 fn skipped(why: String) -> RulesRead {
     RulesRead {
@@ -499,8 +500,21 @@ fn parsed(bytes: &[u8]) -> RulesRead {
 /// Reads the `opalro.toml` in the top folder of a save, `root` its listing, on the terms `read`
 /// has for the folder's: the size its listing gives is checked before anything is read.
 pub(crate) fn read_saved(store: &Store, root: &Listing) -> Result<RulesRead, StoreError> {
-    let Some(entry) = root.get("opalro.toml") else {
-        return Ok(RulesRead::default());
+    // Failing the exact name, the one name alike but for the case of ASCII letters, as the
+    // folder's would be found where letter case is ignored; whichever system this is.
+    let entry = match root.get("opalro.toml") {
+        Some(entry) => entry,
+        None => {
+            let mut alike = root
+                .entries()
+                .iter()
+                .filter(|e| e.name.eq_ignore_ascii_case("opalro.toml"));
+            match (alike.next(), alike.next()) {
+                (None, _) => return Ok(RulesRead::default()),
+                (Some(entry), None) => entry,
+                (Some(_), Some(_)) => return Ok(skipped(SEVERAL.to_owned())),
+            }
+        }
     };
     let why = match entry.kind {
         EntryKind::File | EntryKind::Executable if entry.size > MAX_RULES_FILE_BYTES => TOO_LARGE,
@@ -1538,6 +1552,119 @@ mod tests {
             over[1 << 20] = b'\n';
             let lied = saved(&mut repo, EntryKind::File, Some(&over), 10);
             assert_eq!(lied.skipped.unwrap(), "it is larger than 1 MiB");
+        }
+
+        const NO_MARKERS: &[u8] = b"[[rule]]\nfiles = [\"*.unity\"]\nconflict-markers = false\n";
+
+        /// The rules read from a save whose top folder holds a file of `NO_MARKERS` under each
+        /// name of `names`, and `other.txt`.
+        fn saved_as(repo: &mut Repository, names: &[&str]) -> Result<RulesRead, StoreError> {
+            let named: Vec<_> = names.iter().map(|n| (*n, NO_MARKERS)).collect();
+            saved_with(repo, &named)
+        }
+
+        /// The rules read from a save whose top folder holds each `(name, contents)`, and
+        /// `other.txt`.
+        fn saved_with(
+            repo: &mut Repository,
+            files: &[(&str, &[u8])],
+        ) -> Result<RulesRead, StoreError> {
+            let lock = repo.lock_for_change("test", &mut |_| {}).unwrap();
+            let mut packs = repo.new_packs().unwrap();
+            let mut entry = |name: &str, bytes: &[u8]| crate::listing::Entry {
+                name: name.into(),
+                kind: EntryKind::File,
+                id: packs.add_content(bytes).unwrap(),
+                size: bytes.len() as u64,
+            };
+            let mut entries: Vec<_> = files.iter().map(|(n, b)| entry(n, b)).collect();
+            entries.push(entry("other.txt", NO_MARKERS));
+            repo.store_packs(&lock, packs).unwrap();
+            entries.sort_by(|a, b| a.name.cmp(&b.name));
+            read_saved(repo.store(), &Listing::new(entries).unwrap())
+        }
+
+        #[test]
+        fn the_other_sides_rules_file_is_found_by_its_exact_name() {
+            let (_dir, mut repo) = project();
+            // The exact name wins over one alike but for case, which holds two rules.
+            let two = [NO_MARKERS, NO_MARKERS].concat();
+            for files in [
+                &[("opalro.toml", NO_MARKERS)][..],
+                &[("OPALRO.TOML", &two[..]), ("opalro.toml", NO_MARKERS)],
+            ] {
+                let read = saved_with(&mut repo, files).unwrap();
+                assert!(read.file && read.skipped.is_none());
+                assert_eq!(read.rules.rules.len(), 1);
+            }
+            let read = saved_with(&mut repo, &[("OPALRO.TOML", &two[..])]).unwrap();
+            assert_eq!(read.rules.rules.len(), 2);
+        }
+
+        #[test]
+        fn failing_that_by_a_name_differing_only_in_letter_case() {
+            let (_dir, mut repo) = project();
+            for name in ["Opalro.toml", "OPALRO.TOML"] {
+                let read = saved_as(&mut repo, &[name]).unwrap();
+                assert!(read.file && read.skipped.is_none(), "{name}");
+                assert_eq!(read.rules.rules.len(), 1);
+            }
+            // Only ASCII letters' case: anything else is another name.
+            let read = saved_as(&mut repo, &["opalro.toml.txt", "\u{f8}palro.toml"]).unwrap();
+            assert!(!read.file && read.skipped.is_none());
+        }
+
+        #[test]
+        fn several_names_alike_but_for_case_count_as_not_read_whole() {
+            let (_dir, mut repo) = project();
+            let read = saved_as(&mut repo, &["OPALRO.toml", "Opalro.toml"]).unwrap();
+            assert_eq!(
+                read.skipped.as_deref(),
+                Some("several files have its name but for letter case")
+            );
+            let matcher = RuleMatcher::new(&RulesRead::default(), &read);
+            assert_eq!(
+                matcher.line_merge("a.txt", None),
+                LineMerge::RulesNotWhole { theirs: true }
+            );
+        }
+
+        #[test]
+        fn a_missing_or_damaged_rules_file_object_is_the_stores_error() {
+            let (_dir, repo) = project();
+            for name in ["opalro.toml", "Opalro.toml"] {
+                let entry = crate::listing::Entry {
+                    name: name.into(),
+                    kind: EntryKind::File,
+                    // Nothing stored under it.
+                    id: Id([7; 32]),
+                    size: 10,
+                };
+                let root = Listing::new(vec![entry]).unwrap();
+                let err = read_saved(repo.store(), &root).unwrap_err();
+                assert!(matches!(err, StoreError::Missing(_)), "{err:?}");
+            }
+            // Its only copy fails its check.
+            let damaged = b"[[rule]]
+files = [\"*.x\"]
+conflict-markers = false
+";
+            crate::test_support::plant_damaged_copies(
+                repo.packs_dir(),
+                &[(ObjectKind::Content, damaged)],
+            );
+            let repo = Repository::open(repo.root()).unwrap();
+            for name in ["opalro.toml", "Opalro.toml"] {
+                let entry = crate::listing::Entry {
+                    name: name.into(),
+                    kind: EntryKind::File,
+                    id: hash_content(damaged),
+                    size: damaged.len() as u64,
+                };
+                let root = Listing::new(vec![entry]).unwrap();
+                let err = read_saved(repo.store(), &root).unwrap_err();
+                assert!(!matches!(err, StoreError::Missing(_)), "{err:?}");
+            }
         }
     }
 }

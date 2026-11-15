@@ -32,6 +32,7 @@ pub const GROUPS: [(&str, &[Row]); 3] = [
             ("line", "List, make, rename and delete lines", None),
             ("tag", "Name a save, like v1.0, or list your tags", None),
             ("combine", "Bring another line's work into yours", None),
+            ("resolve", "Record fixed conflicts", None),
             ("shelf", "Set your unsaved changes aside", Some("unshelf")),
             (
                 "discard",
@@ -182,6 +183,17 @@ pub fn examples(command: &str) -> &'static [(&'static str, &'static str)] {
                 "The same, with your own message",
             ),
         ],
+        "resolve" => &[
+            ("opalro resolve", "Record every conflict you fixed"),
+            (
+                "opalro resolve Main.unity --keep theirs",
+                "Take the other line's version of a file",
+            ),
+            (
+                "opalro resolve Hero.png --copy theirs --to Hero-theirs.png",
+                "Look at the other line's version first",
+            ),
+        ],
         "shelf" => &[
             ("opalro shelf", "Set your unsaved changes aside"),
             (
@@ -227,6 +239,10 @@ pub fn examples(command: &str) -> &'static [(&'static str, &'static str)] {
             (
                 "opalro setup --preset code --yes",
                 "Make those changes without asking",
+            ),
+            (
+                "opalro setup --upgrade",
+                "Turn on the features this version of Opalro knows that this project doesn't use yet",
             ),
         ],
         "import" => &[(

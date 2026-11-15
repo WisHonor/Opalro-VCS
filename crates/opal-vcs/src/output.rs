@@ -12,6 +12,7 @@ use opal_core::id::Id;
 use opal_core::listing::EntryKind;
 use opal_core::save::{Person, Save};
 use opal_core::shelf::{ShelfInfo, Shelved};
+use opal_core::status::{ConflictAt, Standing};
 use opal_core::switch::DiscardOutcome;
 use opal_core::text::{bytes, escape, thousands};
 use opal_core::tidy::TidyReport;
@@ -66,6 +67,9 @@ pub fn change_json(c: &FileChange) -> Value {
             ChangeKind::Removed => "removed",
             ChangeKind::Modified => "modified",
             ChangeKind::KindChanged => "kind_changed",
+            ChangeKind::InConflict => "in_conflict",
+            ChangeKind::StillInConflict => "still_in_conflict",
+            ChangeKind::ConflictFixed => "conflict_fixed",
         },
         // Named here, not by `as_str`, which gives people `project-link`: JSON values use underscores.
         "kind": match c.kind {
@@ -79,6 +83,109 @@ pub fn change_json(c: &FileChange) -> Value {
         "old_size": c.old_size,
         "new_size": c.new_size,
     })
+}
+
+/// A place in conflict as JSON (docs/json.md, `opalro status --json`, "A place").
+pub fn conflict_json(c: &ConflictAt) -> Value {
+    let (standing, left) = match c.standing {
+        Standing::Marked { left } => ("markers", Some(left)),
+        Standing::Fixed => ("fixed", None),
+        Standing::Yours => ("yours", None),
+        Standing::ChangedInPlace => ("changed", None),
+        Standing::NotInFolder => ("nothing", None),
+        Standing::NotHere => ("not_here", None),
+    };
+    json!({
+        "path": c.path,
+        "standing": standing,
+        "places_left": left,
+        "terms": c.terms,
+    })
+}
+
+/// What a place in conflict still needs, in its colour.
+fn needs(standing: Standing) -> (Role, String) {
+    match standing {
+        Standing::Marked { left: 0 } => (Role::Changed, "marker lines left to fix".into()),
+        Standing::Marked { left } => (
+            Role::Changed,
+            format!(
+                "{} left to fix",
+                counted(left, "marked place", "marked places")
+            ),
+        ),
+        Standing::Fixed => (Role::Added, "fixed, not yet recorded".into()),
+        Standing::Yours => (Role::Dim, "your version, still to decide".into()),
+        Standing::ChangedInPlace => (Role::Changed, "changed in place, still to decide".into()),
+        Standing::NotInFolder => (Role::Dim, "not in your folder, still to decide".into()),
+        Standing::NotHere => (
+            Role::Dim,
+            "can't be written on this computer, kept as it is".into(),
+        ),
+    }
+}
+
+/// The rows of `opalro status`' places in conflict: each path, then what it needs right-aligned,
+/// as a change's row holds what it holds. On a terminal a path is cut to fit, as a change's is.
+pub fn conflict_rows(s: style::Screen, conflicts: &[ConflictAt]) -> Vec<String> {
+    let rows: Vec<(String, Role, String)> = conflicts
+        .iter()
+        .map(|c| {
+            let (role, needs) = needs(c.standing);
+            (escape(&c.path, false), role, needs)
+        })
+        .collect();
+    let needs_width = rows.iter().map(|r| style::columns(&r.2)).max();
+    let needs_width = needs_width.unwrap_or(0);
+    let room = s
+        .width
+        .map_or(usize::MAX, |w| w.saturating_sub(4 + 2 + needs_width));
+    let paths: Vec<String> = rows.iter().map(|r| s.fit_path(&r.0, room)).collect();
+    let path_width = paths.iter().map(|p| style::columns(p)).max().unwrap_or(0);
+    let pad = |text: &str, width: usize| " ".repeat(width.saturating_sub(style::columns(text)));
+    rows.iter()
+        .zip(&paths)
+        .map(|((_, role, needs), path)| {
+            format!(
+                "    {}{}  {}{}",
+                s.paint(Role::Path, path),
+                pad(path, path_width),
+                pad(needs, needs_width),
+                s.paint(*role, needs)
+            )
+        })
+        .collect()
+}
+
+/// What `opalro status` says to do next about its places in conflict: the first step that
+/// applies, or `None`.
+pub fn conflicts_next(conflicts: &[ConflictAt]) -> Option<String> {
+    let any = |f: fn(Standing) -> bool| conflicts.iter().any(|c| f(c.standing));
+    let e = style::err();
+    if any(|s| s == Standing::Fixed) {
+        let resolve = e.command("opalro resolve");
+        return Some(format!("record what you fixed with: {resolve}"));
+    }
+    if any(|s| matches!(s, Standing::Marked { .. })) {
+        let resolve = e.command("opalro resolve");
+        return Some(format!(
+            "fix the marked places in your editor, then run: {resolve}"
+        ));
+    }
+    let pick = format!(
+        "pick a version with: {} (or theirs); to look at theirs first: {}",
+        e.command("opalro resolve <path> --keep mine"),
+        e.command("opalro resolve <path> --copy theirs --to <file>")
+    );
+    // Without --keep, a folder's path or a pattern never records a place changed in place:
+    // only its own path does.
+    if any(|s| s == Standing::ChangedInPlace) {
+        return Some(format!(
+            "keep what your folder holds with: {} (each by its own path), or {pick}",
+            e.command("opalro resolve <path>")
+        ));
+    }
+    any(|s| matches!(s, Standing::Yours | Standing::NotInFolder)).then_some(pick)
 }
 
 /// A step undone or redone as JSON (docs/json.md, `opalro undo --json`).
@@ -422,6 +529,9 @@ impl Row {
                 let held = format!("{old} {arrow} {}", c.kind.as_str());
                 ("kind changed", Role::Changed, held)
             }
+            ChangeKind::InConflict => ("in conflict", Role::Changed, String::new()),
+            ChangeKind::StillInConflict => ("still in conflict", Role::Changed, String::new()),
+            ChangeKind::ConflictFixed => ("conflict fixed", Role::Added, String::new()),
         };
         Row {
             word,
@@ -468,11 +578,18 @@ impl Columns {
         let room = self.room(s);
         let path = s.fit_path(&row.path, room);
         let pad = |text: &str, width: usize| " ".repeat(width.saturating_sub(style::columns(text)));
-        format!(
-            "    {}{}  {}{}  {}{}",
+        let start = format!(
+            "    {}{}  {}",
             s.paint(row.role, row.word),
             pad(row.word, self.word),
             s.paint(Role::Path, &path),
+        );
+        // A row that holds nothing ends at its path, whatever the path ends in.
+        if row.held.is_empty() {
+            return start;
+        }
+        format!(
+            "{start}{}  {}{}",
             pad(&path, self.path.min(room)),
             pad(&row.held, self.held),
             row.held
@@ -493,11 +610,34 @@ pub fn files(n: usize) -> String {
     counted(n as u64, "file", "files")
 }
 
+/// What `opalro save` says of the `n` places it met that are still in conflict, for a save of
+/// `some` paths or of everything, `status` the command shown; nothing when there are none.
+pub fn still_in_conflict(n: u64, some: bool, status: &str) -> Option<String> {
+    Some(match (n, some) {
+        (0, _) => return None,
+        (1, false) => format!("1 place is still in conflict: {status} lists it."),
+        (n, false) => format!(
+            "{} places are still in conflict: {status} lists them.",
+            thousands(n)
+        ),
+        (1, true) => format!(
+            "1 of the places you saved is still in conflict: {status} lists every place in \
+             conflict."
+        ),
+        (n, true) => format!(
+            "{} of the places you saved are still in conflict: {status} lists every place in \
+             conflict.",
+            thousands(n)
+        ),
+    })
+}
+
 /// A file's change with its lines, as `opalro changes --json` gives it. It is written as it is
 /// shown, a line at a time, never held as one value.
 pub struct LinesJson<'a> {
     pub change: &'a FileChange<'a>,
     pub lines: &'a Lines<'a>,
+    pub in_conflict: bool,
 }
 
 impl fmt::Display for LinesJson<'_> {
@@ -537,6 +677,7 @@ impl fmt::Display for LinesJson<'_> {
         rest["content"] = shown.into();
         rest["timed_out"] = timed_out.into();
         rest["only_line_endings"] = only_line_endings(hunks).is_some().into();
+        rest["in_conflict"] = self.in_conflict.into();
         let rest = rest.to_string();
         write!(f, "],{}", rest.get(1..).unwrap_or("}"))
     }
@@ -561,6 +702,10 @@ pub fn write_lines(out: &mut dyn Write, c: &FileChange, lines: &Lines) -> io::Re
         screen.paint(row.role, row.word),
         screen.paint(Role::Path, &row.path)
     );
+    // No lines are compared for a conflict's place between two saves.
+    if c.change.is_conflict() {
+        return writeln!(out, "{header}");
+    }
     if let Lines::Hunks { hunks, .. } = lines {
         let count = |tag: Tag| -> usize {
             hunks
@@ -1248,6 +1393,19 @@ pub fn verified(v: &Verified, project: &str) -> String {
             "saves are too big for any reader:",
         );
         unshown |= group(&mut text, s, &too_big, big);
+        // Each says which record it is about, so each is a line of its own.
+        let (nested, n) = rows(ProblemKind::NestedConflict);
+        let shown = nested.len().min(PROBLEMS_SHOWN);
+        for p in &nested[..shown] {
+            let _ = writeln!(text, "{}", s.detail(Some(&cross), &p.message));
+        }
+        let more = n.saturating_sub(shown as u64);
+        if more > 0 {
+            let cut = s.sym(Sym::Cut);
+            let rest = format!("{cut} and {} more", thousands(more));
+            let _ = writeln!(text, "{}", s.detail(None, &rest));
+            unshown = true;
+        }
         let entries = counted(v.entries, "entry", "entries");
         let diary = if v.diary_gap {
             s.detail(
@@ -1443,6 +1601,7 @@ mod tests {
             let shown = LinesJson {
                 change: &change,
                 lines: &lines,
+                in_conflict: false,
             }
             .to_string();
             let doc: Value = serde_json::from_str(&shown).unwrap();
@@ -1495,6 +1654,35 @@ mod tests {
         );
         assert_eq!(lines[3], format!("    x {why}"));
         assert_eq!(lines.len(), 4, "{shown}");
+    }
+
+    #[test]
+    fn a_conflict_inside_a_conflict_is_a_line_of_its_own() {
+        let record = Id([0xab; 32]);
+        let said = format!(
+            "Conflict record {} stands as a folder that holds another conflict, which Opalro \
+             never writes.",
+            record.short_hex()
+        );
+        let v = Verified {
+            problems_total: 1,
+            nested_conflict: 1,
+            problems: vec![Problem {
+                kind: ProblemKind::NestedConflict,
+                pack: None,
+                object: Some(record),
+                needed_by: None,
+                message: said.clone(),
+            }],
+            needs_checked: true,
+            ..Verified::default()
+        };
+        let shown = verified(&v, "Skyrunner");
+        assert!(shown.contains(&format!("\n    x {said}\n")), "{shown}");
+        assert!(shown.contains("point to objects that exist"), "{shown}");
+        let document = verified_json(&v);
+        assert_eq!(document["problems"][0]["kind"], "nested_conflict");
+        assert_eq!(document["problems"][0]["object"], record.to_hex());
     }
 
     #[test]

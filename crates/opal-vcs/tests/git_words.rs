@@ -44,7 +44,7 @@ fn explained(env: &Env, args: &[&str]) -> String {
     assert_eq!(text(&out.stdout), "", "{args:?}");
     assert_eq!(head(env), before, "{args:?} wrote a diary entry");
     let said = text(&out.stderr);
-    assert!((2..=3).contains(&said.lines().count()), "{args:?}: {said}");
+    assert!((1..=3).contains(&said.lines().count()), "{args:?}: {said}");
     assert!(!said.starts_with("error:"), "{said}");
     said
 }
@@ -327,11 +327,90 @@ fn merge_runs_combine() {
 }
 
 #[test]
-fn merge_abort_is_explained() {
+fn merge_abort_names_undo() {
     let env = with_side_ahead();
     let said = explained(&env, &["merge", "--abort"]);
-    assert!(said.contains("nothing to abort"), "{said}");
-    assert!(said.contains("opalro undo"), "{said}");
+    assert_eq!(
+        said,
+        "`opalro undo` takes back the last step;\nright after a combine, that is the combine, \
+         conflicts and all.\n"
+    );
+}
+
+#[test]
+fn merge_continue_names_resolve() {
+    let env = with_side_ahead();
+    let said = explained(&env, &["merge", "--continue"]);
+    assert_eq!(
+        said,
+        "`opalro combine` is done as soon as it runs.\n\
+         `opalro resolve` records the conflicts you fixed.\n"
+    );
+}
+
+const OURS: &str =
+    "`opalro resolve <file> --keep mine` takes your version of a file in conflict.\n";
+const THEIRS: &str = "`opalro resolve <file> --keep theirs` takes the other line's version\n\
+                      of a file in conflict.\n";
+
+#[test]
+fn checkout_ours_and_theirs_name_resolve_keep() {
+    let env = project();
+    write(&env, "a.txt", "changed\n");
+    for word in ["checkout", "restore"] {
+        assert_eq!(explained(&env, &[word, "--ours", "a.txt"]), OURS, "{word}");
+        assert_eq!(
+            explained(&env, &[word, "--theirs", "--", "a.txt"]),
+            THEIRS,
+            "{word}"
+        );
+        assert_eq!(explained(&env, &[word, "a.txt", "--ours"]), OURS, "{word}");
+    }
+    assert_eq!(changed(&env), ["a.txt"]);
+    assert_eq!(
+        fs::read_to_string(env.root().join("a.txt")).unwrap(),
+        "changed\n"
+    );
+}
+
+#[test]
+fn mergetool_is_explained() {
+    let env = project();
+    let said = explained(&env, &["mergetool"]);
+    assert_eq!(
+        said,
+        "Opalro starts no other program: fix the file in your editor,\n\
+         or copy a version out to look at with\n\
+         `opalro resolve <file> --copy theirs --to <somewhere>`.\n"
+    );
+}
+
+#[test]
+fn add_names_resolve_after_a_combine() {
+    let env = project();
+    let said = explained(&env, &["add", "a.txt"]);
+    assert!(
+        said.ends_with("\nAfter a combine, `opalro resolve <file>` records a file you fixed.\n"),
+        "{said}"
+    );
+}
+
+#[test]
+fn no_git_word_puts_the_typed_path_in_a_command() {
+    let env = project();
+    let typed = "my-file.txt";
+    for args in [
+        &["checkout", "--ours", typed][..],
+        &["checkout", "--theirs", typed],
+        &["restore", "--ours", typed],
+        &["restore", "--theirs", typed],
+        &["mergetool", typed],
+        &["add", typed],
+    ] {
+        let said = explained(&env, args);
+        assert!(!said.contains(typed), "{args:?}: {said}");
+        assert!(said.contains("<file>"), "{args:?}: {said}");
+    }
 }
 
 #[test]
@@ -584,6 +663,25 @@ fn on_a_terminal(env: &Env, args: &[&str]) -> Output {
         .args(args)
         .output()
         .unwrap()
+}
+
+/// A script that went on after `git merge` would go on after a combine that kept conflicts too,
+/// so the first `merge` says how to stop instead.
+#[cfg(feature = "fault-injection")]
+#[test]
+fn the_merge_hint_says_a_combine_with_conflicts_still_ends_with_0() {
+    let env = with_side_ahead();
+    let out = on_a_terminal(&env, &["merge", "side"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(
+        text(&out.stderr).ends_with(
+            "\nhint: in Opalro, merge is combine: opalro combine <line>\n      A combine keeps \
+             conflicts and still ends with 0;\n      opalro combine --only-if-clean <line> stops \
+             instead.\n"
+        ),
+        "{}",
+        text(&out.stderr)
+    );
 }
 
 #[cfg(feature = "fault-injection")]

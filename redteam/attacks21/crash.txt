@@ -1,0 +1,16 @@
+   Compiling opal-vcs v0.1.0 (/work/crates/opal-vcs)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.90s
+     Running tests/rt22_crash.rs (target/debug/deps/rt22_crash-51296227a16cfc2e)
+
+running 4 tests
+["resolve", "a.txt", "pic.png"] tagged=false: 8 fault points
+test rt22_resolve_stopped_into_the_combined_save ... ok
+["resolve", "a.txt", "pic.png"] tagged=true: 8 fault points
+test rt22_resolve_stopped_as_a_save_of_its_own ... ok
+["resolve", "pic.png", "a.txt", "--keep", "theirs"] tagged=false: 15 fault points
+test rt22_resolve_keep_stopped_into_the_combined_save ... ok
+["resolve", "pic.png", "a.txt", "--keep", "theirs"] tagged=true: 15 fault points
+test rt22_resolve_keep_stopped_as_a_save_of_its_own ... ok
+
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 10.31s
+

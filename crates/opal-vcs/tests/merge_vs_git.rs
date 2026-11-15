@@ -15,7 +15,7 @@ use opal_core::repo::Repository;
 use proptest::prelude::*;
 use proptest::sample::Index;
 use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
-use support::{Env, files, git, git_with_input, main_tip, saved_files, text};
+use support::{Env, Files, files, git, git_with_input, main_tip, saved_files, text};
 
 const ALPHABET: &[&str] = &["a\n", "b\n", "c\n", "d\n"];
 
@@ -159,9 +159,9 @@ fn git_merge(texts: &[Vec<u8>; 3]) -> Option<Vec<u8>> {
 }
 
 fn ours_merge(texts: &[Vec<u8>; 3]) -> Option<Vec<u8>> {
-    match merge_text(&texts[0], &texts[1], &texts[2], DEADLINE).0 {
+    match merge_text(&texts[0], &texts[1], &texts[2], DEADLINE, None).0 {
         Text::Merged(bytes) => Some(bytes),
-        Text::Not(_) => None,
+        _ => None,
     }
 }
 
@@ -224,7 +224,7 @@ fn text_merge_and_git_merge_file_on_repeating_lines() {
         .run(&three(false), |texts| {
             let [b, o, t] = &texts;
             let merged = |base: &[u8], ours: &[u8], theirs: &[u8]| {
-                merge_text(base, ours, theirs, DEADLINE).0
+                merge_text(base, ours, theirs, DEADLINE, None).0
             };
             prop_assert_eq!(merged(b, o, o), Text::Merged(o.clone()));
             prop_assert_eq!(merged(b, b, t), Text::Merged(t.clone()));
@@ -660,11 +660,14 @@ fn branch_named(name: &str) -> usize {
 }
 
 /// Generated histories of two branches, combined by both programs. Where both combine cleanly,
-/// they leave the same files, folders and marks, on disk and in the saves. Where Opalro stops, it
-/// stopped for conflicts and changed nothing. Git pairs a file moved and edited with its old self
-/// by likeness, which Opalro never guesses: so Git alone may merge (Opalro's reasons then name
-/// moved files), and where the other branch removed the file, Opalro alone keeps it where Git
-/// reports exactly that pair of conflicts. The seed is fixed; counts sit between floors and
+/// they leave the same files, folders and marks, on disk and in the saves. Where Opalro asked for
+/// a clean line stops, it stopped for conflicts and changed nothing; kept, they are at the places
+/// Git reports unmerged, and taking one side everywhere gives what Git's `checkout --ours` or
+/// `--theirs` gives. Git pairs a file moved and edited with its old self by likeness, which
+/// Opalro never guesses: so Git alone may merge (Opalro's reasons then name moved files), where
+/// the other branch removed the file Opalro alone keeps it where Git reports exactly that pair of
+/// conflicts, and where both conflict only moved files may tell their places apart (such a case
+/// is counted and printed, not compared). The seed is fixed; counts sit between floors and
 /// ceilings.
 #[test]
 fn combine_matches_git_merge() {
@@ -679,10 +682,12 @@ fn combine_matches_git_merge() {
     let followed = RefCell::new(0);
     let git_only = RefCell::new(Vec::new());
     let opalro_only = RefCell::new(Vec::new());
+    let compared = RefCell::new(0);
+    let skipped = RefCell::new(Vec::new());
     let started = Instant::now();
     let rng = TestRng::deterministic_rng(RngAlgorithm::ChaCha);
     let config = Config {
-        cases: 64,
+        cases: 96,
         failure_persistence: None,
         ..Config::default()
     };
@@ -707,7 +712,11 @@ fn combine_matches_git_merge() {
             );
 
             let before = (env.standing(), files(env.root()), folders(env.root()));
-            let ours = env.opalro().args(["combine", "side"]).output().unwrap();
+            let ours = env
+                .opalro()
+                .args(["combine", "side", "--only-if-clean"])
+                .output()
+                .unwrap();
             let ours_code = ours.status.code().unwrap();
             let said = text(&ours.stderr);
             prop_assert!(ours_code <= 1, "{said}\n{fast_import}");
@@ -769,6 +778,44 @@ fn combine_matches_git_merge() {
                 }
                 *followed.borrow_mut() += made.moves[0].1;
             }
+            if kind == 1 {
+                // Opalro keeps a conflict at each place it named; where Git reports one, at the
+                // same places, unless moves the two follow differently explain every difference.
+                opalro(&env, &["combine", "side"], 0);
+                let places = conflict_places(env.root());
+                let named: BTreeSet<String> = (why.iter())
+                    .map(|l| l.trim_start().split_once(": ").unwrap().0.to_owned())
+                    .collect();
+                prop_assert_eq!(&named, &places, "{}\n{}", said, fast_import);
+                let unmerged: BTreeSet<String> = (text(&git(
+                    clone.path(),
+                    &["diff", "--name-only", "--diff-filter=U"],
+                ))
+                .lines())
+                .map(str::to_owned)
+                .collect();
+                if unmerged == places {
+                    keep_sides_match_git(&env, clone.path(), fast_import)?;
+                    *compared.borrow_mut() += 1;
+                } else {
+                    // Set aside only where Git says it followed a move at every path that tells
+                    // the two apart, and only once nothing either line made is lost.
+                    let renamed = git_renames(clone.path());
+                    let apart: Vec<&String> = unmerged.symmetric_difference(&places).collect();
+                    let unexplained: Vec<&&String> =
+                        apart.iter().filter(|p| !renamed.contains(**p)).collect();
+                    prop_assert!(
+                        unexplained.is_empty(),
+                        "Git: {unmerged:?}, Opalro: {places:?}; no move Git followed at {unexplained:?}\n{fast_import}"
+                    );
+                    if let Err(lost) = nothing_lost(&made, &kept_sides(&env)) {
+                        prop_assert!(false, "{lost}\n{fast_import}");
+                    }
+                    skipped.borrow_mut().push(format!(
+                        "Git {unmerged:?}, Opalro {places:?}: Git followed a move at {apart:?}"
+                    ));
+                }
+            }
             if kind == 2 {
                 // Only a file moved and edited on one branch and removed on the other, which Git
                 // reports as a rename/delete of it and a modify/delete at its new place.
@@ -823,6 +870,10 @@ fn combine_matches_git_merge() {
                 for (to, (from, _)) in &renamed {
                     prop_assert!(ours.contains_key(to) && !ours.contains_key(from), "{to}");
                 }
+                let result = [(files(env.root()), opalro_marks(env.root()))];
+                if let Err(lost) = nothing_lost(&made, &result) {
+                    prop_assert!(false, "{lost}\n{fast_import}");
+                }
                 opalro_only.borrow_mut().push(format!("{renamed:?}"));
             }
             if kind == 3 {
@@ -855,19 +906,35 @@ fn combine_matches_git_merge() {
         pure.0, pure.1, before.0, before.1, after.0, after.1
     );
     for why in opalro_only.into_inner() {
-        println!("Opalro clean only, Git's rename/delete pairs: {why}");
+        println!(
+            "Opalro clean only, the accepted case (a file moved and edited on one branch and \
+             removed on the other, which Git pairs with its old self by likeness and reports as \
+             rename/delete), nothing either branch made lost: {why}"
+        );
     }
     for why in git_only.into_inner() {
         println!("Git clean only: {why}");
     }
-    println!("took {:.1?}", started.elapsed());
-    // Measured with Git 2.50.1: 36 both clean, 1 Opalro clean only, 4 Git clean only, 8 moves
-    // followed into a file the other branch edited, 3 files edited before their move and on the
-    // other branch. Another Git can pair a few files its own way, so each bound has some room.
-    assert!(
-        counts[0] >= 24 && counts[2] <= 3 && counts[3] <= 8,
-        "{KINDS:?}: {counts:?}"
+    let skipped = skipped.into_inner();
+    for why in &skipped {
+        println!("both conflict, set aside, nothing either branch made lost: {why}");
+    }
+    let compared = compared.into_inner();
+    println!(
+        "both conflict: {compared} compared, {} set aside where Git followed a move",
+        skipped.len()
     );
+    println!("took {:.1?}", started.elapsed());
+    assert!(
+        compared >= 16,
+        "{compared} cases where both conflict compared"
+    );
+    // Measured with Git 2.50.1: 57 both clean, 34 both conflict (20 compared, 14 set aside where
+    // Git followed a move, nothing lost), 1 Opalro clean only (the accepted case; any other fails), 4 Git
+    // clean only, 12 moves followed into a file the other branch edited, 5 files edited before
+    // their move and on the other branch. Another Git can pair a few files its own way, so each
+    // bound has some room.
+    assert!(counts[0] >= 40 && counts[3] <= 8, "{KINDS:?}: {counts:?}");
     assert!(
         followed >= 4,
         "{followed} moves followed into an edited file"
@@ -876,6 +943,213 @@ fn combine_matches_git_merge() {
         before.1 >= 1,
         "no file edited before its move and on the other branch"
     );
+}
+
+/// The old and new paths of every move Git's rename detection finds on either branch since where
+/// they parted, in the stopped merge in `clone`: the moves Git follows.
+fn git_renames(clone: &Path) -> BTreeSet<String> {
+    let base = text(&git(clone, &["merge-base", "HEAD", "origin/side"]));
+    let mut found = BTreeSet::new();
+    for tip in ["HEAD", "origin/side"] {
+        let listed = git(
+            clone,
+            &["diff", "--name-status", "-M", "-z", base.trim(), tip],
+        );
+        let mut fields = listed.split(|&b| b == 0).filter(|f| !f.is_empty());
+        while let Some(status) = fields.next() {
+            let two = matches!(status.first(), Some(b'R' | b'C'));
+            for _ in 0..if two { 2 } else { 1 } {
+                let path = text(fields.next().unwrap());
+                if status.first() == Some(&b'R') {
+                    found.insert(path);
+                }
+            }
+        }
+    }
+    found
+}
+
+/// The files and executable marks Opalro gives, its conflicts kept, when one side is taken
+/// everywhere: `--keep mine`, then after `undo`, `--keep theirs`.
+fn kept_sides(env: &Env) -> Vec<(Files, BTreeMap<String, bool>)> {
+    let mut sides = Vec::new();
+    for side in ["mine", "theirs"] {
+        if side == "theirs" {
+            opalro(env, &["undo"], 0);
+        }
+        opalro(env, &["resolve", ".", "--keep", side], 0);
+        sides.push((files(env.root()), opalro_marks(env.root())));
+    }
+    sides
+}
+
+/// Whether everything either branch made is in one of Opalro's `results` (the files as the
+/// combine left them, or each side of its conflicts taken everywhere): every line a branch added
+/// to a file, as many times as it added it, in one file there; a file a branch added whole,
+/// whole with its mark (or with the mark the other branch gave the start's file at that path);
+/// and a change of the executable mark, on the file this one became. That is
+/// the file at its path, unless the other branch holds a file of another origin there and this
+/// file's origin somewhere else; or any file holding all it added and a line of its own. A
+/// version that only took lines out has nothing that can be lost. Not seen: both branches making
+/// the same change of mark on their own copies, one of which loses it (testing.md says more).
+fn nothing_lost(
+    made: &Generated,
+    results: &[(Files, BTreeMap<String, bool>)],
+) -> Result<(), String> {
+    let counted = |lines: &mut dyn Iterator<Item = &str>| {
+        let mut n: BTreeMap<String, usize> = BTreeMap::new();
+        for l in lines {
+            *n.entry(l.to_owned()).or_default() += 1;
+        }
+        n
+    };
+    let held: Vec<(&Vec<u8>, bool, BTreeMap<String, usize>)> = (results.iter())
+        .flat_map(|(files, marks)| files.iter().map(move |(p, b)| (p, b, marks[p])))
+        .map(|(_, b, x)| {
+            let text = String::from_utf8_lossy(b).into_owned();
+            (b, x, counted(&mut text.split_inclusive('\n')))
+        })
+        .collect();
+    let at: Vec<(&String, bool)> = (results.iter())
+        .flat_map(|(files, marks)| files.keys().map(move |p| (p, marks[p])))
+        .collect();
+    for (branch, end) in made.ends.iter().enumerate() {
+        for (path, f) in end {
+            let lost = |what: &str| {
+                Err(format!(
+                    "branch {branch}'s {path}: {what} is in none of Opalro's results"
+                ))
+            };
+            let Some(was) = f.origin.as_ref().and_then(|o| made.first.get(o)) else {
+                let bytes = f.lines.concat().into_bytes();
+                // Made where the start held a file whose mark the other branch changed: that
+                // change is the other branch's, and lands on whatever is at the path. The new
+                // file then has its own mark or that one, never another.
+                let start = made.first.get(path);
+                let other_mark = (made.ends[1 - branch].get(path))
+                    .filter(|o| {
+                        o.origin.as_deref() == Some(path.as_str())
+                            && start.is_some_and(|s| s.exec != o.exec)
+                    })
+                    .map(|o| o.exec);
+                if !held
+                    .iter()
+                    .any(|(b, x, _)| **b == bytes && (*x == f.exec || Some(*x) == other_mark))
+                {
+                    return lost("the file it added");
+                }
+                continue;
+            };
+            let mut added = counted(&mut f.lines.iter().map(String::as_str));
+            for l in &was.lines {
+                if let Some(n) = added.get_mut(l) {
+                    *n = n.saturating_sub(1);
+                }
+            }
+            added.retain(|_, n| *n > 0);
+            let holds_added = |lines: &BTreeMap<String, usize>| {
+                added
+                    .iter()
+                    .all(|(l, n)| lines.get(l).is_some_and(|m| m >= n))
+            };
+            if !added.is_empty() && !held.iter().any(|(_, _, lines)| holds_added(lines)) {
+                let held_enough = |(l, n): &(&String, &usize)| {
+                    held.iter()
+                        .any(|(_, _, h)| h.get(*l).is_some_and(|m| m >= *n))
+                };
+                let missing = (added.iter().find(|e| !held_enough(e)))
+                    .or_else(|| added.iter().next())
+                    .map(|(l, _)| l.trim_end().to_owned())
+                    .unwrap_or_default();
+                return lost(&format!("the line {missing:?} it added"));
+            }
+            // The mark of the file this one became: the file at its path, unless the other branch
+            // holds a file of another origin there and this one somewhere else. Or any file
+            // holding all it added and a line of its own.
+            let other = made.ends[1 - branch].get(path);
+            let gone_elsewhere = made.ends[1 - branch].values().any(|o| o.origin == f.origin);
+            let still_this = other.is_none_or(|o| o.origin == f.origin) || !gone_elsewhere;
+            let marked_here = still_this && at.iter().any(|(p, x)| *p == path && *x == f.exec);
+            let moved = |lines: &BTreeMap<String, usize>| {
+                holds_added(lines) && f.lines.iter().any(|l| lines.contains_key(l))
+            };
+            let marked_there = held
+                .iter()
+                .any(|(_, x, lines)| *x == f.exec && moved(lines));
+            if f.exec != was.exec && !marked_here && !marked_there {
+                return lost("the executable mark it changed");
+            }
+        }
+    }
+    Ok(())
+}
+
+/// The places in conflict in the save the project in `root` is on.
+fn conflict_places(root: &Path) -> BTreeSet<String> {
+    let repo = Repository::open(root).unwrap();
+    let st = opal_core::status::status(&repo, true, None).unwrap();
+    st.conflicts.into_iter().map(|c| c.path).collect()
+}
+
+/// What Git's index in `dir` holds: each path's stages, with whether each is executable.
+fn stages(dir: &Path) -> BTreeMap<String, BTreeMap<u8, bool>> {
+    let listed = git(dir, &["ls-files", "-s", "-z"]);
+    let mut found: BTreeMap<String, BTreeMap<u8, bool>> = BTreeMap::new();
+    for entry in listed.split(|&b| b == 0).filter(|e| !e.is_empty()) {
+        let entry = text(entry);
+        let (head, path) = entry.split_once('\t').unwrap();
+        // `<mode> <id> <stage>`
+        let stage = head.rsplit_once(' ').unwrap().1.parse().unwrap();
+        let exec = head.starts_with("100755");
+        found
+            .entry(path.to_owned())
+            .or_default()
+            .insert(stage, exec);
+    }
+    found
+}
+
+/// `resolve . --keep mine`, then (after `undo`) `--keep theirs`, against Git's stopped merge in
+/// `clone` taking the same side everywhere (`git checkout --ours` or `--theirs` at each path in
+/// conflict, and the path removed where that side has none): the same files, contents and
+/// executable marks.
+fn keep_sides_match_git(env: &Env, clone: &Path, history: &str) -> Result<(), TestCaseError> {
+    let index = stages(clone);
+    let theirs_clone = tempfile::tempdir().unwrap();
+    support::copy_dir(clone, theirs_clone.path());
+    for (stage, dir, side) in [(2, clone, "mine"), (3, theirs_clone.path(), "theirs")] {
+        let mut marks = BTreeMap::new();
+        for (path, held) in &index {
+            if let Some(&exec) = held.get(&0) {
+                marks.insert(path.clone(), exec);
+                continue;
+            }
+            match held.get(&stage) {
+                Some(&exec) => {
+                    let which = if stage == 2 { "--ours" } else { "--theirs" };
+                    git(dir, &["checkout", which, "--", path]);
+                    marks.insert(path.clone(), exec);
+                }
+                None if dir.join(path).exists() => std::fs::remove_file(dir.join(path)).unwrap(),
+                None => {}
+            }
+        }
+        if side == "theirs" {
+            opalro(env, &["undo"], 0);
+        }
+        opalro(env, &["resolve", ".", "--keep", side], 0);
+        prop_assert_eq!(files(env.root()), files(dir), "{}: {}", side, history);
+        prop_assert_eq!(
+            opalro_marks(env.root()),
+            marks.clone(),
+            "{}: {}",
+            side,
+            history
+        );
+        #[cfg(unix)]
+        prop_assert_eq!(disk_marks(env.root()), marks, "{}: {}", side, history);
+    }
+    Ok(())
 }
 
 /// Every file Git's stopped merge in `dir` left in its folder, with whether it is executable: the
@@ -923,7 +1197,7 @@ fn a_file_moved_and_changed_and_removed_on_the_other_line_is_kept_where_git_asks
         &["clone", "-q", ".", clone.path().to_str().unwrap()],
     );
 
-    opalro(&env, &["combine", "side"], 0);
+    opalro(&env, &["combine", "side", "--only-if-clean"], 0);
     assert_eq!(
         files(env.root()),
         support::holding(&[("b.txt", "one\n2\n3\n")])
@@ -969,14 +1243,14 @@ fn a_move_saved_by_itself_is_followed_and_one_saved_with_an_edit_is_not() {
         env.overwrite("b.txt", "one\n2\n3\n");
         opalro(&env, &["save", "Main edits b.txt"], 0);
         if apart {
-            let said = opalro(&env, &["combine", "side"], 1);
+            let said = opalro(&env, &["combine", "side", "--only-if-clean"], 1);
             assert!(
-                said.contains("\n  a.txt: moved to b.txt on main, removed on side"),
+                said.contains("\n  b.txt: moved here from a.txt on main, removed on side"),
                 "{said}"
             );
         } else {
             let (main, side) = (main_tip(&env), env.state().1.lines["side"]);
-            opalro(&env, &["combine", "side"], 0);
+            opalro(&env, &["combine", "side", "--only-if-clean"], 0);
             let repo = Repository::open(env.root()).unwrap();
             let combined = repo.store().save(&main_tip(&env), false).unwrap();
             assert_eq!(combined.parents, [main, side]);
@@ -987,4 +1261,234 @@ fn a_move_saved_by_itself_is_followed_and_one_saved_with_an_edit_is_not() {
             );
         }
     }
+}
+
+/// A file of `three_trees`: its path, its lines, its mark and where it was first.
+type Spec<'a> = (&'a str, &'a [&'a str], bool, Option<&'a str>);
+
+/// A generated history of three trees, with no stream: the first commit's files, then each
+/// branch's end.
+fn three_trees(trees: [&[Spec]; 3]) -> Generated {
+    let tree = |files: &[Spec]| -> Tree {
+        (files.iter())
+            .map(|(path, lines, exec, origin)| {
+                let file = File {
+                    lines: lines.iter().map(|l| format!("{l}\n")).collect(),
+                    exec: *exec,
+                    origin: origin.map(str::to_owned),
+                    moved: false,
+                    edited: [false; 2],
+                };
+                ((*path).to_owned(), file)
+            })
+            .collect()
+    };
+    Generated {
+        stream: String::new(),
+        first: tree(trees[0]),
+        ends: [tree(trees[1]), tree(trees[2])],
+        moves: MoveCounts::default(),
+    }
+}
+
+/// One result: files with their text and executable mark.
+fn result(files: &[(&str, &str, bool)]) -> (Files, BTreeMap<String, bool>) {
+    let bytes = files
+        .iter()
+        .map(|(p, t, _)| ((*p).to_owned(), t.as_bytes().to_vec()));
+    let marks = files.iter().map(|(p, _, x)| ((*p).to_owned(), *x));
+    (bytes.collect(), marks.collect())
+}
+
+#[test]
+fn nothing_lost_names_a_line_a_branch_added_that_is_in_no_result() {
+    let start: &[Spec] = &[("a.txt", &["one", "two"], false, Some("a.txt"))];
+    let added: &[Spec] = &[("a.txt", &["one", "new", "two"], false, Some("a.txt"))];
+    let made = three_trees([start, added, start]);
+    let lost = nothing_lost(&made, &[result(&[("a.txt", "one\ntwo\n", false)])]);
+    assert_eq!(
+        lost,
+        Err(r#"branch 0's a.txt: the line "new" it added is in none of Opalro's results"#.into())
+    );
+    let kept = [result(&[("a.txt", "one\nnew\ntwo\nmore\n", false)])];
+    assert_eq!(nothing_lost(&made, &kept), Ok(()));
+}
+
+#[test]
+fn nothing_lost_names_a_file_a_branch_added_that_is_in_no_result() {
+    let start: &[Spec] = &[("a.txt", &["one"], false, Some("a.txt"))];
+    let added: &[Spec] = &[
+        ("a.txt", &["one"], false, Some("a.txt")),
+        ("b.txt", &["bee"], false, None),
+    ];
+    let made = three_trees([start, start, added]);
+    let lost = nothing_lost(&made, &[result(&[("a.txt", "one\n", false)])]);
+    assert_eq!(
+        lost,
+        Err("branch 1's b.txt: the file it added is in none of Opalro's results".into())
+    );
+}
+
+#[test]
+fn nothing_lost_finds_nothing_lost_where_a_branch_only_took_lines_out() {
+    let start: &[Spec] = &[("a.txt", &["one", "two", "three"], false, Some("a.txt"))];
+    let fewer: &[Spec] = &[("a.txt", &["one", "three"], false, Some("a.txt"))];
+    let other: &[Spec] = &[(
+        "a.txt",
+        &["one", "two", "three", "four"],
+        false,
+        Some("a.txt"),
+    )];
+    let made = three_trees([start, fewer, other]);
+    let merged = [result(&[("a.txt", "one\nthree\nfour\n", false)])];
+    assert_eq!(nothing_lost(&made, &merged), Ok(()));
+}
+
+/// A branch that only turned the mark on, where the other replaced every line: the mark is the
+/// file's in the result, whatever its lines.
+#[test]
+fn nothing_lost_reads_a_mark_from_the_file_where_it_is() {
+    let start: &[Spec] = &[("a.txt", &["one"], false, Some("a.txt"))];
+    let marked: &[Spec] = &[("a.txt", &["one"], true, Some("a.txt"))];
+    let rewritten: &[Spec] = &[("a.txt", &["other"], false, Some("a.txt"))];
+    let made = three_trees([start, marked, rewritten]);
+    let kept = [result(&[("a.txt", "other\n", true)])];
+    assert_eq!(nothing_lost(&made, &kept), Ok(()));
+    let lost = nothing_lost(&made, &[result(&[("a.txt", "other\n", false)])]);
+    assert_eq!(
+        lost,
+        Err(
+            "branch 0's a.txt: the executable mark it changed is in none of Opalro's results"
+                .into()
+        )
+    );
+}
+
+/// A branch that only turned the mark on, where the other moved the file: the mark is found on
+/// the file where it went.
+#[test]
+fn nothing_lost_reads_a_mark_from_the_file_where_it_went() {
+    let start: &[Spec] = &[("a.txt", &["one"], false, Some("a.txt"))];
+    let marked: &[Spec] = &[("a.txt", &["one"], true, Some("a.txt"))];
+    let moved: &[Spec] = &[("b.txt", &["one"], false, Some("a.txt"))];
+    let made = three_trees([start, marked, moved]);
+    let kept = [result(&[("b.txt", "one\n", true)])];
+    assert_eq!(nothing_lost(&made, &kept), Ok(()));
+}
+
+/// The other branch moved the file away and put another file, marked, at its old path: that file
+/// proves nothing of the mark, which the moved file lost.
+#[test]
+fn nothing_lost_takes_no_mark_from_a_file_of_another_origin_at_the_path() {
+    let start: &[Spec] = &[("a.txt", &["one"], false, Some("a.txt"))];
+    let marked: &[Spec] = &[("a.txt", &["one"], true, Some("a.txt"))];
+    let moved: &[Spec] = &[
+        ("a.txt", &["other"], true, None),
+        ("b.txt", &["one"], false, Some("a.txt")),
+    ];
+    let made = three_trees([start, marked, moved]);
+    let lost = nothing_lost(
+        &made,
+        &[result(&[
+            ("a.txt", "other\n", true),
+            ("b.txt", "one\n", false),
+        ])],
+    );
+    assert_eq!(
+        lost,
+        Err(
+            "branch 0's a.txt: the executable mark it changed is in none of Opalro's results"
+                .into()
+        )
+    );
+}
+
+#[test]
+fn nothing_lost_names_a_file_a_branch_added_that_is_there_with_another_mark() {
+    let start: &[Spec] = &[("a.txt", &["one"], false, Some("a.txt"))];
+    let added: &[Spec] = &[
+        ("a.txt", &["one"], false, Some("a.txt")),
+        ("b.txt", &["bee"], true, None),
+    ];
+    let made = three_trees([start, start, added]);
+    let lost = nothing_lost(
+        &made,
+        &[result(&[
+            ("a.txt", "one\n", false),
+            ("b.txt", "bee\n", false),
+        ])],
+    );
+    assert_eq!(
+        lost,
+        Err("branch 1's b.txt: the file it added is in none of Opalro's results".into())
+    );
+}
+
+#[test]
+fn nothing_lost_counts_a_line_a_branch_added_twice() {
+    let start: &[Spec] = &[("a.txt", &["one"], false, Some("a.txt"))];
+    let twice: &[Spec] = &[("a.txt", &["one", "x", "x"], false, Some("a.txt"))];
+    let made = three_trees([start, twice, start]);
+    let lost = nothing_lost(&made, &[result(&[("a.txt", "one\nx\n", false)])]);
+    assert_eq!(
+        lost,
+        Err(r#"branch 0's a.txt: the line "x" it added is in none of Opalro's results"#.into())
+    );
+}
+
+/// Each line a branch added is somewhere, but not all in one file: lost, naming the first line,
+/// since no single line is missing.
+#[test]
+fn nothing_lost_wants_the_lines_a_branch_added_in_one_file() {
+    let start: &[Spec] = &[("a.txt", &["one"], false, Some("a.txt"))];
+    let two: &[Spec] = &[("a.txt", &["one", "p", "q"], false, Some("a.txt"))];
+    let made = three_trees([start, two, start]);
+    let split = [result(&[
+        ("a.txt", "one\np\n", false),
+        ("b.txt", "q\n", false),
+    ])];
+    assert_eq!(
+        nothing_lost(&made, &split),
+        Err(r#"branch 0's a.txt: the line "p" it added is in none of Opalro's results"#.into())
+    );
+}
+
+/// A branch that only turned the mark on, where the other removed the file and made a new one
+/// at the same path: the mark stays on the file there, which is what this one became.
+#[test]
+fn nothing_lost_reads_a_mark_from_the_new_file_where_the_old_was_removed() {
+    let start: &[Spec] = &[("a.txt", &["one"], false, Some("a.txt"))];
+    let marked: &[Spec] = &[("a.txt", &["one"], true, Some("a.txt"))];
+    let remade: &[Spec] = &[("a.txt", &["other"], false, None)];
+    let made = three_trees([start, marked, remade]);
+    // The one result a combine gives: the new file there, with the mark.
+    let kept = [result(&[("a.txt", "other\n", true)])];
+    assert_eq!(nothing_lost(&made, &kept), Ok(()));
+}
+
+/// A branch moved the start's file away and added a marked file at its old path, where the
+/// other branch turned the start file's mark on: the new file must keep a mark one branch gave
+/// it at that path, and the moved file the other's.
+#[test]
+fn nothing_lost_wants_an_added_file_with_a_mark_a_branch_gave_it() {
+    let start: &[Spec] = &[("a.txt", &["one"], false, Some("a.txt"))];
+    let moved: &[Spec] = &[
+        ("b.txt", &["one"], false, Some("a.txt")),
+        ("a.txt", &["new"], true, None),
+    ];
+    let marked: &[Spec] = &[("a.txt", &["one"], true, Some("a.txt"))];
+    let made = three_trees([start, moved, marked]);
+    let unmarked = [result(&[
+        ("a.txt", "new\n", false),
+        ("b.txt", "one\n", true),
+    ])];
+    assert_eq!(
+        nothing_lost(&made, &unmarked),
+        Err("branch 0's a.txt: the file it added is in none of Opalro's results".into())
+    );
+    let kept = [result(&[
+        ("a.txt", "new\n", true),
+        ("b.txt", "one\n", true),
+    ])];
+    assert_eq!(nothing_lost(&made, &kept), Ok(()));
 }

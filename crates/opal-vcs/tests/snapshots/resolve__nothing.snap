@@ -1,0 +1,38 @@
+---
+source: crates/opal-vcs/tests/resolve.rs
+assertion_line: 454
+expression: "support::masked(nothing)"
+---
+{
+  "conflict_count": 3,
+  "conflicts": [
+    {
+      "path": "a.txt",
+      "places_left": 1,
+      "standing": "markers",
+      "terms": 3
+    },
+    {
+      "path": "gone.txt",
+      "places_left": null,
+      "standing": "nothing",
+      "terms": 3
+    },
+    {
+      "path": "pic.png",
+      "places_left": null,
+      "standing": "yours",
+      "terms": 3
+    }
+  ],
+  "more_conflicts": 0,
+  "opalro_json": 1,
+  "recorded": [],
+  "removed": 0,
+  "replaced": null,
+  "result": "nothing",
+  "safety_copies": 0,
+  "save": null,
+  "warnings": [],
+  "written": 0
+}

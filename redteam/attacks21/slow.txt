@@ -1,0 +1,34 @@
+   Compiling opal-vcs v0.1.0 (/work/crates/opal-vcs)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.27s
+     Running tests/rt22_slow.rs (target/debug/deps/rt22_slow-5e4ee4b7c2a2e9ff)
+
+running 1 test
+shared=false n=10000 ["status"]: code Some(0) 1.2s peak 72 MB 
+shared=false n=10000 ["goto", "main"]: code Some(0) 3.3s peak 73 MB 
+shared=false n=10000 ["resolve"]: code Some(0) 1.2s peak 71 MB 
+shared=false n=10000 ["save", "again"]: code Some(0) 2.5s peak 73 MB 
+shared=false n=20000 ["status"]: code Some(0) 2.0s peak 84 MB 
+shared=false n=20000 ["goto", "main"]: code Some(0) 7.4s peak 83 MB 
+shared=false n=20000 ["resolve"]: code Some(0) 2.0s peak 84 MB 
+shared=false n=20000 ["save", "again"]: code Some(0) 4.6s peak 85 MB 
+shared=false n=40000 ["status"]: code Some(0) 3.7s peak 101 MB 
+shared=false n=40000 ["goto", "main"]: code Some(0) 15.4s peak 101 MB 
+shared=false n=40000 ["resolve"]: code Some(0) 3.6s peak 101 MB 
+shared=false n=40000 ["save", "again"]: code Some(0) 9.0s peak 106 MB 
+shared=true n=10000 ["status"]: code Some(0) 0.3s peak 21 MB 
+shared=true n=10000 ["goto", "main"]: code Some(0) 0.4s peak 21 MB 
+shared=true n=10000 ["resolve"]: code Some(0) 0.2s peak 19 MB 
+shared=true n=10000 ["save", "again"]: code Some(0) 0.3s peak 21 MB 
+test rt22_time_of_many_conflicts_in_one_folder has been running for over 60 seconds
+shared=true n=20000 ["status"]: code Some(0) 0.3s peak 28 MB 
+shared=true n=20000 ["goto", "main"]: code Some(0) 0.5s peak 28 MB 
+shared=true n=20000 ["resolve"]: code Some(0) 0.3s peak 29 MB 
+shared=true n=20000 ["save", "again"]: code Some(0) 0.5s peak 28 MB 
+shared=true n=40000 ["status"]: code Some(0) 0.4s peak 36 MB 
+shared=true n=40000 ["goto", "main"]: code Some(0) 0.8s peak 40 MB 
+shared=true n=40000 ["resolve"]: code Some(0) 0.3s peak 36 MB 
+shared=true n=40000 ["save", "again"]: code Some(0) 0.7s peak 39 MB 
+test rt22_time_of_many_conflicts_in_one_folder ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 64.01s
+

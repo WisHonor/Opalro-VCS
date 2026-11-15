@@ -1,0 +1,120 @@
+   Compiling opal-vcs v0.1.0 (/work/crates/opal-vcs)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.71s
+     Running tests/rt22_tidy.rs (target/debug/deps/rt22_tidy-d2c90d1732ed9bc9)
+
+running 3 tests
+test rt22_tidy_past_the_window_control_without_conflicts ... tidy: TidyReport { to_free: 10384, bytes_before: 16290, bytes_after: 5906, packs_removed: 10, packs_written: 1, packs_young: 0 }
+verify ahead 0d: 1 problems
+   ObjectMissing Some("20b4998c84239233bf1077fb988a0828e1194ce3e82d5669d25137edbab850e7") by None: It isn't in any pack.
+verify ahead 40d: 0 problems
+verify ahead 41d: 0 problems
+ok
+test rt22_tidy_past_the_window_keeps_a_conflict_only_a_shelf_reaches ... Combined side into main: save zktr "Combine side into main", with 3 places in conflict:
+  a.txt: changed on both lines, in the same place; marked in the file (1 place)
+  b.png: changed on both lines, and isn't text, so it can't be merged line by line; your version is in the folder
+  pic.png: changed on both lines, and isn't text, so it can't be merged line by line; your version is in the folder
+
+    1 file written.
+
+Shelved your unsaved changes in 2 files on shelf 1.
+
+tidy: TidyReport { to_free: 16327, bytes_before: 25796, bytes_after: 9469, packs_removed: 15, packs_written: 1, packs_young: 0 }
+verify ahead 40d: 0 problems
+1 shelf, newest first:
+
+    1  "Shelved"  2 files  just now  on main
+
+unshelf: 1 error: Shelf 1 can't come back here, so nothing was changed.
+The save you're on changed what is there since the shelf was made:
+  a.txt
+  pic.png
+
+hint: Opalro can't yet bring a shelf back onto changes saved since it was made: opalro goto can't reach the save it was made on, and opalro undo --list shows the steps that can bring it back.
+
+On line other at save stwz "A"  (just now)
+Nothing changed since then.
+
+a.txt now:
+1
+2
+3
+4
+5
+6
+7
+8
+
+ok
+test rt22_tidy_past_the_window_keeps_kept_conflicts ... Combined side into main: save sunv "Combine side into main", with 3 places in conflict:
+  a.txt: changed on both lines, in the same place; marked in the file (1 place)
+  b.png: changed on both lines, and isn't text, so it can't be merged line by line; your version is in the folder
+  pic.png: changed on both lines, and isn't text, so it can't be merged line by line; your version is in the folder
+
+    1 file written.
+
+Recorded 1 fix in a new save rtlk "Fixed conflicts in b.png" on main.
+
+    Your newest save isn't a combined save, so the fix is a save of its own.
+    Took theirs for 1 place.
+    A safety copy of what your folder held was kept.
+    2 places are still in conflict:
+        a.txt       1 marked place left to fix
+        pic.png  your version, still to decide
+
+On line main at save rtlk "Fixed conflicts in b.png"  (just now)
+
+In conflict (2 places):
+
+    a.txt       1 marked place left to fix
+    pic.png  your version, still to decide
+
+tidy: TidyReport { to_free: 16923, bytes_before: 27858, bytes_after: 10935, packs_removed: 15, packs_written: 1, packs_young: 0 }
+verify ahead 40d: 0 problems
+copy a.txt mine: 0 Wrote your version of a.txt to /tmp/.tmpHmQrYF/a.txt-mine.
+
+copy a.txt theirs: 0 Wrote the other line's version of a.txt to /tmp/.tmpHmQrYF/a.txt-theirs.
+
+copy a.txt before: 0 Wrote a.txt as it was where the lines parted to /tmp/.tmpHmQrYF/a.txt-before.
+
+copy pic.png mine: 0 Wrote your version of pic.png to /tmp/.tmpHmQrYF/pic.png-mine.
+
+copy pic.png theirs: 0 Wrote the other line's version of pic.png to /tmp/.tmpHmQrYF/pic.png-theirs.
+
+copy pic.png before: 0 Wrote pic.png as it was where the lines parted to /tmp/.tmpHmQrYF/pic.png-before.
+
+Recorded 1 fix in a new save kwxp "Fixed conflicts in pic.png" on main.
+
+    Your newest save isn't a combined save, so the fix is a save of its own.
+    Took theirs for 1 place.
+    1 place is still in conflict:
+        a.txt  1 marked place left to fix
+
+Recorded 1 fix in a new save ryzv "Fixed conflicts in a.txt" on main.
+
+    Your newest save isn't a combined save, so the fix is a save of its own.
+    Took theirs for 1 place.
+
+verify ahead 40d: 0 problems
+Undo diary for .tmp4Gr6Nd, newest first.
+
+> you are here
+  undo 1   f5ea827c8b50  just now  resolve: main moved to ryzv "Fixed conflicts in a.txt", 1 file changed
+  undo 2   c112fb2d640d  just now  resolve: main moved to kwxp "Fixed conflicts in pic.png", 1 file changed
+  undo 3   0b9c3add12c9  just now  line delete: line side gone
+  undo 4   eb67f8ea12ef  just now  resolve: main moved to rtlk "Fixed conflicts in b.png", files changed
+  undo 5   48895c35e953  just now  save: main moved to qmox "half two"
+  undo 6   27282306c7a2  just now  save: main moved to mzzm "half one"
+  undo 7   b569354d382b  just now  combine: main moved to sunv "Combine side into main", files changed
+  undo 8   1f5f7d3f3396  just now  save: main moved to lxrv "On main"
+  undo 9   f019fada263f  just now  goto: on main at uvxp, 3 files changed
+  undo 10  eba438873d24  just now  save: side moved to vwml "On side"
+  undo 11  47dd0158519e  just now  line new: line side made at uvxp "A", on side at uvxp
+  undo 12  6415eb089002  just now  goto: on main at uvxp
+  undo 13  fdaab177f334  just now  line new: line other made at uvxp "A", on other at uvxp
+  undo 14  0864ff3b9ba7  just now  save: main moved to uvxp "A"
+           6d057e061b73  just now  start: the diary's first entry, which can't be undone
+
+ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 8.19s
+

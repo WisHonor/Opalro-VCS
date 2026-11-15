@@ -2,21 +2,20 @@
 //! in: Git LFS pointers in place of their files, and files that differ only in line endings, since
 //! Git on Windows writes LF as CRLF and stores LF. Opalro keeps bytes as they are (decision 039).
 
-use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, Read, Write};
 
 use opal_platform::dir::Dir;
 
 use super::{
-    Child, Folders, Handles, NAMED, SaveError, each_file_with_saved, open_scanned, read_scanned,
-    stamp, stamp_of, vouched_by,
+    Child, Folders, Handles, Last, NAMED, SaveError, each_file_with_saved, open_scanned,
+    read_scanned, stamp, stamp_of, vouched_by,
 };
 use crate::drive::Drive;
 use crate::filecache::FileCache;
 use crate::git::{MAX_LFS_POINTER_BYTES, lfs_pointer};
 use crate::id::hash_content;
-use crate::listing::{Entry, Listing};
+use crate::listing::Entry;
 use crate::store::Store;
 
 /// Fails, naming the first few, if any file in `folders`, read through `handles`, is a Git LFS
@@ -30,11 +29,11 @@ pub(super) fn pointers(
     trusted: &FileCache,
     handles: &mut Handles,
     folders: &Folders,
-    old: &HashMap<String, Option<Listing>>,
+    last: Last,
 ) -> Result<(), SaveError> {
     let mut count = 0;
     let mut paths = Vec::new();
-    each_file_with_saved(store, drive, folders, old, |rel, c, saved| {
+    each_file_with_saved(store, drive, folders, last, |rel, c, saved| {
         let small = c
             .meta
             .is_some_and(|m| m.size <= MAX_LFS_POINTER_BYTES as u64);
@@ -69,19 +68,19 @@ fn stands_in(was: &Entry, dir: &Dir, c: &Child) -> Result<bool, SaveError> {
 const PIECE: usize = 64 << 10;
 
 /// Fails, naming the first few, if any file in `folders`, read through `handles`, is the base
-/// save's file with each LF turned into CRLF, matched by name as `drive` compares names. `old` is
-/// what the base save holds in each folder. Entries kept as they were are not files in `folders`,
-/// so they are never looked at.
+/// save's file with each LF turned into CRLF, matched by name as `drive` compares names. `last` is
+/// what the base save holds in each folder, as the folder holds it. Entries kept as they were are
+/// not files in `folders`, so they are never looked at.
 pub(super) fn check(
     store: &Store,
     drive: Drive,
     handles: &mut Handles,
     folders: &Folders,
-    old: &HashMap<String, Option<Listing>>,
+    last: Last,
 ) -> Result<(), SaveError> {
     let mut count = 0;
     let mut first = Vec::new();
-    each_file_with_saved(store, drive, folders, old, |rel, c, saved| {
+    each_file_with_saved(store, drive, folders, last, |rel, c, saved| {
         if let Some(was) = saved
             && converted(store, was, handles.folder(rel)?, c)?
         {
@@ -238,7 +237,11 @@ mod tests {
             this_drive(),
             &mut scan.handles,
             &scan.folders,
-            &scan.old,
+            Last {
+                listings: &scan.old,
+                ids: &scan.old_ids,
+                records: &scan.records,
+            },
         );
         // Ending a copy on purpose is no damage and no warning.
         assert!(repo.store().warnings().is_empty());
@@ -302,7 +305,11 @@ mod tests {
             this_drive(),
             &mut scan.handles,
             &scan.folders,
-            &scan.old,
+            Last {
+                listings: &scan.old,
+                ids: &scan.old_ids,
+                records: &scan.records,
+            },
         )
         .unwrap();
     }
@@ -325,7 +332,11 @@ mod tests {
             this_drive(),
             &mut scan.handles,
             &scan.folders,
-            &scan.old,
+            Last {
+                listings: &scan.old,
+                ids: &scan.old_ids,
+                records: &scan.records,
+            },
         ));
         assert_eq!(found, (1, vec!["run.sh".to_owned()]));
     }
@@ -354,7 +365,11 @@ mod tests {
                 drive,
                 &mut scan.handles,
                 &scan.folders,
-                &scan.old,
+                Last {
+                    listings: &scan.old,
+                    ids: &scan.old_ids,
+                    records: &scan.records,
+                },
             )
         };
         let found = found(check_on(true));
@@ -379,7 +394,11 @@ mod tests {
             this_drive(),
             &mut scan.handles,
             &scan.folders,
-            &scan.old,
+            Last {
+                listings: &scan.old,
+                ids: &scan.old_ids,
+                records: &scan.records,
+            },
         )
         .unwrap_err();
         assert_eq!(
@@ -455,7 +474,11 @@ mod tests {
             this_drive(),
             &mut scan.handles,
             &scan.folders,
-            &scan.old,
+            Last {
+                listings: &scan.old,
+                ids: &scan.old_ids,
+                records: &scan.records,
+            },
         )
         .unwrap_err();
         assert!(matches!(err, SaveError::Repo(_)), "{err:?}");
@@ -479,7 +502,11 @@ mod tests {
             &FileCache::default(),
             &mut scan.handles,
             &scan.folders,
-            &scan.old,
+            Last {
+                listings: &scan.old,
+                ids: &scan.old_ids,
+                records: &scan.records,
+            },
         )
     }
 
@@ -549,7 +576,11 @@ mod tests {
             &FileCache::default(),
             &mut scan.handles,
             &scan.folders,
-            &scan.old,
+            Last {
+                listings: &scan.old,
+                ids: &scan.old_ids,
+                records: &scan.records,
+            },
         )
         .unwrap();
     }
@@ -575,7 +606,11 @@ mod tests {
                 trusted,
                 &mut scan.handles,
                 &scan.folders,
-                &scan.old,
+                Last {
+                    listings: &scan.old,
+                    ids: &scan.old_ids,
+                    records: &scan.records,
+                },
             )
         };
         let vouched = check_with(&trusted);
@@ -612,7 +647,11 @@ mod tests {
                 &FileCache::default(),
                 &mut scan.handles,
                 &scan.folders,
-                &scan.old,
+                Last {
+                    listings: &scan.old,
+                    ids: &scan.old_ids,
+                    records: &scan.records,
+                },
             );
             crate::fsio::fault::unreadable(None);
             let refused = matches!(checked, Err(SaveError::Unreadable { .. }));

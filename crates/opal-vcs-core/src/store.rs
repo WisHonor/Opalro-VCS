@@ -4,6 +4,7 @@
 use opal_platform::dir::Dir;
 
 use crate::chunks::{self, CHUNK_FROM, ChunkList};
+use crate::conflict;
 use crate::encoding::DecodeError;
 use crate::id::{ContentHasher, Id};
 use crate::listing::Listing;
@@ -42,6 +43,11 @@ pub enum StoreError {
     },
     #[error("this save is too large to read safely: {detail}")]
     SaveTooLarge { detail: String },
+    #[error("record {id} is larger than the {limit} bytes it may take")]
+    RecordTooLarge { id: Id, limit: u64 },
+    /// A conflict met at a place that can't be followed, in words that name the place.
+    #[error("{0}")]
+    DamagedConflict(String),
 }
 
 /// A copy of an object: (pack number, its id).
@@ -149,6 +155,8 @@ pub(crate) mod counted {
         static FINDS: Cell<usize> = const { Cell::new(0) };
         static RECORDS: Cell<usize> = const { Cell::new(0) };
         static LISTINGS: Cell<usize> = const { Cell::new(0) };
+        static CONFLICTS: Cell<usize> = const { Cell::new(0) };
+        static UNPACKED: Cell<usize> = const { Cell::new(0) };
     }
 
     pub(super) fn listing() {
@@ -158,6 +166,24 @@ pub(crate) mod counted {
     /// The listings this thread's stores were asked for, read ahead or not.
     pub(crate) fn listings() -> usize {
         LISTINGS.get()
+    }
+
+    pub(super) fn conflict() {
+        CONFLICTS.set(CONFLICTS.get() + 1);
+    }
+
+    /// The conflict records this thread's stores were asked for.
+    pub(crate) fn conflicts() -> usize {
+        CONFLICTS.get()
+    }
+
+    pub(crate) fn unpacking() {
+        UNPACKED.set(UNPACKED.get() + 1);
+    }
+
+    /// The records this thread's packs unpacked.
+    pub(crate) fn unpacked() -> usize {
+        UNPACKED.get()
     }
 
     pub(super) fn find() {
@@ -174,15 +200,49 @@ pub(crate) mod counted {
     }
 }
 
+/// The most terms of the records one command remembers: a project could hold a million records
+/// of 255 terms each, which unpack to gigabytes from little on disk.
+const MAX_MET_TERMS: usize = 1 << 20;
+
+#[cfg(test)]
+thread_local! {
+    /// `MAX_MET_TERMS`, lowered by a test on its thread.
+    static MET_BUDGET: std::cell::Cell<usize> = const { std::cell::Cell::new(MAX_MET_TERMS) };
+}
+
+fn met_budget() -> usize {
+    #[cfg(test)]
+    return MET_BUDGET.get();
+    #[cfg(not(test))]
+    MAX_MET_TERMS
+}
+
+/// The conflict records a command has met, and how many terms they hold together.
+#[derive(Default)]
+struct Met {
+    records: HashMap<Id, conflict::Record>,
+    terms: usize,
+}
+
 pub struct Store {
     dir: Arc<Dir>,
     path: PathBuf,
     packs: Mutex<Packs>,
     checked: Mutex<Checked>,
+    /// The conflict records a command has read where it met them, so each is read once.
+    met: Arc<Mutex<Met>>,
     /// The smallest file stored in chunks, as the project's rules say.
     chunk_from: AtomicU64,
     #[cfg(test)]
     saves_read: std::sync::atomic::AtomicUsize,
+    /// The listings and conflict records this store has been asked for, on any thread.
+    #[cfg(test)]
+    listings_read: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    conflicts_read: std::sync::atomic::AtomicUsize,
+    /// How many records commands kept a summary of, on any thread.
+    #[cfg(test)]
+    kept: Mutex<usize>,
     /// This store's packs while they are open.
     #[cfg(test)]
     counted: Arc<crate::pack::open_files::Count>,
@@ -379,9 +439,16 @@ impl Store {
             path: packs_dir.to_owned(),
             packs: Mutex::default(),
             checked: Mutex::default(),
+            met: Arc::default(),
             chunk_from: AtomicU64::new(CHUNK_FROM),
             #[cfg(test)]
             saves_read: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            listings_read: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            conflicts_read: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            kept: Mutex::default(),
             #[cfg(test)]
             counted: Arc::default(),
         };
@@ -790,9 +857,67 @@ impl Store {
     pub fn listing(&self, id: &Id) -> Result<Listing, StoreError> {
         #[cfg(test)]
         counted::listing();
+        #[cfg(test)]
+        self.listings_read
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(Listing::decode(
             &self.read_record(id, ObjectKind::FolderListing)?,
         )?)
+    }
+
+    /// The conflict record `id`, checked against its fingerprint and decoded; a copy whose index
+    /// says it is over `MAX_RECORD_BYTES` is refused before it is unpacked. Such a copy says
+    /// nothing of the rest of its pack, so the pack isn't marked: it is refused by its size again.
+    pub fn conflict(&self, id: &Id) -> Result<conflict::Record, StoreError> {
+        #[cfg(test)]
+        counted::conflict();
+        #[cfg(test)]
+        self.conflicts_read
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let bytes = self
+            .first_good(id, ObjectKind::Conflict, false, |pack, entry| {
+                if entry.uncompressed_size > conflict::MAX_RECORD_BYTES {
+                    return Err(PackError::TooLarge);
+                }
+                pack.read_record(entry)
+            })
+            .map_err(|e| match e {
+                StoreError::Pack(PackError::TooLarge) => StoreError::RecordTooLarge {
+                    id: *id,
+                    limit: conflict::MAX_RECORD_BYTES,
+                },
+                e => e,
+            })?;
+        Ok(conflict::Record::decode(&bytes)?)
+    }
+
+    /// [`Store::conflict`], remembered: a command that meets a record where its entry is met
+    /// reads it once, whichever of its steps meets it. A record is its ID's for good, so what is
+    /// remembered never goes stale; one that couldn't be read is read again. Past
+    /// `MAX_MET_TERMS` terms remembered, a record is given back unremembered, read each time.
+    pub(crate) fn met_conflict(&self, id: &Id) -> Result<conflict::Record, StoreError> {
+        let held = self.met_records().records.get(id).cloned();
+        if let Some(record) = held {
+            return Ok(record);
+        }
+        let record = self.conflict(id)?;
+        let mut met = self.met_records();
+        let terms = met.terms.saturating_add(record.terms.len());
+        if terms <= met_budget() {
+            met.terms = terms;
+            met.records.insert(*id, record.clone());
+        }
+        Ok(record)
+    }
+
+    fn met_records(&self) -> MutexGuard<'_, Met> {
+        self.met.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    /// How many records are remembered, for tests.
+    #[cfg(test)]
+    pub(crate) fn met_held(&self) -> usize {
+        self.met_records().records.len()
     }
 
     /// `listing`, given what a second handle read of `id`: the same read through the same steps,
@@ -801,6 +926,9 @@ impl Store {
     pub(crate) fn listing_after(&self, id: &Id, peeked: Peeked) -> Result<Listing, StoreError> {
         #[cfg(test)]
         counted::listing();
+        #[cfg(test)]
+        self.listings_read
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let Peeked {
             listing,
             pack: at,
@@ -854,9 +982,16 @@ impl Store {
             path: self.path.clone(),
             packs: Mutex::new(packs),
             checked: Mutex::default(),
+            met: Arc::clone(&self.met),
             chunk_from: AtomicU64::new(self.chunk_from.load(Ordering::Relaxed)),
             #[cfg(test)]
             saves_read: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            listings_read: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            conflicts_read: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            kept: Mutex::default(),
             #[cfg(test)]
             counted: Arc::default(),
         }
@@ -1263,6 +1398,32 @@ impl Store {
         self.saves_read.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// How many listings this store has been asked for, read ahead or not.
+    #[cfg(test)]
+    pub(crate) fn listings_read(&self) -> usize {
+        self.listings_read
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// How many conflict records this store has been asked for.
+    #[cfg(test)]
+    pub(crate) fn conflicts_read(&self) -> usize {
+        self.conflicts_read
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// A command kept a summary of a record.
+    #[cfg(test)]
+    pub(crate) fn note_kept(&self) {
+        *self.kept.lock().unwrap_or_else(PoisonError::into_inner) += 1;
+    }
+
+    /// How many records commands kept a summary of.
+    #[cfg(test)]
+    pub(crate) fn kept(&self) -> usize {
+        *self.kept.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     #[cfg(test)]
     fn open_count(&self) -> usize {
         self.packs().open.len()
@@ -1338,13 +1499,16 @@ pub(crate) fn is_damage(e: &PackError) -> bool {
 }
 
 /// Whether a record or save couldn't be read for what the store holds as it: missing, another
-/// kind of object, undecodable, or not matching its fingerprint. Any other failure is told as itself.
+/// kind of object, undecodable, too large, or not matching its fingerprint. Any other failure is
+/// told as itself.
 pub(crate) fn is_unreadable_record(e: &StoreError) -> bool {
     matches!(
         e,
         StoreError::Missing(_)
             | StoreError::WrongKind { .. }
             | StoreError::Decode(_)
+            | StoreError::RecordTooLarge { .. }
+            | StoreError::DamagedConflict(_)
             | StoreError::Pack(PackError::FingerprintMismatch { .. })
     )
 }
@@ -1441,6 +1605,7 @@ mod tests {
                 found: ObjectKind::ServerLines,
             },
             StoreError::Decode(DecodeError::Invalid("bad")),
+            StoreError::RecordTooLarge { id, limit: 1 },
             StoreError::Pack(PackError::FingerprintMismatch { id }),
         ];
         for e in &unreadable {
@@ -2985,6 +3150,123 @@ mod tests {
             assert_eq!(store.listing_after(&listing.id(), peeked).unwrap(), listing);
             assert_eq!(counted::now().1, records + 1);
         }
+    }
+
+    fn a_conflict() -> conflict::Record {
+        let file = |byte| conflict::Term {
+            kind: crate::listing::EntryKind::File,
+            id: Id([byte; 32]),
+            size: 3,
+        };
+        conflict::Record {
+            terms: vec![Some(file(1)), None, Some(file(2))],
+            own: None,
+        }
+    }
+
+    #[test]
+    fn records_met_are_remembered_only_within_the_budget() {
+        let (_root, tmp, packs) = dirs();
+        let other = conflict::Record {
+            terms: vec![None, None, None],
+            ..a_conflict()
+        };
+        let mut w = PackWriter::create(&tmp).unwrap();
+        let first = w
+            .add_record(ObjectKind::Conflict, &a_conflict().encode())
+            .unwrap();
+        let second = w.add_record(ObjectKind::Conflict, &other.encode()).unwrap();
+        w.finish(&packs).unwrap();
+        let store = Store::open(&packs).unwrap();
+        // Room for the first record's three terms, not for the second's too.
+        MET_BUDGET.set(3);
+        let read = |id: &Id| {
+            let before = store.conflicts_read();
+            let record = store.met_conflict(id).unwrap();
+            (record, store.conflicts_read() - before)
+        };
+        assert_eq!(read(&first), (a_conflict(), 1));
+        assert_eq!(read(&first), (a_conflict(), 0));
+        assert_eq!(read(&second), (other.clone(), 1));
+        assert_eq!(read(&second), (other, 1));
+        assert_eq!(store.met_held(), 1);
+        MET_BUDGET.set(MAX_MET_TERMS);
+    }
+
+    #[test]
+    fn a_conflict_record_is_read_by_its_id() {
+        let (_root, tmp, packs) = dirs();
+        let record = a_conflict();
+        let mut w = PackWriter::create(&tmp).unwrap();
+        let id = w
+            .add_record(ObjectKind::Conflict, &record.encode())
+            .unwrap();
+        w.finish(&packs).unwrap();
+        assert_eq!(id, record.id());
+        let store = Store::open(&packs).unwrap();
+        let asked = counted::conflicts();
+        assert_eq!(store.conflict(&id).unwrap(), record);
+        assert_eq!(counted::conflicts(), asked + 1);
+        assert!(matches!(
+            store.conflict(&Id([9; 32])),
+            Err(StoreError::Missing(_))
+        ));
+    }
+
+    #[test]
+    fn a_listing_is_not_read_as_a_conflict_record() {
+        let (_root, tmp, packs) = dirs();
+        let mut w = PackWriter::create(&tmp).unwrap();
+        let id = w
+            .add_record(ObjectKind::FolderListing, &Listing::empty().encode())
+            .unwrap();
+        w.finish(&packs).unwrap();
+        let store = Store::open(&packs).unwrap();
+        assert!(matches!(
+            store.conflict(&id),
+            Err(StoreError::WrongKind {
+                expected: ObjectKind::Conflict,
+                found: ObjectKind::FolderListing,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn a_conflict_record_over_16_kib_is_refused_before_it_is_unpacked() {
+        let (_root, tmp, packs) = dirs();
+        // No record the layout allows is this big, so a valid one is padded: what refuses it must
+        // be its size, not the decoder.
+        let mut most = a_conflict();
+        most.terms.resize(255, most.terms[0]);
+        let mut bytes = most.encode();
+        bytes.resize(conflict::MAX_RECORD_BYTES as usize + 1, 0);
+        let mut w = PackWriter::create(&tmp).unwrap();
+        let id = w.add_record(ObjectKind::Conflict, &bytes).unwrap();
+        let fits = w
+            .add_record(ObjectKind::Conflict, &a_conflict().encode())
+            .unwrap();
+        w.finish(&packs).unwrap();
+        let store = Store::open(&packs).unwrap();
+        let unpacked = counted::unpacked();
+        let refused = store.conflict(&id).unwrap_err();
+        assert!(
+            matches!(refused, StoreError::RecordTooLarge { id: named, .. } if named == id),
+            "{refused:?}"
+        );
+        assert!(refused.to_string().contains(&id.to_hex()), "{refused}");
+        assert_eq!(counted::unpacked(), unpacked);
+        // Read again, it is refused the same way, still unpacked never; its pack isn't suspect.
+        let again = store.conflict(&id).unwrap_err();
+        assert!(
+            matches!(again, StoreError::RecordTooLarge { id: named, .. } if named == id),
+            "{again:?}"
+        );
+        assert_eq!(counted::unpacked(), unpacked);
+        assert!(store.damaged_packs().is_empty());
+        // One within the limit, in the same pack, is unpacked and read.
+        store.conflict(&fits).unwrap();
+        assert_eq!(counted::unpacked(), unpacked + 1);
     }
 
     #[test]

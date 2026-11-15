@@ -1,0 +1,6 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+cc e2f284583b86e0ce6bba05bc31b284435134e97bb99372cb20f6dc37ccc666d4
+cc d55535630e3c0a4d2ba57feac365af79ac05b8612c505ea7213e1d0867377914
+cc 14ba8446cbd0018d54a3c97f1385512d889f82c47f7c1a6e9152d94f6c84fd82 # shrinks to [Big("d/a", 0, 1048576), Fork { pick: 4915421869871524073, path: "a", at: 0, edit: 3, back: true, changes: (EditEnd, Edit) }, Goto { pick: 13901229420598900031, by_line: false, unsaved: Save }, Moved { pick: 7925481868113665007, to: "e/a", remake: true }, Fork { pick: 13567937977859821551, path: "a", at: 14330216744520979105, edit: 39, back: true, changes: (Add(10411058395405241676), Move(10411058395405241676, false)) }, UndoTo { pick: 567419809342993382, shelve: true }, CrissCross { pick: 14366835740253199054, fix: true }, Undo { n: 1, shelve: true }, Combine { pick: 774662330187787330, message: true, clean: true }]

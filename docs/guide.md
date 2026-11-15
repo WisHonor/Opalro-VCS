@@ -383,6 +383,7 @@ Lines, shelves and details
 line      List, make, rename and delete lines
 tag       Name a save, like v1.0, or list your tags
 combine   Bring another line's work into yours
+resolve   Record fixed conflicts
 shelf     Set your unsaved changes aside   (and: unshelf)
 discard   Throw away your unsaved changes; undo brings them back
 show      Show everything about one save
@@ -428,6 +429,24 @@ Next: save them with: opalro save "describe your change"
 ```
 
 Each row is the kind of change (`added`, `removed`, `modified`, or `kind changed` when a file became a folder or the other way round), the path, and the size: before and after for a modified file. If you are at an older save rather than on a line, the first line says `At save <id> "<message>", not on a line` instead.
+
+When a combine left places in conflict, `status` lists them first, each with what it still needs, and every one of them, however many:
+
+```text
+On line main at save kxqm "Combined side"  (just now)
+
+In conflict (3 places):
+
+    art/hero.png  your version, still to decide
+    notes.txt       2 marked places left to fix
+    todo.txt            fixed, not yet recorded
+
+Next: record what you fixed with: opalro resolve
+```
+
+The next step is the first that applies: record what you fixed; else fix the marked places in your editor; else, when a place is changed in place, keep what your folder holds with `opalro resolve <path>`, each by its own path, or pick a version; else pick a version with `opalro resolve <path> --keep mine` (or `theirs`).
+
+A place stays in this list, and out of the list of changes, until `opalro resolve` records how you settled it. `opalro changes` shows what you changed in such a file since the combine, under a line saying it is in conflict.
 
 To be fast, `status` re-reads only files whose size or time changed. `--full` reads every file, to be sure:
 
@@ -750,9 +769,68 @@ The target is anything `opalro goto` takes: a line, a server line, a tag, or a s
 - **The line only moves forward.** If `main` had nothing `wall-run` lacks (no save since `wall-run` started), `wall-run`'s newest save already holds everything, so `main` moves forward to it and no save is made: `Moved main forward to wall-run: save …`.
 - **Nothing to combine.** If `main` already has everything `wall-run` has, Opalro says so and changes nothing.
 
-When both lines changed a file, Opalro merges the two versions line by line, and says how many files it merged. Where both changed the same lines, or a file that isn't text, Opalro can't keep both yet: it stops, names each file and what happened to it on the two lines, and changes nothing. Make the two lines agree on those files, save, and combine again.
+When both lines changed a file, Opalro merges the two versions line by line, and says how many files it merged. Where both changed the same lines, or a file that isn't text, the combine still goes through: the combined save keeps a **conflict** there, with every version, and Opalro names each place, what happened to it on the two lines and how it stands in your folder:
+
+```text
+Combined wall-run into main: save qnvx "Combine wall-run into main", with 2 places in conflict:
+  art/hero.png: changed on both lines, and isn't text, so it can't be merged line by line; your version is in the folder
+  todo.txt: changed on both lines, in the same place; marked in the file (1 place)
+
+    1 file written.
+
+Next: fix the marked files and pick a version for the rest, then run opalro resolve. opalro status lists what is left.
+
+Changed your mind? opalro undo
+```
+
+A text file is marked: both versions are in it, between marker lines, for you to fix in your editor. Anything else is left as your line has it, or as nothing where your line removed it. `opalro status` lists the places in conflict until you fix them, and `opalro undo` takes the whole combine back. In a script that must not go on with a conflict, use `opalro combine wall-run --only-if-clean`: whenever your line would end up on a save that holds a conflict, whether the combine would make it or one of the lines holds it already, it stops, names each place it would make, says how many the lines hold, and changes nothing, ending with exit code 1. A project made by Opalro 0.1 can't keep conflicts until `opalro setup --upgrade` turns them on; until then a combine stops there too.
 
 Your unsaved changes come along, as with `opalro goto`; where the combine would change a file you have unsaved work in, it stops and changes nothing. `opalro undo` takes a combine back: the line goes back to where it was, and your files with it. See [Lines](#8-lines) for combining and then deleting a line.
+
+### `opalro resolve`
+
+Record the conflicts you fixed. Make one: a menu on a line of its own, and a shorter one on `main`, then combine:
+
+```sh
+opalro line new menu
+echo "start, options, quit" > menu.txt
+opalro save "Add a menu"
+opalro goto main
+echo "start, quit" > menu.txt
+opalro save "Add a short menu"
+opalro combine menu
+```
+
+Both lines added `menu.txt`, differently, so the combined save keeps a conflict there, and `menu.txt` in your folder holds both versions between marker lines. Fix it in your editor, keeping what you want and taking the marker lines out, then record it:
+
+```sh
+echo "start, options, quit" > menu.txt
+opalro resolve
+```
+
+```text
+Recorded 1 fix in save vtnq "Combine menu into main" on main.
+
+    The combined save now holds it; its ID stays the same.
+
+Changed your mind? opalro undo
+```
+
+The fix goes into the combined save itself, which keeps its change ID, so `opalro history` still shows one combined save. When a tag or another line already shows that save, or you saved after the combine, the fix is a save of its own instead (`Fixed conflicts in menu.txt`). Places you haven't fixed yet are listed after it, as `opalro status` lists them, and stay in conflict.
+
+Without paths, `opalro resolve` records every file the folder shows fixed: a marked file with no marker lines left, or one you deleted. A file still holding marker lines is recorded only when you name it, and Opalro asks first (`Record it as fixed anyway? [y/N]`; `--yes` answers for you). A picture or anything else that can't be marked is left as your line has it; pick a side for it, whole:
+
+```text
+opalro resolve art/hero.png --keep theirs
+```
+
+`--keep mine` keeps your line's version. To look at the other line's version before you choose, write it somewhere else; this records nothing and never writes over a file:
+
+```text
+opalro resolve art/hero.png --copy theirs --to hero-theirs.png
+```
+
+`--copy before` writes the version where the two lines parted. Paths and patterns are read as `opalro save` reads them: `opalro resolve "*.png" --keep theirs` takes the other line's version of every picture in conflict in the folder you are in. To keep a picture you put in the folder yourself, name it by its own path (`opalro resolve art/hero.png`): a folder's path, like a pattern, records only what the folder shows fixed below it, so `opalro resolve art` or `opalro resolve .` does what `opalro resolve` does and never records a picture a program rewrote by itself, such as a game engine opening the project. `opalro undo` takes a resolve back, as any step; a fix you made by hand stays in your folder.
 
 ### `opalro shelf` and `opalro unshelf`
 
@@ -887,6 +965,18 @@ Next: edit opalro.toml or .opalroignore to change a rule, or switch presets with
 
 `opalro setup` alone changes nothing. `opalro setup --preset <name>` switches to another preset: it shows the exact lines it would change in both files, asks `Apply these changes? [y/N]`, and changes them only on a yes. `--yes` skips the question. See [section 5](#5-presets-opalrotoml-and-opalroignore).
 
+A project made with Opalro 0.1 doesn't keep conflicts yet: there, `opalro setup` ends its list with `Upgrade available: conflicts (opalro setup --upgrade)`. `opalro setup --upgrade` says what each new feature allows and what it costs, then asks:
+
+```text
+This version of Opalro can turn on 1 feature in this project:
+  conflicts: a combine can keep conflicts, and you fix them when you choose.
+Once it is on, Opalro 0.1 can't open this project, and opalro undo can't turn it off.
+Turn it on? [y/N] y
+Turned on conflicts: this project can keep conflicts now.
+```
+
+`--yes` answers the question. A project made with this version has every feature from the start, and `opalro setup --upgrade` there says `Nothing to turn on`.
+
 ### `opalro import`
 
 Bring in the Git repository in this folder, with all its history. It runs inside the Git repository's own folder and takes no argument:
@@ -963,7 +1053,7 @@ They are ordinary files: they go into your saves like any other file, so a copy 
 
 **Custom** writes no file. A project with no `opalro.toml` uses Opalro's own values. That includes an imported project, unless its Git history held an `opalro.toml` of its own.
 
-"Lockable" is only recorded: locking a file arrives with syncing. "Conflict markers" already decides one thing: `opalro combine` never merges a file line by line when its rule says `false`, so the Game preset's Unity scenes, prefabs and `.meta` files stop a combine when both lines changed them differently; the markers themselves arrive when a combine can keep a conflict. The presets write both now so a project has them from its first save.
+"Lockable" is only recorded: locking a file arrives with syncing. "Conflict markers" decides two things: `opalro combine` never merges a file line by line when its rule says `false`, and never marks it, so where both lines changed the Game preset's Unity scenes, prefabs and `.meta` files differently, the combine keeps a conflict with your version left whole in the folder. The presets write both now so a project has them from its first save.
 
 ### `opalro.toml`, key by key
 
@@ -993,7 +1083,7 @@ ask-before-saving-files-over = 10000
 Each `[[rule]]` has `files`, a list of one or more patterns written as in `.opalroignore`, and either or both of these, each `true` or `false`:
 
 - `lockable` (`false` when no rule says): the file can be locked, once locking arrives.
-- `conflict-markers` (`true` when no rule says): whether `opalro combine` may merge the file line by line when both lines changed it; with `false`, it never does, and different changes on both lines stop the combine. Once a combine can keep a conflict, it also says whether the conflict is shown with markers inside the file. Scene files that an engine must read whole are better off without them. Where several rules match a file and give this key, the last one decides; a rule's patterns ignore the letter case of A to Z on every system, so `*.unity` also covers `Main.UNITY`.
+- `conflict-markers` (`true` when no rule says): whether `opalro combine` may merge the file line by line when both lines changed it; with `false`, it never does, and different changes on both lines are a conflict that stands as your version, never shown with markers inside the file. Scene files that an engine must read whole are better off without them. Where several rules match a file and give this key, the last one decides; a rule's patterns ignore the letter case of A to Z on every system, so `*.unity` also covers `Main.UNITY`.
 
 ```toml
 [[rule]]
@@ -1075,7 +1165,7 @@ opalro undo
 opalro undo --list --all
 ```
 
-Commands that only look (`status`, `changes`, `history`, `show`, `line`, `setup` without `--preset`, `verify`) record nothing. `opalro tidy` isn't a step either: undo doesn't take it back.
+Commands that only look (`status`, `changes`, `history`, `show`, `line`, `setup` without `--preset` or `--upgrade`, `verify`) record nothing. `opalro tidy` and `opalro setup --upgrade` aren't steps either: undo doesn't take them back.
 
 **What undoing does.** Undoing a step puts the lines and your position back as they were before it, and writes back what the step changed in your folder, and only that. Other unsaved work comes along, and undo never writes over it: if it would, undo stops and names the files, and `opalro undo --shelve` sets them aside first. A step that changed no file, such as a save, changes none when undone: its changes show as unsaved again.
 
@@ -1187,7 +1277,15 @@ Moved main forward to climbing: save qwnt "Climb walls".
 Changed your mind? opalro undo
 ```
 
-Here `main` had no save of its own since `climbing` started, so it only moved forward. Had it moved on too, `opalro combine` would have made a combined save, as in [`opalro combine`](#opalro-combine). `opalro history` on `main` follows the first save before each save, so after a combined save it lists that save, not the other line's saves one by one; its row ends with `[combined <id>]`, and `opalro history <id>` lists the other line's saves from there, even once that line is deleted.
+Here `main` had no save of its own since `climbing` started, so it only moved forward. Had it moved on too, `opalro combine` would have made a combined save, as in [`opalro combine`](#opalro-combine). `opalro history` on `main` follows the first save before each save, so after a combined save it lists that save, not the other line's saves one by one; its row ends with `[combined <id>]`, and `opalro history <id>` lists the other line's saves from there, even once that line is deleted. Where both lines changed the same place, the combined save keeps a conflict there, as in [`opalro combine`](#opalro-combine); the conflict holds the other line's version too, so deleting that line loses nothing you still need to fix it.
+
+**Fixing a combine.** A combine that keeps conflicts is finished in three steps, and ends as one combined save:
+
+1. `opalro status` lists each place in conflict and what it still needs.
+2. Fix each marked file in your editor, taking the marker lines out; for a picture or anything else that can't be marked, pick a side with `opalro resolve <path> --keep mine` (or `theirs`), after a look at the other one with `opalro resolve <path> --copy theirs --to <file>` if you like.
+3. Run `opalro resolve`. It records what you fixed into the combined save, keeping its change ID (unless a tag or another line shows that save, or you saved after it), and lists what is left.
+
+`opalro history` then shows one combined save, holding both lines' work and your fixes, and `opalro status` says nothing changed. Each `opalro resolve` is a step, so `opalro undo` takes it back; `opalro undo` once more takes back the combine itself. See [`opalro resolve`](#opalro-resolve).
 
 ## 9. Coming from Git
 
@@ -1268,22 +1366,28 @@ hint: in Opalro, commit is save; it takes new files too: opalro save "message"
 | `git fsck` | `opalro verify` | runs |
 | `git gc` | `opalro tidy` | runs |
 | `git restore` | `opalro discard <paths>` | explained, never run |
-| `git add` | nothing: `opalro save` takes every change | explained |
+| `git add` | nothing: `opalro save` takes every change; after a combine, `opalro resolve <file>` records a file you fixed | explained |
 | `git rm`, `git mv` | delete or move the file itself | explained |
 | `git reset` | `opalro undo`, `opalro discard` or `opalro goto <save>` | explained |
 | `git branch <name>`; `git checkout -b`, `git switch -c` with a starting point | `opalro goto <save>`, then `opalro line new <name>` | explained |
 | `git revert` | `opalro reverse`, in v0.3; until then `opalro undo` | explained |
-| `git merge <target>` | `opalro combine <target>` | runs; `merge --abort`, `--no-ff`, `--squash` and more than one line are explained, and other options refused |
+| `git merge <target>` | `opalro combine <target>` | runs; `merge --no-ff`, `--squash` and more than one line are explained, and other options refused |
+| `git merge --abort` | `opalro undo`, which takes back the last step: right after a combine, the combine, conflicts and all | explained |
+| `git merge --continue` | nothing to continue: `opalro resolve` records the conflicts you fixed | explained |
+| `git checkout --ours <file>`, `git restore --ours <file>` | `opalro resolve <file> --keep mine` | explained |
+| `git checkout --theirs <file>`, `git restore --theirs <file>` | `opalro resolve <file> --keep theirs` | explained |
+| `git mergetool` | your own editor; `opalro resolve <file> --copy theirs --to <somewhere>` copies a version out to look at | explained |
 | `git blame` | not yet; until then `opalro history` | explained |
 | `git rebase`, `cherry-pick` | not yet: moving saves between lines comes after v0.2; until then `opalro save --amend` or `opalro undo` | explained |
 | `git clone`, `fetch`, `pull`, `push`, `remote` | coming in v0.3 | explained |
 | `git clean` | none: Opalro never deletes files it doesn't keep | explained |
 
-"Runs" means `opalro commit -m "message"` really saves. "Explained" means Opalro prints two or three lines saying what to type instead, does nothing else, and ends with exit code 2 (a number every command hands back when it ends, which scripts read: 0 means it worked; see [Scripts](#12-scripts)). For example, `opalro add` prints:
+"Runs" means `opalro commit -m "message"` really saves. "Explained" means Opalro prints one to three lines saying what to type instead, does nothing else, and ends with exit code 2 (a number every command hands back when it ends, which scripts read: 0 means it worked; see [Scripts](#12-scripts)). For example, `opalro add` prints:
 
 ```text
 Opalro has no staging step: `opalro save` saves every change, new files too.
 To save only some files, name them: `opalro save "message" <paths>`
+After a combine, `opalro resolve <file>` records a file you fixed.
 ```
 
 A Git word runs only in the forms that mean in Opalro what they mean in Git; any other form is explained, rather than run as something you didn't mean. So `commit` runs only with `-m` or `--message`, or with options alone (`opalro commit --amend`); `opalro commit "message"` without `-m`, or a path without a message, is explained. `stash` runs only as `stash`, `stash push`, `stash pop`, `stash pop <number>` and `stash list`; `stash apply` and the rest are explained. `checkout -b <name>` and `switch -c <name>` run only with the name alone; with a starting point they are explained, as is `branch <name>`, which in Git makes the branch and stays where you are, while `opalro line new` moves onto the new line.
@@ -1299,6 +1403,7 @@ A Git word runs only in the forms that mean in Opalro what they mean in Git; any
   ```
 - **`restore` is explained, never run.** The command is `opalro discard`, and it removes new files too, which Git's `restore` never does. It keeps a safety copy first, and `opalro undo` brings everything back. Because it reaches further than Git's word, Opalro runs it only by its own name.
 - **Undo covers everything,** including goto, discard and shelf, with one `opalro undo`.
+- **`opalro merge` ends with 0 even when it keeps conflicts,** as `opalro combine` does: the combined save is made, and you fix the conflicts when you choose. A script that runs `git merge x && build` would go on to build; give it `opalro combine --only-if-clean x`, which stops (exit code 1) instead of keeping a conflict. The first `opalro merge` says so in its hint.
 
 ## 10. Looking after a project
 
@@ -1439,7 +1544,7 @@ opalro status --json
 opalro history --json
 ```
 
-A command that would ask (`opalro start`, a big `opalro save`, a save away from a line, `opalro setup --preset`, `opalro line delete` when nothing else holds the line's saves, and moving or deleting a tag with `opalro tag`) stops instead, and its error names the flag that answers the question: `--preset`, `--yes` or `--line`. Without a terminal, the same commands stop the same way even without `--json`.
+A command that would ask (`opalro start`, a big `opalro save`, a save away from a line, `opalro setup --preset` or `--upgrade`, `opalro line delete` when nothing else holds the line's saves, and moving or deleting a tag with `opalro tag`) stops instead, and its error names the flag that answers the question: `--preset`, `--yes` or `--line`. Without a terminal, the same commands stop the same way even without `--json`.
 
 Every command ends with one of three exit codes:
 
@@ -1454,7 +1559,7 @@ The `--json` reference, published on https://opalro.com, describes every documen
 ## 13. What v0.1 doesn't do yet
 
 - **No server, no sharing.** v0.1 is one person on one computer. Opalro can't yet copy a project from a server, or send and get changes (syncing is planned for v0.3).
-- **No keeping conflicts.** `opalro combine` stops when both lines changed the same place in a file, and Opalro can't yet show who changed each line of a file.
+- **Conflicts, as far as they go.** A combine keeps its conflicts and `opalro resolve` records your fixes ([`opalro combine`](#opalro-combine)), but Opalro can't yet: show who changed each line of a file; mark in `opalro history` a save that holds conflicts (`opalro status` and `opalro show` say so); combine two lines that both changed a place one of them holds in conflict (fix it on that line first); merge line by line a file that the saves the two lines started from disagree about (you get both lines' versions whole); start a merge program (copy a version out with `opalro resolve <file> --copy theirs --to <somewhere>` and open it in yours); or take one file out of any save.
 - **No locking.** Rules can mark files lockable, but nothing locks them until syncing arrives (v0.3).
 - **No repair.** `opalro verify` finds damage but can't fix it.
 - **No export to Git yet,** and an import happens once: bringing in Git's newer commits later comes after v0.1.

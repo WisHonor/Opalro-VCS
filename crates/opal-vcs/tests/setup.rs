@@ -5,9 +5,10 @@ use std::fs;
 use std::path::Path;
 
 use opal_core::presets::{self, Found, Language, Preset};
+use opal_core::repo::FORMAT_TEXT;
 
 mod support;
-use support::{Env, Files, files, head, text};
+use support::{Env, Files, V01_FORMAT, files, head, text, without_conflicts_feature};
 
 /// Runs `opalro` with `args` and gives the exit code, stdout and stderr.
 fn run(env: &Env, args: &[&str]) -> (Option<i32>, String, String) {
@@ -826,4 +827,268 @@ mod on_a_terminal {
         assert!(err.ends_with("Changed your mind? opalro undo\n"), "{err:?}");
         assert_eq!(command_of_head(&env), "setup");
     }
+
+    #[test]
+    fn setup_upgrade_turns_on_conflicts_after_asking() {
+        let env = v01_project();
+        let entry = head(&env).0;
+        let (code, out, err) = asked(&env, &["setup", "--upgrade"], "y\n");
+        assert_eq!(code, Some(0), "{err}");
+        assert_eq!(
+            out,
+            format!("{OFFER}Turned on conflicts: this project can keep conflicts now.\n")
+        );
+        assert_eq!(err, "Turn it on? [y/N] ");
+        assert_eq!(format_of(&env), FORMAT_TEXT);
+        // Not a step in the diary.
+        assert_eq!(head(&env).0, entry);
+    }
+
+    #[test]
+    fn setup_upgrade_answered_no_changes_nothing() {
+        let env = v01_project();
+        for no in ["n\n", "\n", ""] {
+            let (code, out, err) = asked(&env, &["setup", "--upgrade"], no);
+            assert_eq!(code, Some(0), "{err}");
+            assert_eq!(out, format!("{OFFER}\nNothing was changed.\n"));
+            assert_eq!(err, "Turn it on? [y/N] ");
+            assert_eq!(format_of(&env), V01_FORMAT);
+        }
+        // With --json, even at a terminal, nothing is asked.
+        let (code, out, err) = asked(&env, &["--json", "setup", "--upgrade"], "y\n");
+        assert_eq!(code, Some(1), "{err}");
+        assert!(!err.contains("Turn it on?"), "{err}");
+        let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(doc["result"], "nothing", "{doc}");
+        assert_eq!(format_of(&env), V01_FORMAT);
+    }
+}
+
+/// The text of `.opalro/format`.
+fn format_of(env: &Env) -> String {
+    fs::read_to_string(env.root().join(".opalro/format")).unwrap()
+}
+
+/// A started project as v0.1 made it, which doesn't keep conflicts.
+fn v01_project() -> Env {
+    let env = Env::empty();
+    ok(&env, &["start", "--preset", "custom"]);
+    without_conflicts_feature(env.root());
+    env
+}
+
+/// What `opalro setup --upgrade` says before it asks, in a project v0.1 made.
+const OFFER: &str = "This version of Opalro can turn on 1 feature in this project:\n  conflicts: a \
+                     combine can keep conflicts, and you fix them when you choose.\nOnce it is on, \
+                     Opalro 0.1 can't open this project, and opalro undo can't turn it off.\n";
+
+#[test]
+fn setup_upgrade_without_a_terminal_changes_nothing() {
+    let env = v01_project();
+    let (code, out, err) = run(&env, &["setup", "--upgrade"]);
+    assert_eq!(code, Some(1), "{err}");
+    assert_eq!(out, OFFER);
+    assert!(
+        err.contains(
+            "error: Opalro asks before turning on a feature, and can't ask here, so nothing was \
+             changed.\n"
+        ),
+        "{err}"
+    );
+    assert!(
+        err.contains("hint: Run it again with --yes to turn it on.\n"),
+        "{err}"
+    );
+    assert_eq!(format_of(&env), V01_FORMAT);
+    let (code, doc) = json(&env, &["setup", "--upgrade"]);
+    assert_eq!(code, Some(1), "{doc}");
+    assert_eq!(doc["result"], "nothing", "{doc}");
+    assert_eq!(doc["features"], serde_json::json!(["conflicts"]), "{doc}");
+    assert!(
+        doc["error"]["hint"].as_str().unwrap().contains("--yes"),
+        "{doc}"
+    );
+    assert_eq!(format_of(&env), V01_FORMAT);
+}
+
+#[test]
+fn setup_upgrade_yes_turns_it_on() {
+    let env = v01_project();
+    let out = ok(&env, &["setup", "--upgrade", "--yes"]);
+    assert_eq!(
+        out,
+        format!("{OFFER}Turned on conflicts: this project can keep conflicts now.\n")
+    );
+    assert_eq!(format_of(&env), FORMAT_TEXT);
+    let env = v01_project();
+    let (code, doc) = json(&env, &["setup", "--upgrade", "--yes"]);
+    assert_eq!(code, Some(0), "{doc}");
+    assert_eq!(doc["result"], "upgraded", "{doc}");
+    assert_eq!(doc["features"], serde_json::json!(["conflicts"]), "{doc}");
+    assert_eq!(format_of(&env), FORMAT_TEXT);
+    ok(&env, &["status"]);
+}
+
+/// A project from before chunk lists gains `chunks` by itself, as any changing command adds it;
+/// only `conflicts` is offered, and what is said is what was asked.
+#[test]
+fn setup_upgrade_offers_only_conflicts_before_chunk_lists() {
+    for json_out in [false, true] {
+        let env = Env::empty();
+        ok(&env, &["start", "--preset", "custom"]);
+        fs::write(
+            env.root().join(".opalro/format"),
+            "opalro-repository 1\nhash blake3\n",
+        )
+        .unwrap();
+        if json_out {
+            let (code, doc) = json(&env, &["setup", "--upgrade", "--yes"]);
+            assert_eq!(code, Some(0), "{doc}");
+            assert_eq!(doc["result"], "upgraded", "{doc}");
+            assert_eq!(doc["features"], serde_json::json!(["conflicts"]), "{doc}");
+        } else {
+            assert_eq!(
+                ok(&env, &["setup", "--upgrade", "--yes"]),
+                format!("{OFFER}Turned on conflicts: this project can keep conflicts now.\n")
+            );
+        }
+        assert_eq!(format_of(&env), FORMAT_TEXT);
+    }
+}
+
+#[test]
+fn setup_upgrade_with_nothing_to_turn_on_says_so() {
+    let env = Env::empty();
+    ok(&env, &["start", "--preset", "custom"]);
+    for args in [
+        &["setup", "--upgrade"][..],
+        &["setup", "--upgrade", "--yes"],
+    ] {
+        assert_eq!(
+            ok(&env, args),
+            "Nothing to turn on: this project has every feature this version of Opalro knows.\n"
+        );
+    }
+    let (code, doc) = json(&env, &["setup", "--upgrade"]);
+    assert_eq!(code, Some(0), "{doc}");
+    assert_eq!(doc["result"], "nothing", "{doc}");
+    assert_eq!(doc["features"], serde_json::json!([]), "{doc}");
+    assert_eq!(format_of(&env), FORMAT_TEXT);
+}
+
+#[test]
+fn setup_shows_an_upgrade_when_there_is_one() {
+    let row = "\nUpgrade available: conflicts (opalro setup --upgrade)\n";
+    let env = v01_project();
+    let shown = ok(&env, &["setup"]);
+    assert!(shown.ends_with(row), "{shown}");
+    assert_eq!(
+        json(&env, &["setup"]).1["upgrades"],
+        serde_json::json!(["conflicts"])
+    );
+    let env = Env::empty();
+    ok(&env, &["start", "--preset", "custom"]);
+    let shown = ok(&env, &["setup"]);
+    assert!(!shown.contains("Upgrade available"), "{shown}");
+    assert_eq!(json(&env, &["setup"]).1["upgrades"], serde_json::json!([]));
+}
+
+#[test]
+fn setup_upgrade_and_preset_together_are_refused() {
+    let env = v01_project();
+    let (code, _, err) = run(&env, &["setup", "--upgrade", "--preset", "code"]);
+    assert_eq!(code, Some(2), "{err}");
+    let (code, _, err) = run(&env, &["setup", "--upgrade", "--preset", "code", "--yes"]);
+    assert_eq!(code, Some(2), "{err}");
+    assert_eq!(format_of(&env), V01_FORMAT);
+    assert!(!env.root().join("opalro.toml").exists());
+}
+
+#[test]
+fn setup_yes_alone_is_still_refused() {
+    let env = v01_project();
+    let (code, _, err) = run(&env, &["setup", "--yes"]);
+    assert_eq!(code, Some(2), "{err}");
+    assert_eq!(format_of(&env), V01_FORMAT);
+}
+
+#[test]
+fn undo_does_not_take_back_an_upgrade() {
+    let env = v01_project();
+    let started = env.state().1.lines["main"];
+    env.overwrite("a.txt", "a\n");
+    ok(&env, &["save", "A"]);
+    ok(&env, &["setup", "--upgrade", "--yes"]);
+    assert_eq!(command_of_head(&env), "save");
+    ok(&env, &["undo"]);
+    // The undo took back the save before it, and the feature stays.
+    assert_eq!(env.state().1.lines["main"], started);
+    assert_eq!(format_of(&env), FORMAT_TEXT);
+}
+
+/// A project v0.1 made gains `conflicts` only when its user asks: never from a save, a combine or a
+/// tidy.
+#[test]
+fn a_v01_project_never_gains_conflicts_by_itself() {
+    let env = v01_project();
+    env.overwrite("a.txt", "1\n2\n3\n4\n5\n6\n7\n8\n");
+    ok(&env, &["save", "A"]);
+    assert_eq!(format_of(&env), V01_FORMAT);
+    ok(&env, &["line", "new", "side"]);
+    env.overwrite("a.txt", "one\n2\n3\n4\n5\n6\n7\n8\n");
+    ok(&env, &["save", "On side"]);
+    ok(&env, &["goto", "main"]);
+    env.overwrite("a.txt", "1\n2\n3\n4\n5\n6\n7\neight\n");
+    ok(&env, &["save", "On main"]);
+    ok(&env, &["combine", "side"]);
+    assert_eq!(command_of_head(&env), "combine");
+    assert_eq!(format_of(&env), V01_FORMAT);
+    ok(&env, &["tidy"]);
+    assert_eq!(format_of(&env), V01_FORMAT);
+}
+
+/// The upgrade stopped at each point it writes, in turn: `format` is as v0.1 made it, or whole with
+/// both features, and the project opens either way.
+#[cfg(feature = "fault-injection")]
+#[test]
+fn an_upgrade_stopped_before_the_rename_leaves_the_project_as_v01_made_it() {
+    let (mut last, mut before_rename) = (None, 0);
+    for n in 1.. {
+        assert!(n < 50, "the upgrade never finished");
+        let env = v01_project();
+        let out = env
+            .opalro()
+            .args(["setup", "--upgrade", "--yes"])
+            .env("OPALRO_FAULT_AT", n.to_string())
+            .output()
+            .unwrap();
+        let said = text(&out.stderr);
+        if !said.contains("injected crash") {
+            assert_eq!(out.status.code(), Some(0), "{said}");
+            assert_eq!(format_of(&env), FORMAT_TEXT);
+            break;
+        }
+        let format = format_of(&env);
+        assert!(
+            format == V01_FORMAT || format == FORMAT_TEXT,
+            "fault {n}: {format:?}"
+        );
+        ok(&env, &["status"]);
+        if said.contains("injected crash at write:before-rename") {
+            before_rename += 1;
+        }
+        last = Some((said, format));
+    }
+    // `lock-info` and `format` share the label, so a stop at each means `format` has its own.
+    assert!(
+        before_rename >= 2,
+        "stopped before a rename {before_rename} times"
+    );
+    // The last point the upgrade reaches is its own write of `format`, just before the rename.
+    let (said, format) = last.unwrap();
+    assert!(
+        said.contains("injected crash at write:before-rename"),
+        "{said}"
+    );
+    assert_eq!(format, V01_FORMAT);
 }

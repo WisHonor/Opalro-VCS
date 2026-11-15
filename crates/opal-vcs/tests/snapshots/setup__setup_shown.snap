@@ -11,5 +11,6 @@ expression: shown
   "opalro_json": 1,
   "preset": "code",
   "rules": [],
+  "upgrades": [],
   "warnings": []
 }

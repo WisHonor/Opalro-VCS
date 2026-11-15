@@ -23,6 +23,16 @@ pub(crate) fn after_head(repo: &Repository) -> bool {
         .any(|w| after.contains(&w.kind))
 }
 
+/// The project at `root` reopened with the `format` v0.1 wrote: one that doesn't keep conflicts.
+#[allow(clippy::unwrap_used)]
+pub(crate) fn without_conflicts_feature(root: &Path) -> Repository {
+    let format = "opalro-repository 1\nhash blake3\nfeature chunks\n";
+    std::fs::write(root.join(".opalro/format"), format).unwrap();
+    let repo = Repository::open(root).unwrap();
+    assert!(!repo.keeps_conflicts());
+    repo
+}
+
 /// One tag and one server line, both at a made-up save.
 pub(crate) fn sample_records() -> (TagList, ServerLines) {
     let save = Id([0x5a; 32]);
@@ -72,9 +82,30 @@ pub(crate) fn commit_records(
 /// the project folder holds, and returns its top listing. Each entry is a path with `/` between
 /// names, a kind, and bytes: a file's contents, a link's target, or a Git submodule's commit ID.
 pub(crate) fn plant_save(repo: &mut Repository, entries: &[(&str, EntryKind, &[u8])]) -> Listing {
+    plant_with(repo, entries, &[])
+}
+
+/// `plant_save`, with a conflict at each path of `conflicts`, its record stored with it.
+pub(crate) fn plant_with(
+    repo: &mut Repository,
+    entries: &[(&str, EntryKind, &[u8])],
+    conflicts: &[(&str, crate::conflict::Record)],
+) -> Listing {
     let mut top = None;
     plant_root(repo, |packs| {
         let mut folders = BTreeMap::from([(String::new(), Vec::new())]);
+        for (path, record) in conflicts {
+            let id = packs
+                .add_record(ObjectKind::Conflict, &record.encode())
+                .expect("store a record");
+            let (up, name) = path.rsplit_once('/').unwrap_or(("", path));
+            folders.entry(up.to_owned()).or_default().push(Entry {
+                name: name.to_owned(),
+                kind: EntryKind::Conflict,
+                id,
+                size: 0,
+            });
+        }
         for &(path, kind, bytes) in entries {
             let (id, size) = if kind == EntryKind::ProjectLink {
                 (add_link(packs, bytes), 0)

@@ -1,0 +1,85 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+mod support;
+use opal_core::conflict::{Record, Term};
+use opal_core::listing::{Entry, EntryKind, Listing};
+use opal_core::pack::ObjectKind;
+use support::{Env, text};
+
+fn run(env: &Env, args: &[&str]) -> (i32, String) {
+    let out = env.opalro().args(args).output().unwrap();
+    let said = format!("{}{}", text(&out.stdout), text(&out.stderr));
+    (out.status.code().unwrap_or(-1), said)
+}
+
+fn ok(env: &Env, args: &[&str]) -> String {
+    let (code, said) = run(env, args);
+    assert_eq!(code, 0, "{args:?}: {said}");
+    said
+}
+
+fn entry(name: &str, kind: EntryKind, id: opal_core::id::Id, size: u64) -> Entry {
+    Entry {
+        name: name.into(),
+        kind,
+        id,
+        size,
+    }
+}
+
+#[test]
+fn rt22_keep_folder_turns_a_link_with_its_id_into_a_folder() {
+    let env = Env::empty();
+    ok(&env, &["start", "--preset", "custom"]);
+    let mut theirs = None;
+    support::plant_save(env.root(), |pack| {
+        let y = pack.add_content(b"mine\n").unwrap();
+        let x = pack.add_content(b"theirs\n").unwrap();
+        let mine_l = Listing::new(vec![entry("y.txt", EntryKind::File, y, 5)]).unwrap();
+        let theirs_l = Listing::new(vec![entry("x.txt", EntryKind::File, x, 7)]).unwrap();
+        let mine_id = pack
+            .add_record(ObjectKind::FolderListing, &mine_l.encode())
+            .unwrap();
+        let theirs_id = pack
+            .add_record(ObjectKind::FolderListing, &theirs_l.encode())
+            .unwrap();
+        theirs = Some(theirs_id);
+        let folder = |id| {
+            Some(Term {
+                kind: EntryKind::Folder,
+                id,
+                size: 0,
+            })
+        };
+        let record = Record {
+            terms: vec![folder(mine_id), None, folder(theirs_id)],
+            own: None,
+        };
+        let c = support::add_conflict(pack, &record);
+        let root = Listing::new(vec![
+            entry("d", EntryKind::Conflict, c, 0),
+            entry("l", EntryKind::Symlink, theirs_id, 0),
+        ])
+        .unwrap();
+        pack.add_record(ObjectKind::FolderListing, &root.encode())
+            .unwrap()
+    });
+    support::write(&env, "d/y.txt", "mine\n");
+    println!("{}", run(&env, &["status"]).1);
+    let (code, said) = run(&env, &["resolve", "d", "--keep", "theirs"]);
+    println!("resolve: {code} {said}");
+    let repo = opal_core::repo::Repository::open(env.root()).unwrap();
+    let (_, e) = repo.current().unwrap();
+    let opal_core::diary::Position::OnLine(line) = &e.state.position else {
+        panic!()
+    };
+    let tip = e.state.lines[line];
+    let save = repo.store().save(&tip, false).unwrap();
+    let root = repo.store().listing(&save.root).unwrap();
+    for en in root.entries() {
+        println!("{} {:?} {}", en.name, en.kind, en.id.to_hex());
+    }
+    let l = root.entries().iter().find(|e| e.name == "l").unwrap();
+    assert_eq!(l.id, theirs.unwrap());
+    assert_eq!(l.kind, EntryKind::Symlink, "the link became a folder");
+}

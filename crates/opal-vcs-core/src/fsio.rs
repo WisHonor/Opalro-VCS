@@ -82,6 +82,27 @@ fn replace<T>(
     result
 }
 
+/// Makes the file `name` in the folder `dir`, outside the project, holding what `fill` writes,
+/// and flushes it; gives its size. Never written over anything: a file, a folder or a link
+/// there, even one leading nowhere, fails with `AlreadyExists`. A file `fill` fails is removed.
+pub(crate) fn write_new<E: From<io::Error>>(
+    dir: &Dir,
+    name: &OsStr,
+    fill: impl FnOnce(&mut File) -> Result<(), E>,
+) -> Result<u64, E> {
+    let mut file = dir.create_new(name, false)?;
+    let done = fill(&mut file).and_then(|()| {
+        flush_file(&file)?;
+        Ok(file.metadata()?.len())
+    });
+    if done.is_err() {
+        drop(file);
+        // Only what this made, half written; failing to remove it changes nothing.
+        let _ = remove_file(dir, name);
+    }
+    done
+}
+
 /// Moves `from` in the folder `from_dir` to `to` in the folder `to_dir`, replacing a file there,
 /// then flushes `to_dir` so the move survives a crash.
 pub fn rename_durable(from_dir: &Dir, from: &OsStr, to_dir: &Dir, to: &OsStr) -> io::Result<()> {
@@ -357,9 +378,24 @@ pub fn act_point(label: &'static str) {
     let _ = label;
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread has opened each project file to read it, by path.
+    static OPENED: std::cell::RefCell<std::collections::HashMap<String, usize>> =
+        std::cell::RefCell::default();
+}
+
+/// How many times this thread has opened the project file at `path` to read it.
+#[cfg(test)]
+pub(crate) fn opened(path: &str) -> usize {
+    OPENED.with_borrow(|o| o.get(path).copied().unwrap_or(0))
+}
+
 /// Where a project file at `path` is opened to be read. A test can make it fail
 /// (`fault::unreadable`) to prove Opalro doesn't open a file. Does nothing without `fault-injection`.
 pub fn open_point(path: &str) -> io::Result<()> {
+    #[cfg(test)]
+    OPENED.with_borrow_mut(|o| *o.entry(path.to_owned()).or_default() += 1);
     #[cfg(feature = "fault-injection")]
     {
         fault::opening(path)

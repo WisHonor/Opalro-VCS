@@ -5,6 +5,7 @@
 - **Agenda topic:** none (the v0.1 release: the package)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 141](141-the-user-agreement.md) (what the agreement says Bolt sends); [decision 022](022-engineering-rules.md) (the engineering rules, which gain this check)
+- **Refined by:** [decision 177](177-recording-a-fix-save-and-resolve.md) (`resolve --copy` writes a version out, since Opalro starts no other program)
 
 ## Context
 

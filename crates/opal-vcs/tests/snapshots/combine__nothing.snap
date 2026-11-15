@@ -3,8 +3,12 @@ source: crates/opal-vcs/tests/combine.rs
 expression: "support::masked(nothing)"
 ---
 {
+  "conflict_count": null,
+  "conflicts": [],
+  "holds_conflicts": null,
   "line": "main",
   "merged_files": [],
+  "more_conflicts": 0,
   "not_written": [],
   "opalro_json": 1,
   "placeholders": [],

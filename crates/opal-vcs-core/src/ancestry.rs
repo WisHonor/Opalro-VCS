@@ -449,7 +449,10 @@ mod tests {
     fn saves_dated_alike_are_still_counted_right() {
         // Q <- P <- X and P <- Y, all at once; X has itself alone.
         let mut orders = HashSet::new();
-        for k in 0..16 {
+        // Tie orders come from the saves' IDs, new each run: go on until both have turned up.
+        let mut k = 0;
+        while k < 16 || orders.len() < 2 {
+            assert!(k < 400, "both tie orders: only {orders:?} in {k} histories");
             let (_dir, mut repo) = project();
             let mut saves = filler(k);
             let q = saves.len();
@@ -458,8 +461,8 @@ mod tests {
             let ids = plant(&mut repo, &saves);
             assert_eq!(only_in(&repo, ids[x], &[ids[y]]).unwrap(), 1, "history {k}");
             orders.insert(ids[p] > ids[y]);
+            k += 1;
         }
-        assert_eq!(orders.len(), 2, "both tie orders");
     }
 
     #[test]
@@ -467,7 +470,10 @@ mod tests {
         // A <- B, both at once, and C after them with parents [A, B]. B is held, so only C
         // counts; B must still tell A, though nothing waits with one mark when A has spread.
         let mut orders = HashSet::new();
-        for k in 0..16 {
+        // Tie orders come from the saves' IDs, new each run: go on until both have turned up.
+        let mut k = 0;
+        while k < 16 || orders.len() < 2 {
+            assert!(k < 400, "both tie orders: only {orders:?} in {k} histories");
             let (_dir, mut repo) = project();
             let mut saves = filler(k);
             let a = saves.len();
@@ -476,14 +482,17 @@ mod tests {
             let ids = plant(&mut repo, &saves);
             assert_eq!(only_in(&repo, ids[c], &[ids[b]]).unwrap(), 1, "history {k}");
             orders.insert(ids[a] > ids[b]);
+            k += 1;
         }
-        assert_eq!(orders.len(), 2, "both tie orders");
     }
 
     #[test]
     fn a_tie_where_two_lines_parted_does_not_run_to_the_start() {
         let mut orders = HashSet::new();
-        for k in 0..16 {
+        // Tie orders come from the saves' IDs, new each run: go on until both have turned up.
+        let mut k = 0;
+        while k < 16 || orders.len() < 2 {
+            assert!(k < 400, "both tie orders: only {orders:?} in {k} histories");
             let (_dir, mut repo) = project();
             let mut saves = filler(k);
             let first = saves.len();
@@ -509,8 +518,8 @@ mod tests {
             let read = repo.store().saves_read() - before;
             assert!(read <= 12, "history {k}: {read} saves read");
             orders.insert(ids[parted] > ids[other_first]);
+            k += 1;
         }
-        assert_eq!(orders.len(), 2, "both tie orders");
     }
 
     #[test]
@@ -855,8 +864,13 @@ mod tests {
     fn a_start_under_another_dated_alike_is_dropped() {
         // C <- X <- D, and O and T each with parents [D, C], all at once. D is the one starting
         // point; when C is taken before D, D's mark never reaches C and only the drop removes it.
-        let mut extra = HashSet::new();
-        for k in 0..16 {
+        // Which tie order a history gives depends on its saves' IDs, which are new each run, so
+        // histories are made until both have turned up (about two in three take C first): 16
+        // alone left only one order about once in 650 runs.
+        let mut orders: HashMap<usize, usize> = HashMap::new();
+        let mut k = 0;
+        while k < 16 || orders.len() < 2 {
+            assert!(k < 400, "both tie orders: only {orders:?} in {k} histories");
             let (_dir, mut repo) = project();
             let mut saves = filler(k);
             let c = saves.len();
@@ -871,15 +885,20 @@ mod tests {
             let ids = plant(&mut repo, &saves);
             let got = common_starts(&repo, &[ids[o]], &[ids[t]]).unwrap();
             assert_eq!(got, found(vec![ids[d]]), "history {k}");
-            extra.insert(CANDIDATES.get());
+            let candidates = CANDIDATES.get();
+            assert!(matches!(candidates, 1 | 2), "history {k}: {candidates}");
+            *orders.entry(candidates).or_default() += 1;
+            k += 1;
         }
-        assert_eq!(extra, HashSet::from([1, 2]), "both tie orders");
     }
 
     #[test]
     fn the_walk_stops_where_the_lines_parted() {
         let mut orders = HashSet::new();
-        for k in 0..16 {
+        // Tie orders come from the saves' IDs, new each run: go on until both have turned up.
+        let mut k = 0;
+        while k < 16 || orders.len() < 2 {
+            assert!(k < 400, "both tie orders: only {orders:?} in {k} histories");
             let (_dir, mut repo) = project();
             let mut saves = filler(k);
             chain_after(&mut saves, None, 1000, 0);
@@ -904,8 +923,8 @@ mod tests {
             let read = repo.store().saves_read() - before;
             assert!(read <= 8, "history {k}: {read} saves read");
             orders.insert(ids[parted] > ids[other_first]);
+            k += 1;
         }
-        assert_eq!(orders.len(), 2, "both tie orders");
     }
 
     /// Every save reachable from `starts`, themselves included.

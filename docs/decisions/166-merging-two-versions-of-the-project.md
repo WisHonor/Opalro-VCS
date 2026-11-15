@@ -5,7 +5,7 @@
 - **Agenda topic:** none (milestone 8 planning)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 012](012-lines.md) (per-file three-way merge from the common starting point; binary files never merged automatically); [decision 004](004-project-contents.md) (what a project can contain, and the names two systems can't tell apart); [decision 007](007-conflicts.md) (what counts as a conflict)
-- **Refined by:** [decision 170](170-what-building-milestone-8-refined.md) (names alike in threes; a clash of names comes before conflicts; an empty folder is in the result only when a line's own save holds it empty, so two folders that merge to nothing don't stay)
+- **Refined by:** [decision 170](170-what-building-milestone-8-refined.md) (names alike in threes; a clash of names comes before conflicts; an empty folder is in the result only when a line's own save holds it empty, so two folders that merge to nothing don't stay); [decision 175](175-what-a-combine-keeps-as-a-conflict.md) (each kind of clash becomes a conflict at its place)
 
 ## Context
 

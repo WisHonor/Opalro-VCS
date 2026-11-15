@@ -4,8 +4,9 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::io;
 
+use crate::conflict::Listings;
 use crate::diary::FolderChange;
-use crate::diff::for_each_entry_change_in;
+use crate::diff::for_each_entry_change_with;
 use crate::drive::Drive;
 use crate::id::{ChangeId, Id};
 use crate::journal::{Action, Change};
@@ -15,7 +16,7 @@ use crate::repo::{RepoError, Repository};
 use crate::save::{EXTRA_LINE, Person, Save};
 use crate::scope::{ancestors, within};
 use crate::snapshot::{SaveError, store_listing};
-use crate::store::{Store, StoreError};
+use crate::store::StoreError;
 use crate::writeout::{self, Folders, Plan, Tree};
 
 /// The longest message a kept save gets, in bytes.
@@ -86,10 +87,20 @@ pub(crate) fn switch_saves(
     let base_root = store.save(&kept.base, signed)?.root;
     let from_root = store.save(&from, signed)?.root;
     let target_root = store.save(&target, signed)?.root;
-    let (held, copies) = held(repo, &plan.actions, kept.base, base_root, drive, packs)?;
+    // Kept saves picture the folder: every save is read as it stands.
     let unstored = HashMap::new();
+    let standing = Listings::standing(repo, &unstored);
+    let (held, copies) = held(
+        repo,
+        &standing,
+        &plan.actions,
+        kept.base,
+        base_root,
+        drive,
+        packs,
+    )?;
     let put = |e: &Entry| (e.kind, e.id, e.size);
-    let mut wanted = Tree::new(store, &unstored, target_root, EXACT);
+    let mut wanted = Tree::new(&standing, target_root, EXACT);
     let mut after = BTreeMap::new();
     for path in held.keys() {
         after.insert(path.clone(), wanted.entry(path)?.as_ref().map(put));
@@ -102,7 +113,7 @@ pub(crate) fn switch_saves(
             }
             Ok::<(), SaveError>(())
         };
-        for_each_entry_change_in(store, &unstored, Some(from_root), target_root, changes)?;
+        for_each_entry_change_with(&standing, &standing, Some(from_root), target_root, changes)?;
     }
     // Folders the plan makes where the folder held a file, a link or nothing. Only a rename in
     // letter case or Unicode form makes a folder over a folder.
@@ -130,11 +141,11 @@ pub(crate) fn switch_saves(
             }
             Ok::<(), SaveError>(())
         };
-        for_each_entry_change_in(store, &unstored, Some(base_root), from_root, aside)?;
+        for_each_entry_change_with(&standing, &standing, Some(base_root), from_root, aside)?;
     }
     // The base's entries in a folder the plan makes went with it when the user removed or
     // replaced it: they stay gone.
-    let mut base = Tree::new(store, &unstored, base_root, EXACT);
+    let mut base = Tree::new(&standing, base_root, EXACT);
     for path in &made {
         if let Some(folder) = base.folder(path)? {
             for e in folder.listing.entries() {
@@ -156,8 +167,8 @@ pub(crate) fn switch_saves(
         before.entry(up.clone()).or_insert(Some(FOLDER));
         after.entry(up).or_insert(Some(FOLDER));
     }
-    let before_root = overlay(store, base_root, &before, packs)?;
-    let after_root = overlay(store, base_root, &after, packs)?;
+    let before_root = overlay(&standing, base_root, &before, packs)?;
+    let after_root = overlay(&standing, base_root, &after, packs)?;
     if before_root == after_root {
         return Ok((None, copies));
     }
@@ -198,14 +209,18 @@ pub(crate) fn set_aside(
     let store = repo.store();
     let signed = repo.signatures_allowed();
     let base_root = store.save(&shelf.base, signed)?.root;
-    let (held, _) = held(repo, actions, shelf.base, base_root, drive, packs)?;
-    let shelf_root = overlay(store, base_root, &held, packs)?;
+    let unstored = HashMap::new();
+    let standing = Listings::standing(repo, &unstored);
+    let (held, _) = held(
+        repo, &standing, actions, shelf.base, base_root, drive, packs,
+    )?;
+    let shelf_root = overlay(&standing, base_root, &held, packs)?;
     if shelf_root == base_root {
         return Ok(None);
     }
     let made = kept_save(shelf_root, shelf, packs)?;
     let onto_root = store.save(&onto.base, signed)?.root;
-    let step_root = overlay(store, onto_root, &held, packs)?;
+    let step_root = overlay(&standing, onto_root, &held, packs)?;
     let step_from = match step_root {
         r if r == onto_root => onto.base,
         r => kept_save(r, onto, packs)?,
@@ -223,6 +238,7 @@ pub(crate) fn set_aside(
 /// out, and so is what is planned below it and the folders above it, which can't be emptied.
 fn held(
     repo: &Repository,
+    standing: &Listings,
     actions: &[Action],
     base: Id,
     base_root: Id,
@@ -232,8 +248,7 @@ fn held(
     let copies = writeout::keep_safety_copies(repo, actions, base, drive, packs)?;
     let kept: HashSet<&str> = copies.iter().map(|c| c.path.as_str()).collect();
     let renamed = writeout::renamed(actions, drive);
-    let unstored = HashMap::new();
-    let mut saved = Tree::new(repo.store(), &unstored, base_root, EXACT);
+    let mut saved = Tree::new(standing, base_root, EXACT);
     let mut lost = Vec::new();
     for a in actions {
         if let Some(e) = a.expected
@@ -261,43 +276,54 @@ fn held(
 /// folder there; the folders above an entry put are made as needed. A change below a path set
 /// to a file, a link or nothing has nowhere to go and is dropped.
 pub(crate) fn overlay(
-    store: &Store,
+    listings: &Listings,
     base_root: Id,
     changes: &BTreeMap<String, Option<Put>>,
     packs: &mut PackSet,
 ) -> Result<Id, SaveError> {
-    overlay_with(
-        store,
-        &HashMap::new(),
-        base_root,
-        changes,
-        false,
-        &mut |listing| store_listing(store, packs, listing),
-    )
+    let store = listings.store();
+    overlay_with(listings, base_root, changes, false, &mut |listing| {
+        store_listing(store, packs, listing)
+    })
 }
 
-/// [`overlay`], with the base's folders read from `unstored` first, and each listing it builds
-/// handed to `keep`, which gives its ID. With `drop_emptied`, a folder the changes leave empty
-/// goes too.
+/// [`overlay`], with the base's folders read through `listings`, and each listing it builds
+/// handed to `keep`, which gives its ID: a folder read as it stands is built again, never kept
+/// under the ID it was read by. With `drop_emptied`, a folder the changes leave empty goes too.
 pub(crate) fn overlay_with(
-    store: &Store,
-    unstored: &HashMap<Id, Listing>,
+    listings: &Listings,
     base_root: Id,
     changes: &BTreeMap<String, Option<Put>>,
     drop_emptied: bool,
     keep: &mut dyn FnMut(&Listing) -> Result<Id, SaveError>,
 ) -> Result<Id, SaveError> {
-    let is_folder = |c: &Option<Put>| matches!(c, Some((EntryKind::Folder, ..)));
+    let whole = HashSet::new();
+    overlay_whole(listings, base_root, changes, &whole, drop_emptied, keep)
+}
+
+/// [`overlay_with`], where a folder put at a path in `whole` goes in as it is, by its listing's
+/// ID, not built from the changes below it.
+pub(crate) fn overlay_whole(
+    listings: &Listings,
+    base_root: Id,
+    changes: &BTreeMap<String, Option<Put>>,
+    whole: &HashSet<String>,
+    drop_emptied: bool,
+    keep: &mut dyn FnMut(&Listing) -> Result<Id, SaveError>,
+) -> Result<Id, SaveError> {
+    let is_folder = |path: &str, c: &Option<Put>| {
+        matches!(c, Some((EntryKind::Folder, ..))) && !whole.contains(path)
+    };
     // Each folder to build, with what changes right in it: an entry put there, or `None` removed.
     let mut todo: HashMap<String, Vec<(String, Option<Entry>)>> = HashMap::new();
     for (path, change) in changes {
-        if ancestors(path).any(|up| changes.get(up).is_some_and(|c| !is_folder(c))) {
+        if ancestors(path).any(|up| changes.get(up).is_some_and(|c| !is_folder(up, c))) {
             continue;
         }
         for up in ancestors(path) {
             todo.entry(up.to_owned()).or_default();
         }
-        if is_folder(change) {
+        if is_folder(path, change) {
             // It goes in its folder once it is built.
             todo.entry(path.clone()).or_default();
             continue;
@@ -313,7 +339,7 @@ pub(crate) fn overlay_with(
             .or_default()
             .push((name.to_owned(), entry));
     }
-    let mut base = Tree::new(store, unstored, base_root, EXACT);
+    let mut base = Tree::new(listings, base_root, EXACT);
     let mut paths: Vec<String> = todo.keys().filter(|p| !p.is_empty()).cloned().collect();
     // The deepest first, so each folder is built before the one holding it.
     paths.sort_by_key(|p| std::cmp::Reverse(p.len()));
@@ -392,7 +418,8 @@ pub(crate) fn links_to_leave(
     let store = repo.store();
     let base_root = store.save(&base, repo.signatures_allowed())?.root;
     let unstored = HashMap::new();
-    let mut saved = Tree::new(store, &unstored, base_root, EXACT);
+    let standing = Listings::standing(repo, &unstored);
+    let mut saved = Tree::new(&standing, base_root, EXACT);
     let mut disk = Folders::open(repo.root()).map_err(|source| SaveError::Unreadable {
         path: "the project folder".to_owned(),
         source,
@@ -423,7 +450,7 @@ pub(crate) fn links_to_leave(
     if !writeout::can_make_links(repo)? {
         return Ok(links.into_iter().map(|(path, _)| path.to_owned()).collect());
     }
-    let left = placeholders(store, base_root, actions, &renamed, &links, drive)?;
+    let left = placeholders(repo, &standing, base_root, actions, &renamed, &links, drive)?;
     Ok(left.into_iter().collect())
 }
 
@@ -431,7 +458,8 @@ pub(crate) fn links_to_leave(
 /// would write as plain files in the kept save. Each round judges them against the tree that save
 /// would have without the links already left, until a round leaves no more.
 fn placeholders(
-    store: &Store,
+    repo: &Repository,
+    standing: &Listings,
     base_root: Id,
     actions: &[Action],
     renamed: &HashSet<&str>,
@@ -449,19 +477,14 @@ fn placeholders(
                 .collect()
         };
         let mut listings = HashMap::new();
-        let root = overlay_with(
-            store,
-            &HashMap::new(),
-            base_root,
-            &held,
-            false,
-            &mut |listing| {
-                let id = listing.id();
-                listings.insert(id, listing.clone());
-                Ok(id)
-            },
-        )?;
-        let mut kept = Tree::new(store, &listings, root, EXACT);
+        let root = overlay_with(standing, base_root, &held, false, &mut |listing| {
+            let id = listing.id();
+            listings.insert(id, listing.clone());
+            Ok(id)
+        })?;
+        // The folders it didn't build are the base's, read as they stand as before.
+        let built = Listings::standing(repo, &listings);
+        let mut kept = Tree::new(&built, root, EXACT);
         let mut more = Vec::new();
         for (path, target) in links {
             if !left.contains(*path)
@@ -532,6 +555,7 @@ mod tests {
     use crate::pack::PackWriter;
     use crate::scope::within;
     use crate::snapshot::{SaveOutcome, SaveRequest, save_folder};
+    use crate::store::Store;
     use crate::switch::{DiscardOutcome, discard};
     use crate::test_support::{plant_save, symlink};
     use proptest::prelude::*;
@@ -961,7 +985,10 @@ mod tests {
                 .map(|&(path, _, bytes)| (path, String::from_utf8(bytes.to_vec()).unwrap()))
                 .collect();
             let none = HashSet::new();
-            let left = placeholders(store, base_root, &actions, &none, &links, EXACT).unwrap();
+            let (unstored, links) = (HashMap::new(), links.as_slice());
+            let standing = Listings::standing(&repo, &unstored);
+            let left = placeholders(&repo, &standing, base_root, &actions, &none, links, EXACT);
+            let left = left.unwrap();
             left.into_iter().collect()
         };
         const LINK: EntryKind = EntryKind::Symlink;
@@ -1196,7 +1223,9 @@ mod tests {
             pack.finish(&packs).unwrap();
             let mut store = Store::open(&packs).unwrap();
             let mut set = PackSet::with_limit(&tmp, &packs, u64::MAX).unwrap();
-            let root = overlay(&store, base_root, &changes, &mut set).unwrap();
+            let unstored = HashMap::new();
+            let stored = Listings::stored(&store, &unstored);
+            let root = overlay(&stored, base_root, &changes, &mut set).unwrap();
             for made in set.finish().unwrap() {
                 store.register(&made);
             }

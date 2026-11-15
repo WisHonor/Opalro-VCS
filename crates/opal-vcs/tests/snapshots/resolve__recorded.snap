@@ -1,0 +1,56 @@
+---
+source: crates/opal-vcs/tests/resolve.rs
+assertion_line: 470
+expression: "support::masked(recorded)"
+---
+{
+  "conflict_count": 2,
+  "conflicts": [
+    {
+      "path": "a.txt",
+      "places_left": 1,
+      "standing": "markers",
+      "terms": 3
+    },
+    {
+      "path": "gone.txt",
+      "places_left": null,
+      "standing": "nothing",
+      "terms": 3
+    }
+  ],
+  "more_conflicts": 0,
+  "opalro_json": 1,
+  "recorded": [
+    "pic.png"
+  ],
+  "removed": 0,
+  "replaced": "[redacted]",
+  "result": "recorded",
+  "safety_copies": 0,
+  "save": {
+    "author": {
+      "email": "test@example.com",
+      "name": "Test",
+      "time_ms": "[redacted]",
+      "tz_offset_min": "[redacted]"
+    },
+    "change_id": "[redacted]",
+    "change_id_short": "[redacted]",
+    "id": "[redacted]",
+    "line": "main",
+    "message": "Combine side into main",
+    "parents": [
+      "[redacted]",
+      "[redacted]"
+    ],
+    "saver": {
+      "email": "test@example.com",
+      "name": "Test",
+      "time_ms": "[redacted]",
+      "tz_offset_min": "[redacted]"
+    }
+  },
+  "warnings": [],
+  "written": 1
+}

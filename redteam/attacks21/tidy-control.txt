@@ -1,0 +1,14 @@
+   Compiling opal-vcs v0.1.0 (/work/crates/opal-vcs)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.54s
+     Running tests/rt22_tidy.rs (target/debug/deps/rt22_tidy-d2c90d1732ed9bc9)
+
+running 1 test
+test rt22_tidy_past_the_window_control_without_conflicts ... tidy: TidyReport { to_free: 10384, bytes_before: 16290, bytes_after: 5906, packs_removed: 10, packs_written: 1, packs_young: 0 }
+verify ahead 0d: 1 problems
+   ObjectMissing Some("e21228fb919d53703fda33b70cb6cd9dab605b39f4ed80360383691ef372c8bf") by None: It isn't in any pack.
+verify ahead 40d: 0 problems
+verify ahead 41d: 0 problems
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 2 filtered out; finished in 1.66s
+

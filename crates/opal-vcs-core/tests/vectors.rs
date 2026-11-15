@@ -2,6 +2,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use opal_core::chunks::{Chunk, ChunkList, Cutter};
+use opal_core::conflict::{Own, Record, Term};
 use opal_core::diary::{
     Action, DiaryEntry, FolderChange, Position, ServerLines, State, Tag, TagList,
 };
@@ -1051,27 +1052,48 @@ struct FormatVector {
     hex: String,
 }
 
-#[test]
-fn the_format_file_matches_its_vector() {
-    use opal_core::repo::{Repository, parse_format};
+/// The `format` vector named `name`, its text checked against its bytes.
+fn format_vector(name: &str) -> FormatVector {
     let path = format!("{}/tests/vectors/format.json", env!("CARGO_MANIFEST_DIR"));
     let vectors: Vec<FormatVector> =
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-    assert_eq!(vectors.len(), 1);
-    let v = &vectors[0];
-    let bytes = unhex(&v.hex);
-    assert_eq!(bytes, v.text.as_bytes(), "{}", v.name);
-    // It says the store may hold chunk lists, and nothing more.
+    assert_eq!(vectors.len(), 2);
+    let v = vectors.into_iter().find(|v| v.name == name).unwrap();
+    assert_eq!(unhex(&v.hex), v.text.as_bytes(), "{}", v.name);
+    v
+}
+
+#[test]
+fn start_writes_the_format_vector() {
+    use opal_core::repo::{Repository, parse_format};
+    let v = format_vector("chunks-and-conflicts");
     let read = parse_format(&v.text).unwrap();
-    assert_eq!(read.features.into_iter().collect::<Vec<_>>(), ["chunks"]);
+    assert_eq!(
+        read.features.into_iter().collect::<Vec<_>>(),
+        ["chunks", "conflicts"]
+    );
     // `start` writes exactly these bytes.
     let dir = tempfile::tempdir().unwrap();
     drop(Repository::init(dir.path(), &person()).unwrap());
     let format = dir.path().join(".opalro").join("format");
     assert_eq!(hex(&std::fs::read(&format).unwrap()), v.hex, "{}", v.name);
-    // A project whose format file holds them opens.
-    std::fs::write(&format, &bytes).unwrap();
-    Repository::open(dir.path()).unwrap();
+    assert!(Repository::open(dir.path()).unwrap().keeps_conflicts());
+}
+
+/// A project v0.1 made: its store may hold chunk lists, and nothing more.
+#[test]
+fn a_v01_format_still_opens() {
+    use opal_core::repo::{Repository, parse_format};
+    let v = format_vector("start");
+    let read = parse_format(&v.text).unwrap();
+    assert_eq!(read.features.into_iter().collect::<Vec<_>>(), ["chunks"]);
+    let dir = tempfile::tempdir().unwrap();
+    drop(Repository::init(dir.path(), &person()).unwrap());
+    let format = dir.path().join(".opalro").join("format");
+    std::fs::write(&format, unhex(&v.hex)).unwrap();
+    let repo = Repository::open(dir.path()).unwrap();
+    assert!(!repo.keeps_conflicts());
+    assert_eq!(repo.features_to_turn_on(), ["conflicts"]);
 }
 
 #[derive(Deserialize)]
@@ -1200,6 +1222,206 @@ fn one_inserted_byte_changes_one_chunk() {
     assert_ne!(before[12].id, after[12].id);
     assert_eq!(before[12].size + 1, after[12].size);
     assert_eq!(before[13..], after[13..]);
+}
+
+fn conflict_term(kind: EntryKind, byte: u8, size: u64) -> Option<Term> {
+    Some(Term {
+        kind,
+        id: Id([byte; 32]),
+        size,
+    })
+}
+
+/// The records a reader takes, by name.
+fn conflict_vector_inputs() -> Vec<(&'static str, Record)> {
+    let file = |byte, size| conflict_term(EntryKind::File, byte, size);
+    let three = |own| Record {
+        terms: vec![file(0x11, 12), file(0x22, 10), file(0x33, 14)],
+        own,
+    };
+    vec![
+        (
+            "markers",
+            three(Some(Own {
+                version: file(0x44, 120),
+                marker: 7,
+            })),
+        ),
+        (
+            "yours",
+            Record {
+                terms: vec![
+                    file(0x11, 12),
+                    None,
+                    conflict_term(EntryKind::Executable, 0x33, 14),
+                ],
+                own: None,
+            },
+        ),
+        (
+            "kinds",
+            Record {
+                terms: vec![
+                    conflict_term(EntryKind::Folder, 0x11, 0),
+                    conflict_term(EntryKind::Symlink, 0x22, 9),
+                    file(0x33, 14),
+                ],
+                own: Some(Own {
+                    version: conflict_term(EntryKind::ProjectLink, 0x44, 0),
+                    marker: 0,
+                }),
+            },
+        ),
+        (
+            "half-fixed",
+            three(Some(Own {
+                version: conflict_term(EntryKind::Executable, 0x55, 130),
+                marker: 9,
+            })),
+        ),
+        (
+            "removed-own",
+            three(Some(Own {
+                version: None,
+                marker: 0,
+            })),
+        ),
+        (
+            "five-terms",
+            Record {
+                terms: vec![
+                    file(0x11, 12),
+                    None,
+                    file(0x33, 14),
+                    file(0x44, 16),
+                    conflict_term(EntryKind::Executable, 0x55, 18),
+                ],
+                own: None,
+            },
+        ),
+    ]
+}
+
+/// Records every reader refuses, each breaking only the rule it names: `markers` changed, or
+/// written out byte by byte.
+fn conflict_refusals() -> Vec<(&'static str, Vec<u8>)> {
+    let inputs = conflict_vector_inputs();
+    let markers = inputs[0].1.encode();
+    let removed_own = inputs[4].1.encode();
+    // A file term with a one-byte size takes 35 bytes, and the first starts at 2.
+    let (kind, size, own, own_kind, own_size, marker) = (3, 36, 107, 109, 142, 143);
+    assert_eq!(markers.len(), 144);
+    let changed = |at: &[(usize, u8)]| {
+        let mut bytes = markers.clone();
+        for &(i, b) in at {
+            bytes[i] = b;
+        }
+        bytes
+    };
+    let absent = |count: &[u8], terms: usize| {
+        let mut bytes = vec![1];
+        bytes.extend(count);
+        bytes.extend(std::iter::repeat_n(0, terms + 1));
+        bytes
+    };
+    let mut trailing = markers.clone();
+    trailing.push(0);
+    let mut long_count = vec![1, 0x83, 0x00];
+    long_count.extend(&markers[2..]);
+    let mut marked_absent = removed_own.clone();
+    *marked_absent.last_mut().unwrap() = 7;
+    vec![
+        ("version-2", changed(&[(0, 2)])),
+        ("term-count-2", absent(&[2], 2)),
+        ("term-count-4", absent(&[4], 4)),
+        ("term-count-1", absent(&[1], 1)),
+        ("term-count-257", absent(&[0x81, 0x02], 257)),
+        ("kind-0", changed(&[(kind, 0)])),
+        ("kind-6", changed(&[(kind, 6)])),
+        ("kind-7", changed(&[(kind, 7)])),
+        ("folder-of-size-1", changed(&[(kind, 4), (size, 1)])),
+        ("project-link-of-size-1", changed(&[(kind, 5), (size, 1)])),
+        ("marker-6", changed(&[(marker, 6)])),
+        ("marker-on-absent-own", marked_absent),
+        (
+            "marker-on-folder-own",
+            changed(&[(own_kind, 4), (own_size, 0)]),
+        ),
+        ("marker-on-symlink-own", changed(&[(own_kind, 3)])),
+        ("present-flag-2", changed(&[(2, 2)])),
+        ("own-flag-2", changed(&[(own, 2)])),
+        ("trailing-byte", trailing),
+        ("cut-in-an-id", markers[..20].to_vec()),
+        ("long-term-count", long_count),
+    ]
+}
+
+#[derive(Deserialize)]
+struct ConflictVectors {
+    valid: Vec<Vector>,
+    invalid: Vec<InvalidConflict>,
+}
+
+#[derive(Deserialize)]
+struct InvalidConflict {
+    name: String,
+    hex: String,
+    error: String,
+}
+
+#[test]
+#[ignore = "prints the vectors; run by hand to regenerate tests/vectors/conflict.json"]
+fn print_conflict_vectors() {
+    let valid: Vec<String> = conflict_vector_inputs()
+        .iter()
+        .map(|(n, r)| {
+            format!(
+                "    {{\"name\": \"{n}\", \"hex\": \"{}\", \"id\": \"{}\"}}",
+                hex(&r.encode()),
+                r.id()
+            )
+        })
+        .collect();
+    let invalid: Vec<String> = conflict_refusals()
+        .iter()
+        .map(|(n, bytes)| {
+            format!(
+                "    {{\"name\": \"{n}\", \"hex\": \"{}\", \"error\": \"{}\"}}",
+                hex(bytes),
+                Record::decode(bytes).unwrap_err()
+            )
+        })
+        .collect();
+    println!(
+        "{{\n  \"valid\": [\n{}\n  ],\n  \"invalid\": [\n{}\n  ]\n}}",
+        valid.join(",\n"),
+        invalid.join(",\n")
+    );
+}
+
+#[test]
+fn conflict_vectors() {
+    let path = format!("{}/tests/vectors/conflict.json", env!("CARGO_MANIFEST_DIR"));
+    let v: ConflictVectors = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+    let inputs = conflict_vector_inputs();
+    assert_eq!(v.valid.len(), inputs.len());
+    for (vector, (name, record)) in v.valid.iter().zip(&inputs) {
+        assert_eq!(vector.name, *name);
+        assert_eq!(hex(&record.encode()), vector.hex, "{name}");
+        assert_eq!(
+            Record::decode(&unhex(&vector.hex)).as_ref(),
+            Ok(record),
+            "{name}"
+        );
+        assert_eq!(record.id().to_hex(), vector.id, "{name}");
+    }
+    assert_eq!(v.invalid.len(), 19);
+    for vector in &v.invalid {
+        match Record::decode(&unhex(&vector.hex)) {
+            Ok(r) => panic!("{}: {r:?}", vector.name),
+            Err(e) => assert_eq!(e.to_string(), vector.error, "{}", vector.name),
+        }
+    }
 }
 
 #[derive(Deserialize)]

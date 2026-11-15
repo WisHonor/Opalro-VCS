@@ -4,8 +4,9 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::path::Path;
 
+use crate::conflict::Listings;
 use crate::diary::{Action, MAX_SHELVES};
-use crate::diff::{count_changes, for_each_change};
+use crate::diff::for_each_change_with;
 use crate::history::{id_for_command, tip_of};
 use crate::id::Id;
 use crate::kept;
@@ -250,7 +251,7 @@ pub fn shelves(repo: &Repository) -> Result<Vec<ShelfInfo>, RepoError> {
             label,
             save: id,
             line: save.line().map(str::to_owned),
-            files: count_changes(store, base, save.root)?,
+            files: changes_standing(repo, base, save.root)?,
             message: save.message,
             saver: save.saver,
         });
@@ -294,18 +295,10 @@ fn changed_since(
     }
     let (store, signed) = (repo.store(), repo.signatures_allowed());
     let unstored = HashMap::new();
-    let mut before = Tree::new(
-        store,
-        &unstored,
-        store.save(&then, signed)?.root,
-        kept::EXACT,
-    );
-    let mut after = Tree::new(
-        store,
-        &unstored,
-        store.save(&now, signed)?.root,
-        kept::EXACT,
-    );
+    // As each stands in the folder, as the shelf pictured it.
+    let standing = Listings::standing(repo, &unstored);
+    let mut before = Tree::new(&standing, store.save(&then, signed)?.root, kept::EXACT);
+    let mut after = Tree::new(&standing, store.save(&now, signed)?.root, kept::EXACT);
     let held = |e: Option<Entry>| e.map(|e| (e.kind, e.id));
     let (mut changed, mut rest) = (Vec::new(), Vec::new());
     for path in paths {
@@ -349,7 +342,20 @@ fn changed_files(repo: &Repository, from: Id, to: Id) -> Result<usize, StoreErro
     let root = |id: &Id| -> Result<Id, StoreError> {
         Ok(repo.store().save(id, repo.signatures_allowed())?.root)
     };
-    count_changes(repo.store(), Some(root(&from)?), root(&to)?)
+    changes_standing(repo, Some(root(&from)?), root(&to)?)
+}
+
+/// How many files differ between two trees, each read as it stands in the folder: a shelf
+/// pictures the folder, a conflict's place holding what it stood as.
+fn changes_standing(repo: &Repository, from: Option<Id>, to: Id) -> Result<usize, StoreError> {
+    let unstored = HashMap::new();
+    let standing = Listings::standing(repo, &unstored);
+    let mut count = 0;
+    for_each_change_with(&standing, &standing, from, to, |_| {
+        count += 1;
+        Ok::<(), StoreError>(())
+    })?;
+    Ok(count)
 }
 
 /// The save the shelf `shelf`, labelled `label`, was made on: its save's first parent. A shelf
@@ -381,10 +387,18 @@ fn carried_onto(
         Ok(repo.store().save(id, repo.signatures_allowed())?.root)
     };
     let mut shelved = BTreeSet::new();
-    for_each_change(repo.store(), Some(root(&base)?), root(&shelf)?, |c| {
-        shelved.insert(c.path.to_owned());
-        Ok::<(), StoreError>(())
-    })?;
+    let unstored = HashMap::new();
+    let standing = Listings::standing(repo, &unstored);
+    for_each_change_with(
+        &standing,
+        &standing,
+        Some(root(&base)?),
+        root(&shelf)?,
+        |c| {
+            shelved.insert(c.path.to_owned());
+            Ok::<(), StoreError>(())
+        },
+    )?;
     let now = crate::status::status(repo, false, git_excludes)?;
     Ok(now
         .changes

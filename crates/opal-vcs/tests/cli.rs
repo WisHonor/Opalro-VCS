@@ -2890,7 +2890,7 @@ fn a_command_that_did_its_work_but_couldnt_print_says_so() {
 }
 
 /// Every command, and the options each takes besides `--json` and `--help`.
-const COMMANDS: [(&str, &[&str]); 19] = [
+const COMMANDS: [(&str, &[&str]); 20] = [
     ("status", &["--full"]),
     ("save", &["--accept-crlf", "--line", "--yes", "--amend"]),
     ("changes", &["--save"]),
@@ -2900,13 +2900,17 @@ const COMMANDS: [(&str, &[&str]); 19] = [
     ("redo", &["--shelve"]),
     ("line", &[]),
     ("tag", &["--save", "--delete", "--yes"]),
-    ("combine", &[]),
+    ("combine", &["--only-if-clean"]),
+    (
+        "resolve",
+        &["--keep", "--copy", "--to", "--yes", "--accept-crlf"],
+    ),
     ("shelf", &["--list"]),
     ("unshelf", &[]),
     ("discard", &[]),
     ("show", &[]),
     ("start", &["--preset"]),
-    ("setup", &["--preset", "--yes"]),
+    ("setup", &["--preset", "--upgrade", "--yes"]),
     ("import", &[]),
     ("tidy", &[]),
     ("verify", &[]),
@@ -3096,6 +3100,17 @@ fn help_lists_only_options_the_command_takes() {
             assert!(!help.contains(invented), "{invented} in {command}:\n{help}");
         }
     }
+}
+
+#[test]
+fn combine_help_says_what_only_if_clean_does() {
+    let help = help_of("combine");
+    let options = section(&help, "Options");
+    assert!(
+        options.iter().any(|l| l.trim_start()
+            == "--only-if-clean  Stop and change nothing if the combine would leave a conflict"),
+        "{help}"
+    );
 }
 
 /// `help` is no command of Opalro's to have a page: asking for its help shows the overview.

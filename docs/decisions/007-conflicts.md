@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-10-31
 - **Agenda topic:** 7
-- **Refined by:** [decision 166](166-merging-two-versions-of-the-project.md) (what counts as a conflict, entry by entry); [decision 167](167-merging-text-line-by-line.md) (which files are merged as text; a file whose rule says no markers is never merged automatically)
+- **Refined by:** [decision 166](166-merging-two-versions-of-the-project.md) (what counts as a conflict, entry by entry); [decision 167](167-merging-text-line-by-line.md) (which files are merged as text; a file whose rule says no markers is never merged automatically); [decision 174](174-the-conflict-record.md) (the record's final layout, with the version that stands in the folder); [decision 175](175-what-a-combine-keeps-as-a-conflict.md) (which clashes are kept); [decision 176](176-a-conflict-in-the-folder.md) (markers, labels, and when a file keeps your version); [decision 177](177-recording-a-fix-save-and-resolve.md) (what fixes a conflict); [decision 179](179-every-command-and-a-conflict.md) (what every command does with one)
 
 ## Context
 

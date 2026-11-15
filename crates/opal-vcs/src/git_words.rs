@@ -37,7 +37,8 @@ const FILE: &str = "git-words";
 const MAX_BYTES: u64 = 4096;
 
 const ADD: &str = "Opalro has no staging step: `opalro save` saves every change, new files too.\n\
-                   To save only some files, name them: `opalro save \"message\" <paths>`";
+                   To save only some files, name them: `opalro save \"message\" <paths>`\n\
+                   After a combine, `opalro resolve <file>` records a file you fixed.";
 const RM_MV: &str = "Delete or move the file itself, as you would any file.\n\
                      The next `opalro save` records it.";
 const RESET: &str = "To take back the last command: `opalro undo`\n\
@@ -54,8 +55,16 @@ const STASH: &str = "`opalro shelf` sets your unsaved changes aside, new files t
                      `opalro shelf --list` lists them by that number, which stays with its shelf.";
 const LATER: &str = "Opalro can't show who changed each line of a file yet.\n\
                      Until then, `opalro history` lists the saves on your line.";
-const MERGE_ABORT: &str = "`opalro combine` never stops half-way, so there is nothing to abort.\n\
-                           `opalro undo` takes back a combine once it is made.";
+const MERGE_ABORT: &str = "`opalro undo` takes back the last step;\n\
+                           right after a combine, that is the combine, conflicts and all.";
+const MERGE_CONTINUE: &str = "`opalro combine` is done as soon as it runs.\n\
+                              `opalro resolve` records the conflicts you fixed.";
+const OURS: &str = "`opalro resolve <file> --keep mine` takes your version of a file in conflict.";
+const THEIRS: &str = "`opalro resolve <file> --keep theirs` takes the other line's version\n\
+                      of a file in conflict.";
+const MERGETOOL: &str = "Opalro starts no other program: fix the file in your editor,\n\
+                         or copy a version out to look at with\n\
+                         `opalro resolve <file> --copy theirs --to <somewhere>`.";
 const NO_FF: &str = "`opalro combine` makes a combined save only when both lines have work\n\
                      the other lacks; otherwise it moves your line forward.\n\
                      Opalro can't make a combined save every time.";
@@ -95,7 +104,11 @@ pub fn translate(mut args: Vec<OsString>) -> Typed {
             .collect(),
     };
     let given = || rest.iter().filter(|a| *a != "--json");
+    let side = |w: &str| matches!(w, "checkout" | "restore");
     match word.to_str().unwrap_or_default() {
+        // Taking one side of a file in conflict: the path typed is never put in the answer.
+        w if side(w) && given().any(|a| a == "--ours") => Typed::Explain(OURS),
+        w if side(w) && given().any(|a| a == "--theirs") => Typed::Explain(THEIRS),
         "init" => run("init", &["start"], rest),
         "commit" => match commit_args(rest) {
             Some(rest) => run("commit", &["save"], rest),
@@ -137,6 +150,8 @@ pub fn translate(mut args: Vec<OsString>) -> Typed {
         "rm" | "mv" => Typed::Explain(RM_MV),
         "reset" => Typed::Explain(RESET),
         "merge" if given().any(|a| a == "--abort") => Typed::Explain(MERGE_ABORT),
+        "merge" if given().any(|a| a == "--continue") => Typed::Explain(MERGE_CONTINUE),
+        "mergetool" => Typed::Explain(MERGETOOL),
         "merge" if given().any(|a| a == "--no-ff") => Typed::Explain(NO_FF),
         "merge" if given().any(|a| a == "--squash") => Typed::Explain(SQUASH),
         // Git merges every line named at once; Opalro would take the second as a message.
@@ -291,7 +306,11 @@ pub fn hint(word: &str) -> Option<&'static str> {
             "in Opalro, branch is line: opalro line\n\
              With -d, it is `opalro line delete`; with -m, `opalro line rename`."
         }
-        "merge" => "in Opalro, merge is combine: opalro combine <line>",
+        "merge" => {
+            "in Opalro, merge is combine: opalro combine <line>\n\
+             A combine keeps conflicts and still ends with 0;\n\
+             `opalro combine --only-if-clean <line>` stops instead."
+        }
         "fsck" => "in Opalro, fsck is verify: opalro verify",
         "gc" => "in Opalro, gc is tidy: opalro tidy",
         _ => return None,
@@ -445,7 +464,7 @@ mod tests {
         }
     }
 
-    const EXPLANATIONS: [&str; 16] = [
+    const EXPLANATIONS: [&str; 20] = [
         ADD,
         RM_MV,
         RESET,
@@ -455,6 +474,10 @@ mod tests {
         STASH,
         LATER,
         MERGE_ABORT,
+        MERGE_CONTINUE,
+        OURS,
+        THEIRS,
+        MERGETOOL,
         NO_FF,
         MERGE_MANY,
         SQUASH,
@@ -646,6 +669,13 @@ mod tests {
         }
         assert_eq!(explained("blame"), LATER);
         assert_eq!(explained("merge --abort"), MERGE_ABORT);
+        assert_eq!(explained("merge --continue"), MERGE_CONTINUE);
+        assert_eq!(explained("mergetool a.txt"), MERGETOOL);
+        for word in ["checkout", "restore"] {
+            assert_eq!(explained(&format!("{word} --ours a.txt")), OURS);
+            assert_eq!(explained(&format!("{word} --theirs -- a.txt")), THEIRS);
+            assert_eq!(explained(&format!("{word} --json a.txt --theirs")), THEIRS);
+        }
         assert_eq!(explained("merge side --no-ff"), NO_FF);
         assert_eq!(explained("merge --squash side"), SQUASH);
         for typed in [
@@ -667,9 +697,9 @@ mod tests {
     }
 
     #[test]
-    fn explanations_are_two_or_three_lines_and_name_no_git_word() {
+    fn explanations_are_one_to_three_lines_and_name_no_git_word() {
         for text in EXPLANATIONS {
-            assert!((2..=3).contains(&text.lines().count()), "{text}");
+            assert!((1..=3).contains(&text.lines().count()), "{text}");
             for word in text.split(|c: char| !c.is_ascii_alphanumeric() && c != '-') {
                 assert!(!SHORTCUTS.contains(&word), "{word} in {text}");
             }

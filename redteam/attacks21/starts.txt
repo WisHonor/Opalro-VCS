@@ -1,0 +1,85 @@
+   Compiling opal-vcs v0.1.0 (/work/crates/opal-vcs)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.24s
+     Running tests/rt22_starts.rs (target/debug/deps/rt22_starts-53696e1e3fad4ade)
+
+running 1 test
+Combined by into l1: save nkut "Combine by into l1", with 1 place in conflict:
+  f.txt: changed on both lines, in the same place; marked in the file (1 place)
+
+    2 files written.
+
+Recorded 1 fix in save nkut "Combine by into l1" on l1.
+
+    The combined save now holds it; its ID stays the same.
+    Took yours for 1 place.
+
+Combined cz into l1: save xqvz "Combine cz into l1", with 1 place in conflict:
+  g.txt: changed on l1, removed on cz; your version is in the folder
+
+    1 file written, 1 removed.
+
+Recorded 1 fix in save xqvz "Combine cz into l1" on l1.
+
+    The combined save now holds it; its ID stays the same.
+    Took yours for 1 place.
+
+--- l1
+  f.txt: "0\nl1 own\n2\n3\n4\n5\n"
+  g.txt: "g by y\n"
+  h.txt: "0\nx\n2\n3\n4\n5\n"
+Combined ax into l2: save sopq "Combine ax into l2", with 1 place in conflict:
+  f.txt: changed on both lines, in the same place; marked in the file (1 place)
+
+    1 file written.
+
+Recorded 1 fix in save sopq "Combine ax into l2" on l2.
+
+    The combined save now holds it; its ID stays the same.
+    Took theirs for 1 place.
+
+Combined cz into l2: save lkpt "Combine cz into l2", with 1 place in conflict:
+  g.txt: changed on l2, removed on cz; your version is in the folder
+
+    1 file written, 1 removed.
+
+Recorded 1 fix in save lkpt "Combine cz into l2" on l2.
+
+    The combined save now holds it; its ID stays the same.
+    Took theirs for 1 place.
+
+--- l2
+  h.txt: "0\nx\n2\n3\n4\n5\n"
+final combine:
+Combined l2 into l1: save ozvy "Combine l2 into l1", with 2 places in conflict:
+  f.txt: changed on both lines, and Opalro can't tell what it held where they parted; your version is in the folder
+  g.txt: changed on both lines, and Opalro can't tell what it held where they parted; your version is in the folder
+
+    No file needed changing.
+
+On line l1 at save ozvy "Combine l2 into l1"  (just now)
+
+In conflict (2 places):
+
+    f.txt  your version, still to decide
+    g.txt  your version, still to decide
+
+--- result
+  f.txt: "0\nl1 own\n2\n3\n4\n5\n"
+  g.txt: "g by y\n"
+  h.txt: "0\nx\n2\n3\n4\n5\n"
+copy f.txt mine: Wrote your version of f.txt to /tmp/.tmp9eyq0U/f.txt-mine.
+
+copy f.txt theirs: error: The other line holds no file at f.txt, so there is nothing to copy.
+
+copy f.txt before: error: Opalro has no version of f.txt from where the lines parted (nothing was there, or Opalro can't tell what was), so there is nothing to copy.
+
+copy g.txt mine: Wrote your version of g.txt to /tmp/.tmp9eyq0U/g.txt-mine.
+
+copy g.txt theirs: error: The other line holds no file at g.txt, so there is nothing to copy.
+
+copy g.txt before: error: Opalro has no version of g.txt from where the lines parted (nothing was there, or Opalro can't tell what was), so there is nothing to copy.
+
+test rt22_three_starts_that_disagree ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 5.86s
+

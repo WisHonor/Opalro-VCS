@@ -3,10 +3,14 @@ source: crates/opal-vcs/tests/combine.rs
 expression: "support::masked(combined)"
 ---
 {
+  "conflict_count": 0,
+  "conflicts": [],
+  "holds_conflicts": false,
   "line": "main",
   "merged_files": [
     "a.txt"
   ],
+  "more_conflicts": 0,
   "not_written": [],
   "opalro_json": 1,
   "placeholders": [],
