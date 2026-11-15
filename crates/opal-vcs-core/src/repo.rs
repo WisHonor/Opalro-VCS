@@ -269,7 +269,7 @@ impl RepoError {
                 RepoError::OpalChanged { .. } => "Run the command again.",
                 RepoError::ImportUnfinished => "Run `opalro import` again to finish the import.",
                 RepoError::NewerFormat { .. } => "Update Opalro to open it.",
-                RepoError::Damaged { .. } => {
+                RepoError::Damaged { .. } | RepoError::Store(StoreError::DamagedConflict(_)) => {
                     "Nothing was changed. Ask for help before trying to repair it."
                 }
                 // Every switch away from the save the project is on reads it first.
@@ -308,7 +308,11 @@ impl RepoError {
                     // Damage stops every later try too, so name the way on without that data.
                     let copy = match **source {
                         RepoError::Damaged { .. }
-                        | RepoError::Store(StoreError::WrongKind { .. } | StoreError::Decode(_)) => {
+                        | RepoError::Store(
+                            StoreError::WrongKind { .. }
+                            | StoreError::Decode(_)
+                            | StoreError::DamagedConflict(_),
+                        ) => {
                             Some("looks damaged")
                         }
                         RepoError::Store(StoreError::Missing(_)) => Some("is missing"),

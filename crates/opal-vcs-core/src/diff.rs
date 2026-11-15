@@ -55,7 +55,25 @@ pub(crate) fn for_each_change_in<E: From<StoreError>>(
     new_root: Id,
     each: impl FnMut(FileChange<'_>) -> Result<(), E>,
 ) -> Result<(), E> {
-    walk_files(store, unstored, old_root, new_root, MAX_SAVE_ENTRIES, each)
+    walk_files(
+        store,
+        unstored,
+        old_root,
+        Some(new_root),
+        MAX_SAVE_ENTRIES,
+        each,
+    )
+}
+
+/// [`for_each_change_in`] between two folders either of which may be missing.
+pub(crate) fn for_each_change_between<E: From<StoreError>>(
+    store: &Store,
+    unstored: &HashMap<Id, Listing>,
+    old: Option<Id>,
+    new: Option<Id>,
+    each: impl FnMut(FileChange<'_>) -> Result<(), E>,
+) -> Result<(), E> {
+    walk_files(store, unstored, old, new, MAX_SAVE_ENTRIES, each)
 }
 
 /// The walk, handing out only files that differ, with the entry limit of the saves as a
@@ -64,30 +82,37 @@ fn walk_files<E: From<StoreError>>(
     store: &Store,
     unstored: &HashMap<Id, Listing>,
     old_root: Option<Id>,
-    new_root: Id,
+    new_root: Option<Id>,
     max_entries: u64,
     mut each: impl FnMut(FileChange<'_>) -> Result<(), E>,
 ) -> Result<(), E> {
-    let files = |path: &str, o: Option<&Entry>, n: Option<&Entry>| {
-        let (fo, fnew) = (file(o), file(n));
-        let Some(change) = file_change(o, n) else {
-            return Ok(());
-        };
-        let Some(shown) = fnew.or(fo) else {
-            return Ok(());
-        };
-        each(FileChange {
-            path,
-            change,
-            kind: shown.kind,
-            old_kind: fo.map(|e| e.kind),
-            old_size: fo.map(|e| e.size),
-            new_size: fnew.map(|e| e.size),
-            old_id: fo.map(|e| e.id),
-            new_id: fnew.map(|e| e.id),
-        })
+    let files = |path: &str, o: Option<&Entry>, n: Option<&Entry>| match change_at(path, o, n) {
+        Some(c) => each(c),
+        None => Ok(()),
     };
     walk(store, unstored, old_root, new_root, max_entries, files)
+}
+
+/// The change at `path` between the entries `o` and `n` [`for_each_entry_change_in`] handed out,
+/// if it is a change [`for_each_change`] hands out.
+pub(crate) fn change_at<'a>(
+    path: &'a str,
+    o: Option<&Entry>,
+    n: Option<&Entry>,
+) -> Option<FileChange<'a>> {
+    let (fo, fnew) = (file(o), file(n));
+    let change = file_change(o, n)?;
+    let shown = fnew.or(fo)?;
+    Some(FileChange {
+        path,
+        change,
+        kind: shown.kind,
+        old_kind: fo.map(|e| e.kind),
+        old_size: fo.map(|e| e.size),
+        new_size: fnew.map(|e| e.size),
+        old_id: fo.map(|e| e.id),
+        new_id: fnew.map(|e| e.id),
+    })
 }
 
 /// How the file at a path changed between two entries [`for_each_entry_change_in`] handed out,
@@ -112,7 +137,14 @@ pub(crate) fn for_each_entry_change_in<E: From<StoreError>>(
     new_root: Id,
     each: impl FnMut(&str, Option<&Entry>, Option<&Entry>) -> Result<(), E>,
 ) -> Result<(), E> {
-    walk(store, unstored, old_root, new_root, MAX_SAVE_ENTRIES, each)
+    walk(
+        store,
+        unstored,
+        old_root,
+        Some(new_root),
+        MAX_SAVE_ENTRIES,
+        each,
+    )
 }
 
 /// How many files differ between the two saves. It is the walk of [`for_each_change`] with nothing
@@ -170,11 +202,11 @@ fn walk<E: From<StoreError>>(
     store: &Store,
     unstored: &HashMap<Id, Listing>,
     old_root: Option<Id>,
-    new_root: Id,
+    new_root: Option<Id>,
     max_entries: u64,
     mut each: impl FnMut(&str, Option<&Entry>, Option<&Entry>) -> Result<(), E>,
 ) -> Result<(), E> {
-    if old_root == Some(new_root) {
+    if old_root == new_root {
         return Ok(());
     }
     let too_large = |detail| StoreError::SaveTooLarge { detail };
@@ -191,7 +223,7 @@ fn walk<E: From<StoreError>>(
         at: 0,
         step: Step::Folder {
             old: old_root,
-            new: Some(new_root),
+            new: new_root,
             depth: 0,
             counted: (false, false),
         },
@@ -371,7 +403,7 @@ mod tests {
         max_entries: u64,
     ) -> Result<Vec<Seen>, StoreError> {
         let mut seen = Vec::new();
-        walk_files(store, &HashMap::new(), old, new, max_entries, |c| {
+        walk_files(store, &HashMap::new(), old, Some(new), max_entries, |c| {
             seen.push(Seen {
                 path: c.path.to_owned(),
                 change: c.change,

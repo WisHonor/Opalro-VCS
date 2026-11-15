@@ -1,5 +1,6 @@
 //! `opalro save`: walks the project folder, stores its files, and commits the save.
 
+use std::borrow::Cow;
 use std::cmp::Reverse;
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsStr;
@@ -12,6 +13,8 @@ use std::sync::Arc;
 use opal_platform::dir::{Dir, EntryMeta, EntryType};
 
 use crate::changeids::ChangeIds;
+use crate::conflict::Record;
+use crate::conflict::standing::as_it_stands;
 use crate::diary::{Action, DiaryEntry, Position, State};
 use crate::diff::count_changes;
 use crate::drive::{self, Drive};
@@ -584,6 +587,7 @@ pub fn save_folder(
     let last = Last {
         listings: &old,
         ids: &old_ids,
+        records: &HashMap::new(),
     };
     let built = build_reading(
         &mut storing,
@@ -1191,6 +1195,15 @@ trait Contents {
         read: &mut dyn Iterator<Item = Done>,
         c: &Child,
     ) -> Result<(Id, u64), SaveError>;
+    /// What goes into the listing for `c`, met at the place of the conflict `record` (its record
+    /// `conflict`), built as `built`.
+    fn conflict(
+        &mut self,
+        c: &Child,
+        record: Id,
+        conflict: &Record,
+        built: (EntryKind, Id, u64),
+    ) -> Result<Option<(EntryKind, Id, u64)>, SaveError>;
     fn listing(&mut self, listing: Listing) -> Result<Id, SaveError>;
 }
 
@@ -1310,6 +1323,16 @@ impl Contents for Storing<'_> {
         c: &Child,
     ) -> Result<(Id, u64), SaveError> {
         self.store_read(read, &c.rel)
+    }
+
+    fn conflict(
+        &mut self,
+        _: &Child,
+        _: Id,
+        _: &Record,
+        built: (EntryKind, Id, u64),
+    ) -> Result<Option<(EntryKind, Id, u64)>, SaveError> {
+        Ok(Some(built))
     }
 
     fn listing(&mut self, listing: Listing) -> Result<Id, SaveError> {
@@ -1539,12 +1562,21 @@ pub(crate) fn ingest_failed(e: IngestError, rel: &str) -> SaveError {
     }
 }
 
-/// The base save's listing of each folder the walk found, if it has that folder, and the stored
-/// ID of each nothing was dropped from.
+/// The base save's listing of each folder the walk found, if it has that folder, the stored ID of
+/// each nothing was dropped from, and the records of the conflicts the walk read.
 #[derive(Clone, Copy)]
 struct Last<'a> {
     listings: &'a HashMap<String, Option<Listing>>,
     ids: &'a HashMap<String, Id>,
+    records: &'a HashMap<Id, Record>,
+}
+
+impl Last<'_> {
+    /// The base save's entry `name` in the folder `rel`, as it stands in the folder.
+    fn as_base(&self, rel: &str, name: &str) -> Option<Cow<'_, Entry>> {
+        let listing = self.listings.get(rel)?.as_ref()?;
+        as_it_stands(listing.get(name)?, self.records)
+    }
 }
 
 /// `build_with`, its files and links read on the workers. For a save (`store` given) a small file
@@ -1563,11 +1595,10 @@ fn build_reading(
     // What the cache said of each file, for `build_with`, which meets them in this same order.
     let mut known = Vec::new();
     for (rel, children) in in_build_order(folders) {
-        let before = last.listings.get(rel).and_then(Option::as_ref);
         for c in children {
             let read = match c.kind {
                 Kind::File => {
-                    let vouched = contents.vouched(c, before.and_then(|l| l.get(&c.name)));
+                    let vouched = contents.vouched(c, last.as_base(rel, &c.name).as_deref());
                     known.push((c.rel.as_str(), vouched));
                     vouched.is_none()
                 }
@@ -1638,6 +1669,7 @@ fn build(
     let last = Last {
         listings: old,
         ids: &HashMap::new(),
+        records: &HashMap::new(),
     };
     let b = build_reading(&mut storing, Some(store), handles, folders, last, noted)?;
     let kept = b.kept.len() + b.kept_below_gone;
@@ -1694,7 +1726,9 @@ fn build_with<'a>(
         let before = last.listings.get(rel).and_then(Option::as_ref);
         let mut found = Vec::new();
         for c in children {
-            let was = before.and_then(|l| l.get(&c.name));
+            let stored = before.and_then(|l| l.get(&c.name));
+            let as_base = last.as_base(rel, &c.name);
+            let was = as_base.as_deref();
             let (kind, id, size) = match c.kind {
                 Kind::Folder => {
                     let id = built.remove(c.rel.as_str()).ok_or_else(missing)?;
@@ -1739,6 +1773,19 @@ fn build_with<'a>(
                     kept_below_gone += below;
                     (EntryKind::Folder, id, 0)
                 }
+            };
+            // What the folder holds at a conflict's place is the conflict's to settle.
+            let walked = matches!(c.kind, Kind::File | Kind::Symlink | Kind::Folder);
+            let (kind, id, size) = match stored.filter(|e| walked && e.kind == EntryKind::Conflict)
+            {
+                Some(e) => match last.records.get(&e.id) {
+                    Some(record) => match contents.conflict(c, e.id, record, (kind, id, size))? {
+                        Some(settled) => settled,
+                        None => continue,
+                    },
+                    None => (kind, id, size),
+                },
+                None => (kind, id, size),
             };
             if was.is_none_or(|e| (e.kind, e.id) != (kind, id)) {
                 match noted.of(rel, c, was) {
@@ -1988,6 +2035,11 @@ pub(crate) struct FolderNow {
     /// by path.
     pub(crate) not_written_here: Vec<String>,
     pub(crate) warnings: Vec<Warning>,
+    /// The records of the conflicts the walk met, by ID.
+    pub(crate) records: HashMap<Id, Record>,
+    /// The base save's conflicts kept as they were, in parts of it this computer can't hold, by
+    /// path, with their records' IDs.
+    pub(crate) kept_conflicts: Vec<(String, Id)>,
 }
 
 /// Reads the project folder as a save on top of the save whose top listing is `base` would, by
@@ -2008,10 +2060,13 @@ pub(crate) fn read_folder(
         Some(drive) => drive,
         None => drive::probe(repo.tmp_folder()).map_err(RepoError::from)?,
     };
+    let keeps_conflicts = repo.keeps_conflicts();
     let walked = || {
+        let mut base = Base::new(repo.store(), base, SaveLimits::default());
+        base.conflicts = keeps_conflicts;
         walk(
             repo.root(),
-            Base::new(repo.store(), base, SaveLimits::default()),
+            base,
             SaveLimits::default(),
             drive,
             git_excludes,
@@ -2030,6 +2085,8 @@ pub(crate) fn read_folder(
         gone_kept,
         noted,
         mut warnings,
+        records,
+        kept_conflicts,
     } = scan?;
     let mut reading = Reading {
         cache,
@@ -2041,8 +2098,10 @@ pub(crate) fn read_folder(
     let last = Last {
         listings: &old,
         ids: &old_ids,
+        records: &records,
     };
     let built = build_reading(&mut reading, None, &mut handles, &folders, last, &noted)?;
+    let kept_conflicts = kept_places(repo.store(), kept_conflicts)?;
     keep_file_cache(repo, reading.cache, now, &mut warnings);
     let mut not_written_here = built.kept;
     not_written_here.extend(gone_kept);
@@ -2059,7 +2118,37 @@ pub(crate) fn read_folder(
         listings,
         not_written_here,
         warnings,
+        records,
+        kept_conflicts,
     })
+}
+
+/// The places of `kept`, conflicts kept as they were and folders kept as they were that hold one,
+/// each conflict by path with its record's ID. The walk counted those folders against a save's
+/// limits already, so going through them again is held to them too.
+fn kept_places(
+    store: &Store,
+    kept: Vec<(String, EntryKind, Id)>,
+) -> Result<Vec<(String, Id)>, SaveError> {
+    let mut places = Vec::new();
+    let mut folders = Vec::new();
+    for (path, kind, id) in kept {
+        match kind {
+            EntryKind::Folder => folders.push((path, id)),
+            _ => places.push((path, id)),
+        }
+    }
+    while let Some((path, id)) = folders.pop() {
+        for e in store.listing(&id)?.entries() {
+            let below = format!("{path}/{}", e.name);
+            match e.kind {
+                EntryKind::Folder => folders.push((below, e.id)),
+                EntryKind::Conflict => places.push((below, e.id)),
+                _ => {}
+            }
+        }
+    }
+    Ok(places)
 }
 
 /// Reads files and links to know their IDs, opening only those `cache` doesn't vouch for, and
@@ -2099,6 +2188,18 @@ impl Contents for Reading {
         c: &Child,
     ) -> Result<(Id, u64), SaveError> {
         hashed_read(read, &c.rel)
+    }
+
+    // The folder's entry as it is: the listing then differs from the stored one, so the
+    // comparison after the walk reaches the place.
+    fn conflict(
+        &mut self,
+        _: &Child,
+        _: Id,
+        _: &Record,
+        built: (EntryKind, Id, u64),
+    ) -> Result<Option<(EntryKind, Id, u64)>, SaveError> {
+        Ok(Some(built))
     }
 
     fn listing(&mut self, listing: Listing) -> Result<Id, SaveError> {
@@ -2340,6 +2441,7 @@ mod tests {
         let last = Last {
             listings: &old,
             ids: &HashMap::new(),
+            records: &HashMap::new(),
         };
         let built = build_reading(&mut reading, None, &mut handles, &folders, last, &noted);
         let built = built.map_err(shown)?;

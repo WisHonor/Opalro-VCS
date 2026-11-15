@@ -15,6 +15,8 @@ use std::thread;
 use opal_platform::dir::{Dir, DirEntry, EntryMeta, EntryType, is_link_refusal};
 
 use super::{Child, Folders, Kind, NAMED, SaveError, listed};
+use crate::conflict::standing::as_it_stands;
+use crate::conflict::{self, Record};
 use crate::drive::Drive;
 use crate::id::Id;
 use crate::ignore::{Decision, InForce, Matcher, Rules};
@@ -442,6 +444,8 @@ pub(super) struct Base<'a> {
     spent: bool,
     /// Listings read ahead of the walk, if a helper reads them.
     ahead: Option<&'a Ahead>,
+    /// Whether the project keeps conflicts, so the walk follows those its listings hold.
+    pub(super) conflicts: bool,
 }
 
 impl<'a> Base<'a> {
@@ -453,6 +457,7 @@ impl<'a> Base<'a> {
             limits,
             spent: false,
             ahead: None,
+            conflicts: false,
         }
     }
 
@@ -765,6 +770,14 @@ struct WalkState {
     /// The folder last opened to go into, by project path, with the handle that listed it and
     /// what it holds: the walk goes on from this listing.
     listed: Option<(String, Arc<Dir>, Vec<DirEntry>)>,
+    /// Whether the project keeps conflicts: then the record of each conflict in a listing noted
+    /// is read, once.
+    keeps_conflicts: bool,
+    records: HashMap<Id, Record>,
+    /// The folders a conflict stands as, and those below them, where a conflict is damage.
+    in_conflict: HashSet<String>,
+    /// The base save's conflicts kept as they were, by path, and the kept folders holding one.
+    kept_conflicts: Vec<(String, EntryKind, Id)>,
 }
 
 /// What a walk knows of the folder it is in: whether it is held, whether Git would leave it out
@@ -826,6 +839,10 @@ impl WalkState {
             untouched: HashMap::new(),
             untouched_in: HashSet::new(),
             listed: None,
+            keeps_conflicts: false,
+            records: HashMap::new(),
+            in_conflict: HashSet::new(),
+            kept_conflicts: Vec::new(),
         };
         rules.drop_saved("", dropped);
         rules.note_untouched("", &top);
@@ -835,22 +852,36 @@ impl WalkState {
     }
 
     /// Reads the base save's listing of `rel`, a folder the walk keeps, if it has that folder
-    /// too. The folder above it must have been noted already.
+    /// too, or a conflict standing as one. The folder above it must have been noted already.
     fn note_folder(&mut self, rel: &str, base: &mut Base) -> Result<(), SaveError> {
         let (up, name) = rel.rsplit_once('/').unwrap_or(("", rel));
         let above = self.old.get(up).ok_or_else(|| unnoted(rel))?;
-        let saved = match above.as_ref().and_then(|l| l.get(name)) {
+        let at = above.as_ref().and_then(|l| l.get(name));
+        let conflict = at.is_some_and(|e| e.kind == EntryKind::Conflict);
+        let saved = match at.and_then(|e| as_it_stands(e, &self.records)) {
             Some(e) if e.kind == EntryKind::Folder => Some((e.id, base.listing(e.id)?)),
             _ => None,
         };
-        let listing = saved.map(|(id, (listing, dropped))| {
-            if dropped.is_empty() {
-                self.old_ids.insert(rel.to_owned(), id);
+        let listing = match saved {
+            Some((id, (listing, dropped))) => {
+                if conflict || self.in_conflict.contains(up) {
+                    self.in_conflict.insert(rel.to_owned());
+                    let mut entries = listing.entries().iter();
+                    if let Some(e) = entries.find(|e| e.kind == EntryKind::Conflict) {
+                        let place = escape(&path_in(rel, &e.name), false);
+                        return Err(conflict::nested(&place).into());
+                    }
+                }
+                if dropped.is_empty() {
+                    self.old_ids.insert(rel.to_owned(), id);
+                }
+                self.drop_saved(rel, dropped);
+                self.note_records(rel, &listing, base.store)?;
+                self.note_untouched(rel, &listing);
+                Some(listing)
             }
-            self.drop_saved(rel, dropped);
-            self.note_untouched(rel, &listing);
-            listing
-        });
+            None => None,
+        };
         self.old.insert(rel.to_owned(), listing);
         Ok(())
     }
@@ -863,6 +894,29 @@ impl WalkState {
             self.git_names.add(path.clone());
             self.saved_git_names.insert(path);
         }
+    }
+
+    /// Reads the record of each conflict in `listing`, the base save's listing of the folder
+    /// `rel`, once, in a project that keeps conflicts.
+    fn note_records(
+        &mut self,
+        rel: &str,
+        listing: &Listing,
+        store: &Store,
+    ) -> Result<(), SaveError> {
+        if !self.keeps_conflicts {
+            return Ok(());
+        }
+        for e in listing.entries() {
+            if e.kind == EntryKind::Conflict && !self.records.contains_key(&e.id) {
+                let at = conflict::at_path(&path_in(rel, &e.name));
+                let record = store
+                    .conflict(&e.id)
+                    .map_err(|err| conflict::unreadable(&at, &e.id, err))?;
+                self.records.insert(e.id, record);
+            }
+        }
+        Ok(())
     }
 
     /// Notes the entries of `listing`, the base save's listing of the folder `rel`, that are
@@ -1240,7 +1294,10 @@ impl WalkState {
         if within.late
             && let Some(name) = met.name
             && let Some(Some(listing)) = self.old.get(folder)
-            && kept_unasked(name, is_dir, listing.get(name))
+            && let saved = listing
+                .get(name)
+                .and_then(|e| as_it_stands(e, &self.records))
+            && kept_unasked(name, is_dir, saved.as_deref())
         {
             return true;
         }
@@ -1338,7 +1395,7 @@ impl WalkState {
         };
         let saved = met
             .name
-            .and_then(|name| listing.as_ref()?.get(name))
+            .and_then(|name| as_it_stands(listing.as_ref()?.get(name)?, &self.records))
             .is_some_and(|e| (e.kind == EntryKind::Folder) == is_dir);
         // Inside a repository of its own no rule is matched, so none is blamed for what it keeps.
         let nested = self.nested_held.contains(folder);
@@ -1374,6 +1431,11 @@ pub(super) struct Scan {
     /// One for each `.gitignore` skipped, and one for the names Git treats as `.git` or Opalro as
     /// `.opalro` left out.
     pub(super) warnings: Vec<Warning>,
+    /// The records of the conflicts in the base save's listings the walk read, by ID.
+    pub(super) records: HashMap<Id, Record>,
+    /// The base save's conflicts kept as they were (kind 6), and the folders kept as they were
+    /// that hold one somewhere (a folder), by path.
+    pub(super) kept_conflicts: Vec<(String, EntryKind, Id)>,
 }
 
 /// A folder the walk is in: its project path, how many levels down it is, and what it holds that
@@ -1524,6 +1586,12 @@ fn scan_folder(
     let (top, dropped) = base.listing(base.root)?;
     let whole = dropped.is_empty();
     let mut rules = WalkState::new(root, drive, top, dropped, own_list)?;
+    rules.keeps_conflicts = base.conflicts;
+    if let Some(Some(top)) = rules.old.remove("") {
+        let noted = rules.note_records("", &top, base.store);
+        rules.old.insert(String::new(), Some(top));
+        noted?;
+    }
     if whole {
         rules.old_ids.insert(String::new(), base.root);
     }
@@ -1553,6 +1621,7 @@ fn scan_folder(
             rebuild_gone(&mut base, &mut limits, drive, &top, listing, taken, named)?
         {
             rebuilt.extend(gone.listings);
+            rules.kept_conflicts.extend(gone.conflicts);
             let kind = Kind::Back {
                 id: gone.id,
                 kept: gone.kept.len(),
@@ -1578,13 +1647,28 @@ fn scan_folder(
             .check_path(kept.rel.len())
             .map_err(|why| too_long(why, &kept.rel))?;
         if let Kind::Kept {
+            kind: EntryKind::Conflict,
+            id,
+            ..
+        } = kept.kind
+            && base.conflicts
+        {
+            let conflict = (kept.rel.clone(), EntryKind::Conflict, id);
+            rules.kept_conflicts.push(conflict);
+        }
+        if let Kind::Kept {
             kind: EntryKind::Folder,
             id,
             ..
         } = kept.kind
         {
             let depth = kept.rel.split('/').count();
-            count_kept_folder(base.store, &mut limits, depth, kept.rel.len() + 1, id)?;
+            let prefix = kept.rel.len() + 1;
+            let holds = count_kept_folder(base.store, &mut limits, depth, prefix, id)?;
+            if holds && base.conflicts {
+                let folder = (kept.rel.clone(), EntryKind::Folder, id);
+                rules.kept_conflicts.push(folder);
+            }
         }
         limits.add(1).map_err(too_large)?;
         let (up, _) = kept.rel.rsplit_once('/').unwrap_or_default();
@@ -1618,6 +1702,8 @@ fn scan_folder(
             late: rules.late,
         },
         warnings: rules.warnings,
+        records: rules.records,
+        kept_conflicts: rules.kept_conflicts,
     })
 }
 
@@ -2003,6 +2089,8 @@ struct Gone {
     kept: Vec<String>,
     /// Its new listings, its own last.
     listings: Vec<Listing>,
+    /// The conflicts kept as they were below it, and the kept folders holding one, by path.
+    conflicts: Vec<(String, EntryKind, Id)>,
 }
 
 /// One folder open in [`rebuild_gone`]'s search.
@@ -2051,6 +2139,7 @@ fn rebuild_gone(
     let mut open: Vec<Open> = Vec::new();
     let mut kept_in_all = Vec::new();
     let mut listings = Vec::new();
+    let mut conflicts = Vec::new();
     let mut read = Some((String::new(), top.len() + 1, id, counted));
     loop {
         if let Some((name, prefix, id, counted)) = read.take()
@@ -2072,13 +2161,19 @@ fn rebuild_gone(
                         kept: path_below(top, &open, &name, &e.name),
                     });
                 }
+                let mut holds_conflict = e.kind == EntryKind::Conflict;
                 if e.kind == EntryKind::Folder {
                     let inside = prefix + e.name.len() + 1;
-                    count_kept_folder(base.store, limits, depth + open.len() + 1, inside, e.id)?;
+                    let below = depth + open.len() + 1;
+                    holds_conflict = count_kept_folder(base.store, limits, below, inside, e.id)?;
                 }
                 limits.add(1).map_err(too_large)?;
                 holds.push(e.clone());
-                kept_in_all.push(path_below(top, &open, &name, &e.name));
+                let path = path_below(top, &open, &name, &e.name);
+                if holds_conflict && base.conflicts {
+                    conflicts.push((path.clone(), e.kind, e.id));
+                }
+                kept_in_all.push(path);
             }
             // Its folders are met before any is searched, so one met again is counted whole first.
             let mut again = vec![counted; kept.len()];
@@ -2139,6 +2234,7 @@ fn rebuild_gone(
                     id,
                     kept: kept_in_all,
                     listings,
+                    conflicts,
                 }));
             }
         }
@@ -2147,17 +2243,27 @@ fn rebuild_gone(
 
 /// Counts everything a kept folder holds, from its listing `id` down, against `limits`, all at
 /// once: kept or not, a save holds no more than its format allows. The folder is `depth` levels
-/// down, and its path with a `/` after it is `prefix` bytes long.
+/// down, and its path with a `/` after it is `prefix` bytes long. Says whether any of it is a
+/// conflict, from the listings it reads anyway.
 fn count_kept_folder(
     store: &Store,
     limits: &mut SaveLimits,
     depth: usize,
     prefix: usize,
     id: Id,
-) -> Result<(), SaveError> {
+) -> Result<bool, SaveError> {
     let at = prefix.saturating_sub(1);
-    let counted = limits.add_all(id, depth, at, |id| store.listing(id))?;
-    counted.map_err(|detail| SaveError::TooLarge { detail })
+    let mut holds_conflict = false;
+    let counted = limits.add_all(id, depth, at, |id| {
+        let listing = store.listing(id)?;
+        holds_conflict |= listing
+            .entries()
+            .iter()
+            .any(|e| e.kind == EntryKind::Conflict);
+        Ok::<_, StoreError>(listing)
+    })?;
+    counted.map_err(|detail| SaveError::TooLarge { detail })?;
+    Ok(holds_conflict)
 }
 
 #[cfg(test)]

@@ -8,14 +8,15 @@ use std::time::{Duration, Instant};
 use similar::algorithms::{Capture, Replace, myers};
 use similar::{DiffOp, DiffTag, group_diff_ops};
 
-use crate::diff::{ChangeKind, for_each_change, for_each_change_in};
+use crate::conflict::stands_as;
+use crate::diff::{ChangeKind, change_at, for_each_change, for_each_change_between};
 use crate::history::tip_of;
 use crate::id::Id;
-use crate::listing::EntryKind;
+use crate::listing::{Entry, EntryKind};
 use crate::repo::Repository;
 use crate::scope::Scope;
 use crate::snapshot::{SaveError, link_target, read_folder};
-use crate::status::PathChange;
+use crate::status::{Difference, PathChange, each_difference};
 use crate::store::{Store, StoreError};
 use crate::writeout::{self, Folders};
 
@@ -198,9 +199,9 @@ fn ending(line: &[u8]) -> (&[u8], &[u8]) {
 }
 
 /// Hands `each` every unsaved change, as `status` finds them, with its lines: the folder against
-/// the save the project is on. Only `paths` and what is in them, if given. Nothing is stored;
-/// only the file-state cache is written. The folder walk's warnings go to the store's. One file
-/// is held at a time.
+/// the save the project is on, and at a place in conflict against what the conflict stands as.
+/// Only `paths` and what is in them, if given. Nothing is stored; only the file-state cache is
+/// written. The folder walk's warnings go to the store's. One file is held at a time.
 pub fn unsaved_changes<E: From<SaveError> + From<StoreError>>(
     repo: &Repository,
     paths: Option<&[String]>,
@@ -211,10 +212,9 @@ pub fn unsaved_changes<E: From<SaveError> + From<StoreError>>(
     let (_, entry) = repo.current().map_err(SaveError::from)?;
     let tip = tip_of(&entry).map_err(SaveError::from)?;
     let save = store.save(&tip, repo.signatures_allowed())?;
-    let now = read_folder(repo, save.root, false, git_excludes, None)
+    let mut now = read_folder(repo, save.root, false, git_excludes, None)
         .map_err(|e| e.in_save(tip, true))?;
-    for w in now
-        .warnings
+    for w in std::mem::take(&mut now.warnings)
         .into_iter()
         .chain(writeout::unfinished_warning(repo))
     {
@@ -222,14 +222,50 @@ pub fn unsaved_changes<E: From<SaveError> + From<StoreError>>(
     }
     let scope = scope(repo, paths)?;
     let mut disk = Folders::open(repo.root()).map_err(|e| unreadable("the project folder", e))?;
-    let walked = for_each_change_in(store, &now.listings, Some(save.root), now.root, |c| {
-        if !scope.as_ref().is_none_or(|s| s.holds(c.path)) {
+    let mut emit = |c: PathChange| -> Result<(), Stopped<E>> {
+        if !scope.as_ref().is_none_or(|s| s.holds(&c.path)) {
             return Ok(());
         }
-        let c = PathChange::from(c);
         let old = stored(store, c.old_kind, c.old_id, c.old_size)?;
         let new = on_disk(&mut disk, &c)?;
         each(&c.path, &c, lines(&old, &new)).map_err(Stopped::Each)
+    };
+    let mut records = std::mem::take(&mut now.records);
+    let walked = each_difference(repo, &now, &mut records, save.root, |d| match d {
+        Difference::File(c) => emit(PathChange::from(c)),
+        Difference::Conflict {
+            path,
+            record,
+            now: here,
+            ..
+        } => {
+            // Against what it stands as: a folder file by file, as one save against another.
+            let name = path.rsplit_once('/').map_or(path, |(_, name)| name);
+            let was = stands_as(record).map(|t| Entry {
+                name: name.to_owned(),
+                kind: t.kind,
+                id: t.id,
+                size: t.size,
+            });
+            let in_conflict = |mut c: PathChange| {
+                c.in_conflict = true;
+                c
+            };
+            if let Some(c) = change_at(path, was.as_ref(), here) {
+                emit(in_conflict(PathChange::from(c)))?;
+            }
+            let folder =
+                |e: Option<&Entry>| e.filter(|e| e.kind == EntryKind::Folder).map(|e| e.id);
+            let (old, new) = (folder(was.as_ref()), folder(here));
+            if old == new {
+                return Ok(());
+            }
+            for_each_change_between(store, &now.listings, old, new, |c| {
+                let mut c = in_conflict(PathChange::from(c));
+                c.path = format!("{path}/{}", c.path);
+                emit(c)
+            })
+        }
     });
     // A spelling of `.opalro` met reading is in the save the project is on, as for `status`.
     walked.map_err(|stopped| match stopped {
@@ -609,6 +645,72 @@ mod tests {
         // A line without an ending, or two that are the same, aren't such a pair.
         assert_eq!(marked("a\r\n", "a"), [[false, false]]);
         assert_eq!(marked("a\n", "b\n"), [[false, false]]);
+    }
+
+    #[test]
+    fn changes_at_a_conflicts_place_compare_with_what_it_stands_as() {
+        use crate::conflict::Term;
+        use crate::conflict::tests::{file_of, plant_conflicted};
+        use crate::status::tests::{HALF, MARKED, keep, marked, project, versions, write};
+        let (dir, mut repo) = project();
+        let held =
+            crate::test_support::plant_save(&mut repo, &[("dir/a.txt", EntryKind::File, b"a\n")]);
+        let folder = Term {
+            kind: EntryKind::Folder,
+            id: held.get("dir").unwrap().id,
+            size: 0,
+        };
+        keep(&mut repo, &[b"mine\n", b"base", b"theirs", MARKED]);
+        let conflicts = [("dir", versions(Some(folder))), ("story.txt", marked())];
+        let files: &[(&str, EntryKind, &[u8])] = &[("plain.txt", EntryKind::File, b"one\n")];
+        plant_conflicted(&mut repo, files, &conflicts);
+        write(dir.path(), "plain.txt", b"two\n");
+        write(dir.path(), "story.txt", HALF);
+        write(dir.path(), "dir/a.txt", b"a, changed\n");
+        let mut seen = Vec::new();
+        unsaved_changes::<SaveError>(&repo, None, None, &mut |path, c, lines| {
+            let removed: Vec<String> = match lines {
+                Lines::Hunks { hunks, .. } => hunks
+                    .iter()
+                    .flat_map(|h| &h.lines)
+                    .filter(|(t, _)| *t == Tag::Removed)
+                    .map(|(_, l)| String::from_utf8_lossy(l).into_owned())
+                    .collect(),
+                other => panic!("{other:?}"),
+            };
+            seen.push((path.to_owned(), c.change, c.in_conflict, c.old_id, removed));
+            Ok(())
+        })
+        .unwrap();
+        let paths: Vec<(&str, bool)> = seen.iter().map(|s| (s.0.as_str(), s.2)).collect();
+        assert_eq!(
+            paths,
+            [
+                ("dir/a.txt", true),
+                ("plain.txt", false),
+                ("story.txt", true)
+            ]
+        );
+        // The old side is the marked text: the markers of the place fixed are what went.
+        let story = &seen[2];
+        assert_eq!(story.1, ChangeKind::Modified);
+        assert_eq!(story.3, Some(file_of(MARKED).id));
+        assert!(
+            story.4.contains(&"<<<<<<< main (kkkk)\n".to_owned()),
+            "{:?}",
+            story.4
+        );
+        assert_eq!(seen[0].1, ChangeKind::Modified);
+        // Untouched, a place shows nothing.
+        write(dir.path(), "story.txt", MARKED);
+        write(dir.path(), "dir/a.txt", b"a\n");
+        let mut paths = Vec::new();
+        unsaved_changes::<SaveError>(&repo, None, None, &mut |path, _, _| {
+            paths.push(path.to_owned());
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(paths, ["plain.txt"]);
     }
 
     #[test]

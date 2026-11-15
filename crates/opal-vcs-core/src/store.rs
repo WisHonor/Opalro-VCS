@@ -20,6 +20,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
+/// Why a copy of a conflict record its index says is too large is bad.
+const OVER_RECORD_LIMIT: &str = "a conflict record over the 16384 bytes one may take";
+
 /// Packs kept open between lookups, the last ones used: with the folders a walk holds, few enough
 /// for any system's limit on open files.
 const MAX_OPEN: usize = 16;
@@ -45,6 +48,9 @@ pub enum StoreError {
     SaveTooLarge { detail: String },
     #[error("record {id} is larger than the {limit} bytes it may take")]
     RecordTooLarge { id: Id, limit: u64 },
+    /// A conflict met at a place that can't be followed, in words that name the place.
+    #[error("{0}")]
+    DamagedConflict(String),
 }
 
 /// A copy of an object: (pack number, its id).
@@ -206,6 +212,11 @@ pub struct Store {
     chunk_from: AtomicU64,
     #[cfg(test)]
     saves_read: std::sync::atomic::AtomicUsize,
+    /// The listings and conflict records this store has been asked for, on any thread.
+    #[cfg(test)]
+    listings_read: std::sync::atomic::AtomicUsize,
+    #[cfg(test)]
+    conflicts_read: std::sync::atomic::AtomicUsize,
     /// This store's packs while they are open.
     #[cfg(test)]
     counted: Arc<crate::pack::open_files::Count>,
@@ -405,6 +416,10 @@ impl Store {
             chunk_from: AtomicU64::new(CHUNK_FROM),
             #[cfg(test)]
             saves_read: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            listings_read: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            conflicts_read: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             counted: Arc::default(),
         };
@@ -813,28 +828,41 @@ impl Store {
     pub fn listing(&self, id: &Id) -> Result<Listing, StoreError> {
         #[cfg(test)]
         counted::listing();
+        #[cfg(test)]
+        self.listings_read
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         Ok(Listing::decode(
             &self.read_record(id, ObjectKind::FolderListing)?,
         )?)
     }
 
     /// The conflict record `id`, checked against its fingerprint and decoded; a copy whose index
-    /// says it is over `MAX_RECORD_BYTES` is refused before it is unpacked.
+    /// says it is over `MAX_RECORD_BYTES` is refused before it is unpacked, and remembered as bad.
     pub fn conflict(&self, id: &Id) -> Result<conflict::Record, StoreError> {
         #[cfg(test)]
         counted::conflict();
+        #[cfg(test)]
+        self.conflicts_read
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let bytes = self
             .first_good(id, ObjectKind::Conflict, false, |pack, entry| {
                 if entry.uncompressed_size > conflict::MAX_RECORD_BYTES {
-                    return Err(PackError::TooLarge);
+                    return Err(PackError::Corrupt {
+                        path: pack.path().to_owned(),
+                        reason: OVER_RECORD_LIMIT.to_owned(),
+                    });
                 }
                 pack.read_record(entry)
             })
             .map_err(|e| match e {
-                StoreError::Pack(PackError::TooLarge) => StoreError::RecordTooLarge {
-                    id: *id,
-                    limit: conflict::MAX_RECORD_BYTES,
-                },
+                StoreError::Pack(PackError::Corrupt { reason, .. })
+                    if reason == OVER_RECORD_LIMIT =>
+                {
+                    StoreError::RecordTooLarge {
+                        id: *id,
+                        limit: conflict::MAX_RECORD_BYTES,
+                    }
+                }
                 e => e,
             })?;
         Ok(conflict::Record::decode(&bytes)?)
@@ -846,6 +874,9 @@ impl Store {
     pub(crate) fn listing_after(&self, id: &Id, peeked: Peeked) -> Result<Listing, StoreError> {
         #[cfg(test)]
         counted::listing();
+        #[cfg(test)]
+        self.listings_read
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let Peeked {
             listing,
             pack: at,
@@ -902,6 +933,10 @@ impl Store {
             chunk_from: AtomicU64::new(self.chunk_from.load(Ordering::Relaxed)),
             #[cfg(test)]
             saves_read: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            listings_read: std::sync::atomic::AtomicUsize::new(0),
+            #[cfg(test)]
+            conflicts_read: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             counted: Arc::default(),
         }
@@ -1308,6 +1343,20 @@ impl Store {
         self.saves_read.load(std::sync::atomic::Ordering::Relaxed)
     }
 
+    /// How many listings this store has been asked for, read ahead or not.
+    #[cfg(test)]
+    pub(crate) fn listings_read(&self) -> usize {
+        self.listings_read
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    /// How many conflict records this store has been asked for.
+    #[cfg(test)]
+    pub(crate) fn conflicts_read(&self) -> usize {
+        self.conflicts_read
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
     #[cfg(test)]
     fn open_count(&self) -> usize {
         self.packs().open.len()
@@ -1392,6 +1441,7 @@ pub(crate) fn is_unreadable_record(e: &StoreError) -> bool {
             | StoreError::WrongKind { .. }
             | StoreError::Decode(_)
             | StoreError::RecordTooLarge { .. }
+            | StoreError::DamagedConflict(_)
             | StoreError::Pack(PackError::FingerprintMismatch { .. })
     )
 }
@@ -3110,6 +3160,15 @@ mod tests {
         );
         assert!(refused.to_string().contains(&id.to_hex()), "{refused}");
         assert_eq!(counted::unpacked(), unpacked);
+        // The copy is bad from now on, and the pack's warning says why.
+        assert!(store.conflict(&id).is_err());
+        assert_eq!(counted::unpacked(), unpacked);
+        let said: Vec<String> = store
+            .damaged_packs()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert!(said.iter().any(|s| s.contains("16384")), "{said:?}");
         // One within the limit is unpacked and read.
         store.conflict(&fits).unwrap();
         assert_eq!(counted::unpacked(), unpacked + 1);

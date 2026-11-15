@@ -1060,7 +1060,8 @@ fn put_back_readable(
         StoreError::Missing(_)
         | StoreError::Decode(_)
         | StoreError::WrongKind { .. }
-        | StoreError::RecordTooLarge { .. } => true,
+        | StoreError::RecordTooLarge { .. }
+        | StoreError::DamagedConflict(_) => true,
         StoreError::Pack(e) => is_damage(e),
         StoreError::SaveTooLarge { .. } => false,
     };

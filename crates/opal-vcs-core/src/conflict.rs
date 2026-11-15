@@ -1,8 +1,19 @@
 //! Conflict records: every version a place in conflict holds (docs/storage-format.md section 8).
 
+use std::io;
+
 use crate::encoding::{DecodeError, Reader, Writer};
 use crate::id::{Flavor, Id, hash_record};
 use crate::listing::EntryKind;
+use crate::store::StoreError;
+use crate::text::escape;
+
+pub(crate) mod markers;
+pub(crate) mod standing;
+
+pub(crate) use markers::Left;
+#[expect(unused_imports)]
+pub(crate) use standing::Listings;
 
 /// One version a conflict names: an entry's kind, ID and size, without a name.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -132,6 +143,73 @@ pub fn stands_as(r: &Record) -> Option<Term> {
     }
 }
 
+/// What the folder shows at a place in conflict, against what the conflict stands as.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Seen {
+    Untouched,
+    MarkersLeft(Left),
+    Fixed,
+    ChangedInPlace,
+}
+
+/// What the folder shows at the place of `c`: `now` is the folder's entry there as the walk built
+/// it; `markers` scans the file there for marker lines of the length it is given, when asked.
+/// Markers gone, or the file gone, is fixed; a version that changed is only changed.
+pub(crate) fn seen(
+    c: &Record,
+    now: Option<(EntryKind, Id)>,
+    markers: impl FnOnce(u8) -> io::Result<Left>,
+) -> io::Result<Seen> {
+    if now == stands_as(c).map(|t| (t.kind, t.id)) {
+        return Ok(Seen::Untouched);
+    }
+    let marker = c.marker();
+    if marker < MIN_MARKER {
+        return Ok(Seen::ChangedInPlace);
+    }
+    Ok(match now {
+        Some((EntryKind::File | EntryKind::Executable, _)) => {
+            let left = markers(marker)?;
+            if left.opening > 0 || left.closing > 0 {
+                Seen::MarkersLeft(left)
+            } else {
+                Seen::Fixed
+            }
+        }
+        _ => Seen::Fixed,
+    })
+}
+
+/// `e`, met reading the record `id` of the conflict `at` (`at <path>`, or its name in a folder
+/// listing), as the damage it is.
+pub(crate) fn unreadable(at: &str, id: &Id, e: StoreError) -> StoreError {
+    StoreError::DamagedConflict(match e {
+        StoreError::RecordTooLarge { .. } => format!(
+            "The conflict {at} names a record over 16 KiB, which Opalro never writes, so this \
+             project may be damaged."
+        ),
+        StoreError::DamagedConflict(said) => said,
+        e => format!(
+            "The conflict {at} can't be read (record {}): {}.",
+            id.short_hex(),
+            escape(&e.to_string(), false)
+        ),
+    })
+}
+
+/// A conflict met inside a folder another conflict stands as, `place` naming it.
+pub(crate) fn nested(place: &str) -> StoreError {
+    StoreError::DamagedConflict(format!(
+        "{place} is a conflict inside a conflict, which Opalro never writes, so this project may be \
+         damaged."
+    ))
+}
+
+/// The conflict at the project path `path`, as damage words name it.
+pub(crate) fn at_path(path: &str) -> String {
+    format!("at {}", escape(path, false))
+}
+
 fn write_term(w: &mut Writer, term: Option<&Term>) {
     w.bool(term.is_some());
     if let Some(t) = term {
@@ -158,7 +236,7 @@ fn read_term(r: &mut Reader<'_>) -> Result<Option<Term>, DecodeError> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
     use proptest::prelude::*;
@@ -403,6 +481,98 @@ mod tests {
         assert_eq!(r.before(), None);
         assert_eq!(r.theirs(), Some(file(5)));
         assert_eq!(r.id(), hash_record(Flavor::Conflict, &r.encode()));
+    }
+
+    /// Commits a save on the current line holding `files` (as `plant_save` takes them) and a
+    /// conflict at each path of `conflicts`, its record stored with it. Gives the top listing's ID.
+    pub(crate) fn plant_conflicted(
+        repo: &mut crate::repo::Repository,
+        files: &[(&str, EntryKind, &[u8])],
+        conflicts: &[(&str, Record)],
+    ) -> Id {
+        crate::test_support::plant_with(repo, files, conflicts).id()
+    }
+
+    /// A file term holding `bytes`, which a planted save must hold for it to be read.
+    pub(crate) fn file_of(bytes: &[u8]) -> Term {
+        Term {
+            kind: EntryKind::File,
+            id: crate::id::hash_content(bytes),
+            size: bytes.len() as u64,
+        }
+    }
+
+    #[test]
+    fn a_record_over_16_kib_is_damage_at_its_place() {
+        let id = Id([3; 32]);
+        let big = StoreError::RecordTooLarge {
+            id,
+            limit: MAX_RECORD_BYTES,
+        };
+        let StoreError::DamagedConflict(said) = unreadable(&at_path("art/\u{1b}.png"), &id, big)
+        else {
+            panic!("not damage");
+        };
+        assert_eq!(
+            said,
+            "The conflict at art/\\x1b.png names a record over 16 KiB, which Opalro never writes, \
+             so this project may be damaged."
+        );
+    }
+
+    #[test]
+    fn seen_follows_point_4_of_the_folder_decision() {
+        let marked = three(Some(Own {
+            version: Some(file(4)),
+            marker: 7,
+        }));
+        let at = |t: Term| Some((t.kind, t.id));
+        let left = |opening, closing| move |_| Ok(Left { opening, closing });
+        let never = |_| -> io::Result<Left> { panic!("scanned") };
+        let seen_with =
+            |r: &Record, now, scan: &dyn Fn(u8) -> io::Result<Left>| seen(r, now, scan).unwrap();
+        // Untouched: the marked text as written, never scanned.
+        assert_eq!(seen_with(&marked, at(file(4)), &never), Seen::Untouched);
+        // Markers left, and none left.
+        assert_eq!(
+            seen_with(&marked, at(file(5)), &left(1, 0)),
+            Seen::MarkersLeft(Left {
+                opening: 1,
+                closing: 0
+            })
+        );
+        assert_eq!(seen_with(&marked, at(file(5)), &left(0, 0)), Seen::Fixed);
+        // Removed, or a folder there.
+        assert_eq!(seen_with(&marked, None, &never), Seen::Fixed);
+        let folder = Some((EntryKind::Folder, Id([5; 32])));
+        assert_eq!(seen_with(&marked, folder, &never), Seen::Fixed);
+        // Only the executable mark changed, markers left: scanned with the record's length.
+        let exec = Some((EntryKind::Executable, Id([4; 32])));
+        let asked = |len| {
+            assert_eq!(len, 7);
+            Ok(Left {
+                opening: 2,
+                closing: 2,
+            })
+        };
+        assert!(matches!(
+            seen_with(&marked, exec, &asked),
+            Seen::MarkersLeft(_)
+        ));
+        // A version (marker 0): changed is only changed, whatever the file holds.
+        let version = three(None);
+        assert_eq!(seen_with(&version, at(file(1)), &never), Seen::Untouched);
+        assert_eq!(
+            seen_with(&version, at(file(9)), &never),
+            Seen::ChangedInPlace
+        );
+        assert_eq!(seen_with(&version, None, &never), Seen::ChangedInPlace);
+        // Standing as nothing, and nothing there.
+        let gone = three(Some(Own {
+            version: None,
+            marker: 0,
+        }));
+        assert_eq!(seen_with(&gone, None, &never), Seen::Untouched);
     }
 
     #[test]
