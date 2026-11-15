@@ -94,9 +94,21 @@ fn every_document() -> Vec<(&'static str, usize, Value)> {
     docs.push(("`opalro setup --json`", 0, run(&["setup"], 0)));
     docs.push((
         "`opalro setup --json`",
-        1,
+        2,
         run(&["setup", "--preset", "code"], 1),
     ));
+    // As v0.1 made it, so there is something to turn on.
+    support::without_conflicts_feature(&root);
+    let upgrades = run(&["setup"], 0);
+    assert_eq!(upgrades["upgrades"], serde_json::json!(["conflicts"]));
+    docs.push(("`opalro setup --json`", 0, upgrades));
+    for (args, code) in [
+        (&["setup", "--upgrade"][..], 1),
+        (&["setup", "--upgrade", "--yes"], 0),
+        (&["setup", "--upgrade"], 0),
+    ] {
+        docs.push(("`opalro setup --json`", 1, run(args, code)));
+    }
     env.overwrite("a.txt", "two\n");
     docs.push(("`opalro status --json`", 0, run(&["status"], 0)));
     docs.push(("`opalro changes --json`", 0, run(&["changes"], 0)));

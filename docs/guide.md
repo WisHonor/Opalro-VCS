@@ -887,6 +887,18 @@ Next: edit opalro.toml or .opalroignore to change a rule, or switch presets with
 
 `opalro setup` alone changes nothing. `opalro setup --preset <name>` switches to another preset: it shows the exact lines it would change in both files, asks `Apply these changes? [y/N]`, and changes them only on a yes. `--yes` skips the question. See [section 5](#5-presets-opalrotoml-and-opalroignore).
 
+A project made with Opalro 0.1 doesn't keep conflicts yet: there, `opalro setup` ends its list with `Upgrade available: conflicts (opalro setup --upgrade)`. `opalro setup --upgrade` says what each new feature allows and what it costs, then asks:
+
+```text
+This version of Opalro can turn on 1 feature in this project:
+  conflicts: a combine can keep conflicts, and you fix them when you choose.
+Once it is on, Opalro 0.1 can't open this project, and opalro undo can't turn it off.
+Turn it on? [y/N] y
+Turned on conflicts: this project can keep conflicts now.
+```
+
+`--yes` answers the question. A project made with this version has every feature from the start, and `opalro setup --upgrade` there says `Nothing to turn on`.
+
 ### `opalro import`
 
 Bring in the Git repository in this folder, with all its history. It runs inside the Git repository's own folder and takes no argument:
@@ -1075,7 +1087,7 @@ opalro undo
 opalro undo --list --all
 ```
 
-Commands that only look (`status`, `changes`, `history`, `show`, `line`, `setup` without `--preset`, `verify`) record nothing. `opalro tidy` isn't a step either: undo doesn't take it back.
+Commands that only look (`status`, `changes`, `history`, `show`, `line`, `setup` without `--preset` or `--upgrade`, `verify`) record nothing. `opalro tidy` and `opalro setup --upgrade` aren't steps either: undo doesn't take them back.
 
 **What undoing does.** Undoing a step puts the lines and your position back as they were before it, and writes back what the step changed in your folder, and only that. Other unsaved work comes along, and undo never writes over it: if it would, undo stops and names the files, and `opalro undo --shelve` sets them aside first. A step that changed no file, such as a save, changes none when undone: its changes show as unsaved again.
 
@@ -1439,7 +1451,7 @@ opalro status --json
 opalro history --json
 ```
 
-A command that would ask (`opalro start`, a big `opalro save`, a save away from a line, `opalro setup --preset`, `opalro line delete` when nothing else holds the line's saves, and moving or deleting a tag with `opalro tag`) stops instead, and its error names the flag that answers the question: `--preset`, `--yes` or `--line`. Without a terminal, the same commands stop the same way even without `--json`.
+A command that would ask (`opalro start`, a big `opalro save`, a save away from a line, `opalro setup --preset` or `--upgrade`, `opalro line delete` when nothing else holds the line's saves, and moving or deleting a tag with `opalro tag`) stops instead, and its error names the flag that answers the question: `--preset`, `--yes` or `--line`. Without a terminal, the same commands stop the same way even without `--json`.
 
 Every command ends with one of three exit codes:
 

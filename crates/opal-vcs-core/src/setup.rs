@@ -81,6 +81,8 @@ pub enum SetupError {
         listed(paths.iter().take(NAMED), paths.len() as u64)
     )]
     InTheWay { paths: Vec<String> },
+    #[error("Opalro asks before turning on a feature, and can't ask here, so nothing was changed.")]
+    UpgradeDeclined,
     #[error(transparent)]
     Switch(#[from] SwitchError),
     #[error(transparent)]
@@ -114,6 +116,9 @@ impl SetupError {
             }
             SetupError::InTheWay { .. } => {
                 Some("Rename or move them out of the way, then run opalro setup again.".to_owned())
+            }
+            SetupError::UpgradeDeclined => {
+                Some("Run it again with --yes to turn it on.".to_owned())
             }
             SetupError::Switch(e) => e.hint(),
             SetupError::Save(e) => e.hint_when_reading(),
@@ -186,6 +191,32 @@ pub fn apply_setup(
     switch::locked(repo, "setup", on_wait, |repo, lock, earlier, _| {
         Ok(write_step(repo, lock, earlier, plan, who, git_excludes))
     })?
+}
+
+/// What `opalro setup --upgrade` did: the features turned on, none when there was nothing to do.
+#[derive(Debug)]
+pub struct Upgraded {
+    pub turned_on: Vec<&'static str>,
+}
+
+/// Turns on every feature this version knows that the project lacks, once `confirm` says yes;
+/// changes nothing if it says no, and says so (`SetupError::UpgradeDeclined`). Not a diary step:
+/// only `format` changes.
+pub fn upgrade(
+    repo: &mut Repository,
+    on_wait: &mut dyn FnMut(&str),
+    confirm: &mut dyn FnMut(&[&'static str]) -> bool,
+) -> Result<Upgraded, SetupError> {
+    let wanted = repo.features_to_turn_on();
+    if wanted.is_empty() {
+        return Ok(Upgraded { turned_on: wanted });
+    }
+    if !confirm(&wanted) {
+        return Err(SetupError::UpgradeDeclined);
+    }
+    let lock = repo.lock_for_change("setup", on_wait)?;
+    let turned_on = repo.turn_on_features(&lock)?;
+    Ok(Upgraded { turned_on })
 }
 
 fn nothing() -> SetupOutcome {

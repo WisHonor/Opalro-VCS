@@ -1445,7 +1445,7 @@ mod tests {
     }
 
     #[test]
-    fn start_and_import_write_feature_chunks() {
+    fn start_and_import_write_both_features() {
         let started = tempfile::tempdir().unwrap();
         Repository::init(started.path(), &who()).unwrap();
         let imported = tempfile::tempdir().unwrap();
@@ -1453,7 +1453,11 @@ mod tests {
         import(imported.path()).unwrap();
         for dir in [started.path(), imported.path()] {
             let format = std::fs::read_to_string(dir.join(".opalro/format")).unwrap();
-            assert_eq!(format, "opalro-repository 1\nhash blake3\nfeature chunks\n");
+            assert_eq!(
+                format,
+                "opalro-repository 1\nhash blake3\nfeature chunks\nfeature conflicts\n"
+            );
+            assert!(Repository::open(dir).unwrap().keeps_conflicts());
         }
     }
 

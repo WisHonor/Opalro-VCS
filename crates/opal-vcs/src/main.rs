@@ -84,12 +84,16 @@ enum Command {
         preset: Option<PresetArg>,
     },
     /// Show the project's rules as Opalro reads them, or change them to a preset's.
+    #[command(group = clap::ArgGroup::new("change").args(["preset", "upgrade"]).multiple(false))]
     Setup {
         /// Show the lines this preset would change, then change them.
         #[arg(long, value_enum, value_name = "PRESET")]
         preset: Option<PresetArg>,
+        /// Turn on the features this version of Opalro knows that this project doesn't use yet.
+        #[arg(long, conflicts_with = "preset")]
+        upgrade: bool,
         /// Make the changes without asking.
-        #[arg(long, requires = "preset")]
+        #[arg(long, requires = "change")]
         yes: bool,
     },
     /// Bring the Git repository in this folder into Opalro, with all its history.
@@ -665,15 +669,19 @@ fn setup_command(
     let Some(preset) = preset else {
         let read = repo.read_rules();
         let block = opal_core::setup::opalroignore_block_lines(repo.root())?;
+        let upgrades = repo.features_to_turn_on();
         let mut warnings = read.warnings();
         warnings.extend(repo.store().warnings());
         if json {
             let mut document = setup_output::rules_json(&read, block);
             document["opalro_json"] = OPALRO_JSON.into();
+            document["upgrades"] = upgrades.into();
             document["warnings"] = output::warnings_json(&warnings);
             return output::print_quietly(&format!("{document}\n"), &warnings);
         }
-        output::print_quietly(&setup_output::rules_shown(&read, block), &warnings)?;
+        let mut text = setup_output::rules_shown(&read, block);
+        text += &setup_output::upgrade_row(&upgrades);
+        output::print_quietly(&text, &warnings)?;
         let e = style::err();
         style::next(&format!(
             "edit opalro.toml or .opalroignore to change a rule, or switch presets with: {}",
@@ -762,6 +770,84 @@ fn setup_command(
         style::changed_your_mind();
     }
     Ok(())
+}
+
+/// `opalro setup --upgrade`: says what each feature allows and costs, asks, then turns them on.
+/// Not a diary step, so there is no "Changed your mind?".
+fn upgrade_command(json: bool, yes: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
+    let repo = opened.insert(with_users_key(Repository::discover(
+        &std::env::current_dir()?,
+    )?));
+    let mut asked = false;
+    let mut confirm = |features: &[&'static str]| {
+        if !json {
+            output::print_out(&setup_output::upgrade_offer(features));
+        }
+        if yes || !style::may_ask() {
+            return yes;
+        }
+        asked = true;
+        let _ = write!(
+            std::io::stderr(),
+            "{} [y/N] ",
+            if features.len() == 1 {
+                "Turn it on?"
+            } else {
+                "Turn them on?"
+            }
+        );
+        answered_yes()
+    };
+    let result = opal_core::setup::upgrade(repo, &mut waiting, &mut confirm);
+    let warnings = repo.store().warnings();
+    let document = |result: &str, features: &[&str]| {
+        json!({
+            "opalro_json": OPALRO_JSON,
+            "result": result,
+            "features": features,
+        })
+    };
+    match result {
+        Ok(done) if done.turned_on.is_empty() => {
+            let text = if json {
+                let mut document = document("nothing", &[]);
+                document["warnings"] = output::warnings_json(&warnings);
+                format!("{document}\n")
+            } else {
+                "Nothing to turn on: this project has every feature this version of Opalro knows.\n"
+                    .to_owned()
+            };
+            output::print_quietly(&text, &warnings)
+        }
+        Ok(done) => {
+            let text = if json {
+                let mut document = document("upgraded", &done.turned_on);
+                document["warnings"] = output::warnings_json(&warnings);
+                format!("{document}\n")
+            } else {
+                setup_output::upgraded(&done.turned_on)
+            };
+            output::print_done(&text, &warnings)
+        }
+        Err(SetupError::UpgradeDeclined) if asked => {
+            output::print_quietly("\nNothing was changed.\n", &warnings)
+        }
+        Err(e @ SetupError::UpgradeDeclined) => {
+            let failure = Failure::from(e);
+            if !json {
+                return Err(failure);
+            }
+            let wanted = document("nothing", &repo.features_to_turn_on());
+            let document = output::failed_document(wanted, &failure, &warnings);
+            output::print_out(&format!("{document}\n"));
+            let in_document = Failure {
+                printed: true,
+                ..failure
+            };
+            output::ended(Some(in_document), String::new, &warnings, None)
+        }
+        Err(e) => Err(e.into()),
+    }
 }
 
 /// Asks in the terminal whether to apply a preset's changes. Only a yes is one.
@@ -3016,7 +3102,10 @@ fn main() -> ExitCode {
     let mut opened = None;
     let result = match cli.command {
         Command::Start { preset } => start(cli.json, preset.map(Preset::from), &mut opened),
-        Command::Setup { preset, yes } => {
+        Command::Setup {
+            upgrade: true, yes, ..
+        } => upgrade_command(cli.json, yes, &mut opened),
+        Command::Setup { preset, yes, .. } => {
             setup_command(cli.json, preset.map(Preset::from), yes, &mut opened)
         }
         Command::Import => import(cli.json, &mut opened),

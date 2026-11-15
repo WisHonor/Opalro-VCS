@@ -228,6 +228,10 @@ pub fn examples(command: &str) -> &'static [(&'static str, &'static str)] {
                 "opalro setup --preset code --yes",
                 "Make those changes without asking",
             ),
+            (
+                "opalro setup --upgrade",
+                "Turn on the features this version of Opalro knows that this project doesn't use yet",
+            ),
         ],
         "import" => &[(
             "opalro import",

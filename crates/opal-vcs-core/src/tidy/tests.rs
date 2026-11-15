@@ -1295,7 +1295,9 @@ fn an_old_pack_named_like_a_new_one_in_other_letters_is_never_removed() {
 #[test]
 fn tidy_still_stops_at_a_conflict_record() {
     for young in [false, true] {
-        let (dir, mut repo) = project(50);
+        let (dir, repo) = project(50);
+        drop(repo);
+        let mut repo = crate::test_support::without_conflicts_feature(dir.path());
         save_text(dir.path(), &mut repo, "one", 40);
         let (entry, _) = crash_leftover(&mut repo);
         let before = pack_names(&repo);

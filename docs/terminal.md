@@ -122,6 +122,7 @@ A question is asked only when stdin and stderr are both terminals and `--json` w
 | A save away from a line | `Name a new line for this save:` | `--line <name>` | stops, saving nothing |
 | Which preset (`opalro start`) | `Choice [N]:` | `--preset <name>` | stops, starting nothing |
 | A preset switch (`opalro setup --preset`) | `Apply these changes? [y/N]` | `--yes` | stops after showing the changes |
+| Turning on features (`opalro setup --upgrade`) | `Turn it on? [y/N]` (`Turn them on? [y/N]` for more than one) | `--yes` | stops after saying what they cost, changing nothing |
 | A line no other line or tag holds (`opalro line delete`) | `Delete it? [y/N]` | `--yes` | stops, deleting nothing |
 | Moving a tag that is at another save (`opalro tag <name>`) | `Move it to save <id> "<message>"? [y/N]` | `--yes` | stops, moving nothing |
 | Deleting a tag (`opalro tag --delete`) | `Delete tag <tag>, at save <id> "<message>"? [y/N]` | `--yes` | stops, deleting nothing |
@@ -168,6 +169,14 @@ A wrong answer says `Answer 1, 2 or 3, or a preset's name: code, game or custom.
 | Applied | `Switched to Code settings: made opalro.toml, changed .opalroignore.` | | `Changed your mind? opalro undo` |
 | Every file changed between the plan and the write | `Nothing was written: the rule files changed while Opalro worked. Run opalro setup --preset code again.` (exit code 0) | the `changed_since_plan` warning names the files; the step is in the undo diary all the same, as for any switch that left files alone, and an `opalro undo` of it stops rather than write over the files as they are now | |
 | No terminal or `--json`, no `--yes` | the preview, then `error: Nothing was changed: Opalro can't ask whether to apply these changes without a terminal.` With `--json`, there is no preview, and the document's `error` says it instead, ending `… these changes with --json.` | `hint: If they are what you want, run: opalro setup --preset <name> --yes` | |
+| No flag, a feature to turn on | the same outcome line | the same rows, then an empty line and `Upgrade available: conflicts (opalro setup --upgrade)` | the same |
+| `--upgrade`, something to turn on | `This version of Opalro can turn on 1 feature in this project:` | `  conflicts: a combine can keep conflicts, and you fix them when you choose.` (one line per feature), then `Once it is on, Opalro 0.1 can't open this project, and opalro undo can't turn it off.`; then `Turn it on? [y/N]` on stderr (`Turn them on? [y/N]` for more than one) | |
+| `--upgrade`, answered no | `Nothing was changed.` | | |
+| `--upgrade`, turned on | `Turned on conflicts: this project can keep conflicts now.` | | |
+| `--upgrade`, nothing to turn on | `Nothing to turn on: this project has every feature this version of Opalro knows.` (exit code 0) | | |
+| `--upgrade`, no terminal or `--json`, no `--yes` | what it would turn on and what that costs, then `error: Opalro asks before turning on a feature, and can't ask here, so nothing was changed.` With `--json`, the document's `error` says it instead | `hint: Run it again with --yes to turn it on.` | |
+
+`--upgrade` rewrites `.opalro/format` under the project's lock; it is not a step in the diary, so there is no `Changed your mind?` line. `--upgrade` and `--preset` together, or `--yes` with neither, is a command line Opalro can't use (exit code 2).
 
 The patterns of the `Lockable` and `No conflict markers` rows are separated by spaces; one that holds a space of any kind or a double quote is between double quotes, as `opalro.toml` writes it, with `\"` and `\\` for a double quote and a backslash inside them (`"My Art/*.psd" *.png`). Problems in `opalro.toml` come as `warning:` lines after the list; among the parts passed over, a pattern that holds a line break (`rule[N].files[M]: a pattern can't hold a line break, so it matches no file`) and a rule whose patterns all start with `!` (`rule[N]: every pattern starts with !, so the rule matches no file`). The engine's refusals (a rule file that is a link or a folder, one over 1 MiB, one changed since the preview) are errors with their own hints.
 

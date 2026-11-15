@@ -751,6 +751,14 @@ pub fn add_conflict(pack: &mut PackSet, record: &Record) -> Id {
         .unwrap()
 }
 
+/// The `format` of a project v0.1 made, which doesn't keep conflicts.
+pub const V01_FORMAT: &str = "opalro-repository 1\nhash blake3\nfeature chunks\n";
+
+/// Makes the project at `root` one as v0.1 made it: its `format` lists `chunks` only.
+pub fn without_conflicts_feature(root: &Path) {
+    std::fs::write(root.join(".opalro/format"), V01_FORMAT).unwrap();
+}
+
 /// Stores `record` as it is, however it decodes, as a chunk list of the file `file` of `size`
 /// bytes.
 pub fn add_list_record(pack: &mut PackSet, file: Id, size: u64, record: Vec<u8>) {

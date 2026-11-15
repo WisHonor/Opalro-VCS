@@ -23,6 +23,16 @@ pub(crate) fn after_head(repo: &Repository) -> bool {
         .any(|w| after.contains(&w.kind))
 }
 
+/// The project at `root` reopened with the `format` v0.1 wrote: one that doesn't keep conflicts.
+#[allow(clippy::unwrap_used)]
+pub(crate) fn without_conflicts_feature(root: &Path) -> Repository {
+    let format = "opalro-repository 1\nhash blake3\nfeature chunks\n";
+    std::fs::write(root.join(".opalro/format"), format).unwrap();
+    let repo = Repository::open(root).unwrap();
+    assert!(!repo.keeps_conflicts());
+    repo
+}
+
 /// One tag and one server line, both at a made-up save.
 pub(crate) fn sample_records() -> (TagList, ServerLines) {
     let save = Id([0x5a; 32]);

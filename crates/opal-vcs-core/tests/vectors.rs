@@ -1052,27 +1052,48 @@ struct FormatVector {
     hex: String,
 }
 
-#[test]
-fn the_format_file_matches_its_vector() {
-    use opal_core::repo::{Repository, parse_format};
+/// The `format` vector named `name`, its text checked against its bytes.
+fn format_vector(name: &str) -> FormatVector {
     let path = format!("{}/tests/vectors/format.json", env!("CARGO_MANIFEST_DIR"));
     let vectors: Vec<FormatVector> =
         serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-    assert_eq!(vectors.len(), 1);
-    let v = &vectors[0];
-    let bytes = unhex(&v.hex);
-    assert_eq!(bytes, v.text.as_bytes(), "{}", v.name);
-    // It says the store may hold chunk lists, and nothing more.
+    assert_eq!(vectors.len(), 2);
+    let v = vectors.into_iter().find(|v| v.name == name).unwrap();
+    assert_eq!(unhex(&v.hex), v.text.as_bytes(), "{}", v.name);
+    v
+}
+
+#[test]
+fn start_writes_the_format_vector() {
+    use opal_core::repo::{Repository, parse_format};
+    let v = format_vector("chunks-and-conflicts");
     let read = parse_format(&v.text).unwrap();
-    assert_eq!(read.features.into_iter().collect::<Vec<_>>(), ["chunks"]);
+    assert_eq!(
+        read.features.into_iter().collect::<Vec<_>>(),
+        ["chunks", "conflicts"]
+    );
     // `start` writes exactly these bytes.
     let dir = tempfile::tempdir().unwrap();
     drop(Repository::init(dir.path(), &person()).unwrap());
     let format = dir.path().join(".opalro").join("format");
     assert_eq!(hex(&std::fs::read(&format).unwrap()), v.hex, "{}", v.name);
-    // A project whose format file holds them opens.
-    std::fs::write(&format, &bytes).unwrap();
-    Repository::open(dir.path()).unwrap();
+    assert!(Repository::open(dir.path()).unwrap().keeps_conflicts());
+}
+
+/// A project v0.1 made: its store may hold chunk lists, and nothing more.
+#[test]
+fn a_v01_format_still_opens() {
+    use opal_core::repo::{Repository, parse_format};
+    let v = format_vector("start");
+    let read = parse_format(&v.text).unwrap();
+    assert_eq!(read.features.into_iter().collect::<Vec<_>>(), ["chunks"]);
+    let dir = tempfile::tempdir().unwrap();
+    drop(Repository::init(dir.path(), &person()).unwrap());
+    let format = dir.path().join(".opalro").join("format");
+    std::fs::write(&format, unhex(&v.hex)).unwrap();
+    let repo = Repository::open(dir.path()).unwrap();
+    assert!(!repo.keeps_conflicts());
+    assert_eq!(repo.features_to_turn_on(), ["conflicts"]);
 }
 
 #[derive(Deserialize)]

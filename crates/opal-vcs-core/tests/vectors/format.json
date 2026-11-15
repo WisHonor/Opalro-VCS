@@ -1,3 +1,4 @@
 [
-  {"name": "start", "text": "opalro-repository 1\nhash blake3\nfeature chunks\n", "hex": "6f70616c726f2d7265706f7369746f727920310a6861736820626c616b65330a66656174757265206368756e6b730a"}
+  {"name": "start", "text": "opalro-repository 1\nhash blake3\nfeature chunks\n", "hex": "6f70616c726f2d7265706f7369746f727920310a6861736820626c616b65330a66656174757265206368756e6b730a"},
+  {"name": "chunks-and-conflicts", "text": "opalro-repository 1\nhash blake3\nfeature chunks\nfeature conflicts\n", "hex": "6f70616c726f2d7265706f7369746f727920310a6861736820626c616b65330a66656174757265206368756e6b730a6665617475726520636f6e666c696374730a"}
 ]

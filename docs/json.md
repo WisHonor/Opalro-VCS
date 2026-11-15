@@ -74,7 +74,20 @@ A folder that already has an `opalro.toml` is judged first: there `opalro start`
 | `ask_before_saving_files_over` | number | A save that adds more new files than this asks first. |
 | `rules` | list | The file's `[[rule]]` tables that Opalro could read, in order: `files` (list of string), and `lockable` and `conflict_markers`, each `true`, `false`, or `null` where the rule doesn't say. |
 | `ignore_block_lines` | number or `null` | How many lines the preset's block of `.opalroignore` holds, its two mark lines not counted. `null` when the file has no block. |
+| `upgrades` | list of string | The features this version of Opalro knows that the project doesn't use yet, which `opalro setup --upgrade` turns on: `"conflicts"`. `[]` when there are none. |
 | `warnings` | list | See §4: `rules_file_skipped` and `rules_ignored` tell what in `opalro.toml` Opalro passed over. |
+
+`opalro setup --upgrade` turns on, with `--yes`, the features this version of Opalro knows that the project doesn't use yet ([decision 178](decisions/178-the-conflicts-feature.md)). It rewrites `.opalro/format`; it is not a step in the diary, and `opalro undo` doesn't take it back. Once `conflicts` is on, Opalro 0.1 can't open the project.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `opalro_json` | number | `1` |
+| `result` | string | `"upgraded"` when the features were turned on; `"nothing"` when nothing was changed: there was nothing to turn on, or `--yes` wasn't given. |
+| `features` | list of string | The features turned on, or that would have been without `--yes`: `"conflicts"`. `[]` when the project already has every feature this version knows (the exit code is then 0). |
+| `warnings` | list | See §4. |
+| `error` | object | Only without `--yes`, when there is something to turn on: `--json` can't ask, so nothing is changed, the exit code is 1, and the hint names `--yes`. |
+
+`--upgrade` and `--preset` can't be given together, and `--yes` needs one of them: either is a command line Opalro can't use (exit code 2).
 
 `opalro setup --preset <name>` works out what the preset's rule files would be, and with `--yes` writes them as one step that `opalro undo` takes back:
 

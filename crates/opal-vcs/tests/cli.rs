@@ -2906,7 +2906,7 @@ const COMMANDS: [(&str, &[&str]); 19] = [
     ("discard", &[]),
     ("show", &[]),
     ("start", &["--preset"]),
-    ("setup", &["--preset", "--yes"]),
+    ("setup", &["--preset", "--upgrade", "--yes"]),
     ("import", &[]),
     ("tidy", &[]),
     ("verify", &[]),

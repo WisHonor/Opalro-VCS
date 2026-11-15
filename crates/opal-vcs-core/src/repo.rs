@@ -29,9 +29,25 @@ use crate::store::{Store, StoreError, is_damage, is_unreadable_record};
 use crate::text::escape;
 use crate::warning::{self, Warning};
 
-pub const FORMAT_TEXT: &str = "opalro-repository 1\nhash blake3\nfeature chunks\n";
+/// What `start` and `import` write: `format_text` of every feature.
+pub const FORMAT_TEXT: &str =
+    "opalro-repository 1\nhash blake3\nfeature chunks\nfeature conflicts\n";
 /// The store may hold chunk lists, which builds from before them can't read safely.
 const CHUNKS: &str = "chunks";
+/// The store may hold conflict records, and listings conflict entries.
+pub const CONFLICTS: &str = "conflicts";
+/// Every feature this version of Opalro knows, in the order `format` lists them.
+pub const FEATURES: [&str; 2] = [CHUNKS, CONFLICTS];
+
+/// `.opalro/format` for a project with `features`: the two first lines, then one `feature` line
+/// for each, in `FEATURES`' order.
+pub(crate) fn format_text(features: &BTreeSet<String>) -> String {
+    let mut text = "opalro-repository 1\nhash blake3\n".to_owned();
+    for feature in FEATURES.iter().filter(|f| features.contains(**f)) {
+        text += &format!("feature {feature}\n");
+    }
+    text
+}
 
 /// What went wrong with a project. A path or detail in a message may hold text from outside Opalro
 /// (the project folder's name, a hostile `.opalro/format`), so it is shown escaped.
@@ -792,7 +808,7 @@ pub fn parse_format(text: &str) -> Result<FormatInfo, RepoError> {
             .strip_prefix("feature ")
             .filter(|f| is_word(f))
             .ok_or_else(damaged_format)?;
-        if feature != CHUNKS {
+        if !FEATURES.contains(&feature) {
             return Err(RepoError::NewerFormat {
                 detail: format!("the feature \"{feature}\""),
             });
@@ -1261,20 +1277,73 @@ impl Repository {
         entry: &DiaryEntry,
     ) -> Result<Id, RepoError> {
         let id = self.move_head(lock, packs, entry)?;
-        self.write_format(lock)?;
+        let features = self.format.features.clone();
+        self.write_format(lock, &features)?;
         // Only once it is a project, so a stopped merge never leaves it unfinished.
         crate::merge::merge_after_commit(self, lock);
         Ok(id)
     }
 
-    /// Replaces `.opalro/format` with this version's. It knows no feature but `chunks`, so that
-    /// adds the one line a project of an older build can lack.
-    fn write_format(&mut self, _lock: &ChangeLock) -> Result<(), RepoError> {
+    /// Replaces `.opalro/format` with one listing `features`, then reads it back.
+    fn write_format(
+        &mut self,
+        _lock: &ChangeLock,
+        features: &BTreeSet<String>,
+    ) -> Result<(), RepoError> {
         let (held, name) = (&self.held, "format");
-        write_atomic(&held.tmp, &held.opalro, name, FORMAT_TEXT.as_bytes())
-            .map_err(|e| cant_write(self.opalro.join(name), e))?;
-        self.format = parse_format(FORMAT_TEXT)?;
+        write_atomic(
+            &held.tmp,
+            &held.opalro,
+            name,
+            format_text(features).as_bytes(),
+        )
+        .map_err(|e| cant_write(self.opalro.join(name), e))?;
+        self.format = self.read_format()?;
         Ok(())
+    }
+
+    /// `.opalro/format` as it is on disk now.
+    fn read_format(&self) -> Result<FormatInfo, RepoError> {
+        let (name, max) = ("format", safe_fs::MAX_FORMAT_BYTES);
+        let shown = self.opalro.join(name);
+        let bytes = safe_fs::read_capped_in(&self.held.opalro, OsStr::new(name), &shown, max)
+            .map_err(refused)?;
+        let text = String::from_utf8(bytes).map_err(|_| damaged("the format file is not text"))?;
+        parse_format(&text)
+    }
+
+    /// Whether this project keeps conflicts: its `format` lists `feature conflicts`. The only
+    /// place that asks.
+    #[must_use]
+    pub fn keeps_conflicts(&self) -> bool {
+        self.format.features.contains(CONFLICTS)
+    }
+
+    /// The features this version knows that the project doesn't list, in `FEATURES`' order.
+    #[must_use]
+    pub fn features_to_turn_on(&self) -> Vec<&'static str> {
+        FEATURES
+            .into_iter()
+            .filter(|f| !self.format.features.contains(*f))
+            .collect()
+    }
+
+    /// Writes `format` with those features added, under `lock`, by the crash-safe write every
+    /// other file gets, and reads it back. Gives what it turned on.
+    pub(crate) fn turn_on_features(
+        &mut self,
+        lock: &ChangeLock,
+    ) -> Result<Vec<&'static str>, RepoError> {
+        // Another command may have changed it since the project was opened.
+        self.format = self.read_format()?;
+        let new = self.features_to_turn_on();
+        if new.is_empty() {
+            return Ok(new);
+        }
+        let mut features = self.format.features.clone();
+        features.extend(new.iter().map(|f| (*f).to_owned()));
+        self.write_format(lock, &features)?;
+        Ok(new)
     }
 
     /// Opens the project that holds `start`: the nearest folder, from `start` up, that holds one.
@@ -1664,8 +1733,11 @@ impl Repository {
         fsio::write_unflushed(&held.tmp, &held.state, name, info.as_bytes())
             .map_err(|e| cant_write(self.state_dir().join(name), e))?;
         // Before anything is stored: builds from before chunk lists must refuse this project now.
+        // Every other feature the project lists stays, and none but `chunks` is added.
         if !self.format.features.contains(CHUNKS) {
-            self.write_format(&lock)?;
+            let mut features = self.format.features.clone();
+            features.insert(CHUNKS.to_owned());
+            self.write_format(&lock, &features)?;
         }
         // Another command may have committed since this handle was opened. A lost head stops
         // the command at `current`, unless it is the `undo --to` that picks one up.
@@ -1775,16 +1847,27 @@ mod tests {
 
     /// The format Opalro wrote before chunk lists.
     const OLDER_FORMAT: &str = "opalro-repository 1\nhash blake3\n";
+    /// The format of a project v0.1 made.
+    const V01_FORMAT: &str = "opalro-repository 1\nhash blake3\nfeature chunks\n";
 
     #[test]
     fn format_file() {
         let chunks = BTreeSet::from(["chunks".to_owned()]);
+        let both = BTreeSet::from(["chunks".to_owned(), "conflicts".to_owned()]);
         assert_eq!(
             FORMAT_TEXT,
-            "opalro-repository 1\nhash blake3\nfeature chunks\n"
+            "opalro-repository 1\nhash blake3\nfeature chunks\nfeature conflicts\n"
         );
-        assert_eq!(parse_format(FORMAT_TEXT).unwrap().features, chunks);
+        assert_eq!(format_text(&both), FORMAT_TEXT);
+        assert_eq!(parse_format(FORMAT_TEXT).unwrap().features, both);
+        // A project v0.1 made still opens.
+        assert_eq!(parse_format(V01_FORMAT).unwrap().features, chunks);
+        assert_eq!(format_text(&chunks), V01_FORMAT);
         assert!(parse_format(OLDER_FORMAT).unwrap().features.is_empty());
+        assert_eq!(format_text(&BTreeSet::new()), OLDER_FORMAT);
+        // In `FEATURES`' order, whatever order the file gave them in.
+        let reordered = "opalro-repository 1\nhash blake3\nfeature conflicts\nfeature chunks\n";
+        assert_eq!(parse_format(reordered).unwrap().features, both);
         for (text, needle) in [
             ("opalro-repository 2\nhash blake3\n", "opalro-repository 2"),
             ("opalro-repository 1\nhash sha256\n", "sha256"),
@@ -2032,6 +2115,12 @@ mod tests {
         let dir = tempdir();
         drop(Repository::init(dir.path(), &entry(0).who).unwrap());
         let format = format_path(dir.path());
+        // A project `begin` made already lists both, and keeps its `format` as it is.
+        assert_eq!(std::fs::read_to_string(&format).unwrap(), FORMAT_TEXT);
+        let mut repo = Repository::open(dir.path()).unwrap();
+        drop(repo.lock_for_change("save", &mut |_| {}).unwrap());
+        assert_eq!(std::fs::read_to_string(&format).unwrap(), FORMAT_TEXT);
+        drop(repo);
         std::fs::write(&format, OLDER_FORMAT).unwrap();
         let mut repo = Repository::open(dir.path()).unwrap();
         let packs = || {
@@ -2041,7 +2130,9 @@ mod tests {
         };
         let before = packs();
         let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
-        assert_eq!(std::fs::read_to_string(&format).unwrap(), FORMAT_TEXT);
+        // `chunks` only: `conflicts` comes only when asked for.
+        assert_eq!(std::fs::read_to_string(&format).unwrap(), V01_FORMAT);
+        assert!(!repo.keeps_conflicts());
         assert_eq!(packs(), before);
         let (head, mut next) = repo.current().unwrap();
         next.parent = Some(head);
@@ -2051,7 +2142,76 @@ mod tests {
         let mut reopened = Repository::open(dir.path()).unwrap();
         assert!(reopened.format.features.contains("chunks"));
         drop(reopened.lock_for_change("save", &mut |_| {}).unwrap());
+        assert_eq!(std::fs::read_to_string(&format).unwrap(), V01_FORMAT);
+    }
+
+    #[test]
+    fn the_chunks_step_keeps_conflicts() {
+        let dir = tempdir();
+        drop(Repository::init(dir.path(), &entry(0).who).unwrap());
+        let format = format_path(dir.path());
+        std::fs::write(
+            &format,
+            "opalro-repository 1\nhash blake3\nfeature conflicts\n",
+        )
+        .unwrap();
+        let mut repo = Repository::open(dir.path()).unwrap();
+        let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
+        let (head, mut next) = repo.current().unwrap();
+        next.parent = Some(head);
+        let stored = repo.new_packs().unwrap();
+        repo.commit(&lock, stored, &next).unwrap();
+        drop(lock);
         assert_eq!(std::fs::read_to_string(&format).unwrap(), FORMAT_TEXT);
+        assert!(repo.keeps_conflicts());
+        assert!(Repository::open(dir.path()).unwrap().keeps_conflicts());
+    }
+
+    #[test]
+    fn a_project_listing_conflicts_opens_and_keeps_them() {
+        let dir = tempdir();
+        drop(Repository::init(dir.path(), &entry(0).who).unwrap());
+        let repo = Repository::open(dir.path()).unwrap();
+        assert!(repo.format.features.contains(CONFLICTS));
+        assert!(repo.keeps_conflicts());
+        assert!(repo.features_to_turn_on().is_empty());
+    }
+
+    #[test]
+    fn another_feature_is_still_newer() {
+        let text =
+            "opalro-repository 1\nhash blake3\nfeature chunks\nfeature conflicts\nfeature deltas\n";
+        let err = parse_format(text).unwrap_err();
+        assert!(matches!(err, RepoError::NewerFormat { .. }), "{err:?}");
+        assert!(err.to_string().contains("deltas"), "{err}");
+    }
+
+    #[test]
+    fn keeps_conflicts_is_the_format_line() {
+        let dir = tempdir();
+        drop(Repository::init(dir.path(), &entry(0).who).unwrap());
+        assert!(Repository::open(dir.path()).unwrap().keeps_conflicts());
+        std::fs::write(format_path(dir.path()), V01_FORMAT).unwrap();
+        let repo = Repository::open(dir.path()).unwrap();
+        assert!(!repo.keeps_conflicts());
+        assert_eq!(repo.features_to_turn_on(), [CONFLICTS]);
+    }
+
+    #[test]
+    fn turning_on_features_writes_and_reads_back() {
+        let dir = tempdir();
+        drop(Repository::init(dir.path(), &entry(0).who).unwrap());
+        let format = format_path(dir.path());
+        std::fs::write(&format, V01_FORMAT).unwrap();
+        let mut repo = Repository::open(dir.path()).unwrap();
+        let lock = repo.lock_for_change("setup", &mut |_| {}).unwrap();
+        assert_eq!(repo.turn_on_features(&lock).unwrap(), [CONFLICTS]);
+        assert_eq!(std::fs::read_to_string(&format).unwrap(), FORMAT_TEXT);
+        assert!(repo.keeps_conflicts());
+        // Once on, there is nothing more to turn on, and nothing is written.
+        assert!(repo.turn_on_features(&lock).unwrap().is_empty());
+        drop(lock);
+        assert!(Repository::open(dir.path()).unwrap().keeps_conflicts());
     }
 
     #[test]
