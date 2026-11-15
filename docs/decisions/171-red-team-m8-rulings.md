@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 8, its red-team session, RT19)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 164](164-where-two-lines-parted.md) (when a combine is refused for too many starting points); [decision 168](168-moves-in-saves-and-in-combines.md) (how many move notes a combine checks); [decision 170](170-what-building-milestone-8-refined.md) (the limit of 16 was applied to the walk's candidates); [decision 160](160-whether-a-save-is-in-anothers-history.md) (what a walk over history reads of a save)
+- **Refined by:** [decision 172](172-red-team-m8-session-2-rulings.md) (the second session: the fixes held; one finding of its own, about rules that can't be read)
 
 ## Context
 
