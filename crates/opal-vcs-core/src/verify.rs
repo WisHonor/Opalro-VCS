@@ -767,7 +767,8 @@ enum Finding {
     },
     /// The save passes a limit every reader keeps: which, in the readers' words.
     TooBig { save: Id, why: String },
-    /// A conflict whose first term or own version is a folder holding a conflict below it.
+    /// A conflict that stands as a folder holding a conflict below it. Only what it stands as is
+    /// looked at (its own version, else its first term): the others never stand in the folder.
     NestedConflict { record: Id },
 }
 
@@ -1035,7 +1036,11 @@ fn told_needs(v: &mut Verified, look: &Look, found: &Findings) -> HashMap<usize,
                 } else {
                     "It isn't in any pack Opalro could read."
                 };
-                (ProblemKind::ObjectMissing, *id, message.to_owned())
+                let message = match look.noted.versions.get(id) {
+                    Some(version) => format!("{message} A conflict names it as {version}."),
+                    None => message.to_owned(),
+                };
+                (ProblemKind::ObjectMissing, *id, message)
             }
             Finding::Size {
                 listing,
@@ -1104,8 +1109,10 @@ fn name_needers(v: &mut Verified, look: &Look, signed: bool, names: &HashMap<usi
             && needs
             && look.kept.contains(&object)
         {
-            // A chunk is needed where its file is.
-            let at = look.noted.via.get(&object).copied().unwrap_or(object);
+            // A chunk is needed where its file is, and a conflict's version at the conflict's
+            // place, so a chunk of such a version goes two steps.
+            let via = |id: Id| look.noted.via.get(&id).copied().unwrap_or(id);
+            let at = via(via(object));
             wanted.entry(at).or_default().push(i);
         }
     }

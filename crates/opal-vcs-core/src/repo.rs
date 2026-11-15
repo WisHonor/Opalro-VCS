@@ -142,13 +142,13 @@ pub enum RepoError {
     )]
     OpalName { save: Option<Id>, current: bool },
     /// `tidy` can't tell what pack `path` keeps: `why` it can't open, read or check it, or a chunk
-    /// list in it, or `None` when it holds a conflict record, which this version doesn't follow.
+    /// list in it, or `None` when it holds a conflict record in a project that doesn't keep them.
     #[error(
         "Opalro can't tidy this project: pack {} {}.",
         escape(&path.display().to_string(), false),
         escape(
             why.as_deref()
-                .unwrap_or("holds a conflict record, which this version of Opalro doesn't follow"),
+                .unwrap_or("holds a conflict record, and this project isn't set to keep conflicts"),
             false
         )
     )]
@@ -283,8 +283,9 @@ impl RepoError {
                      this one."
                 }
                 RepoError::CantTidy { why: None, .. } => {
-                    "Nothing was removed, and the project works as before. A version of Opalro that \
-                     follows them can tidy it."
+                    "Nothing was removed, and the project works as before. opalro verify checks the \
+                     project; opalro setup --upgrade lets it keep conflicts, after which tidy \
+                     follows them."
                 }
                 RepoError::CantTidy { .. } => {
                     "Nothing was removed. Check the pack's permissions. If it is damaged for good, \

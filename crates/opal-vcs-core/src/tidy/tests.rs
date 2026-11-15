@@ -1323,10 +1323,12 @@ fn tidy_still_stops_at_a_conflict_record() {
             Err(e @ RepoError::CantTidy { .. }) => {
                 let said = e.to_string();
                 assert!(said.contains(&planted), "{said}");
-                assert!(said.contains("a conflict record"), "{said}");
+                let words =
+                    "holds a conflict record, and this project isn't set to keep conflicts.";
+                assert!(said.ends_with(words), "{said}");
                 let hint = e.hint().unwrap();
-                assert!(hint.starts_with("Nothing was removed"), "{hint}");
-                assert!(hint.contains("follows them"), "{hint}");
+                let want = "Nothing was removed, and the project works as before. opalro verify checks the project; opalro setup --upgrade lets it keep conflicts, after which tidy follows them.";
+                assert_eq!(hint, want);
             }
             other => panic!("young: {young}: {other:?}"),
         }
@@ -2004,12 +2006,35 @@ fn tidy_frees_a_record_and_its_versions_once_no_save_holds_it() {
 
 #[test]
 fn a_record_that_cant_be_read_stops_tidy_as_damage_naming_it() {
+    stops_as_damage(Some(b"not a conflict record".to_vec()), "");
+}
+
+#[test]
+fn a_record_over_16_kib_stops_tidy_as_damage_naming_it() {
+    let mut bytes = Record {
+        terms: vec![None; 3],
+        own: None,
+    }
+    .encode();
+    bytes.resize(crate::conflict::MAX_RECORD_BYTES as usize + 1, 0);
+    stops_as_damage(Some(bytes), "16384");
+}
+
+#[test]
+fn a_missing_record_stops_tidy_as_damage_naming_it() {
+    stops_as_damage(None, "");
+}
+
+/// Plants a save whose only entry is a conflict naming `bytes` stored as a record, or a record
+/// no pack holds; `tidy` must stop as damage naming it, saying `also`, and remove nothing.
+fn stops_as_damage(bytes: Option<Vec<u8>>, also: &str) {
     let (_dir, mut repo) = project(50);
     let mut planted = None;
     plant_root(&mut repo, |packs| {
-        let id = packs
-            .add_record(ObjectKind::Conflict, b"not a conflict record")
-            .unwrap();
+        let id = match &bytes {
+            Some(bytes) => packs.add_record(ObjectKind::Conflict, bytes).unwrap(),
+            None => hash_content(b"no record"),
+        };
         planted = Some(id);
         many(packs, 1, EntryKind::Conflict, id, 0)
     });
@@ -2026,10 +2051,74 @@ fn a_record_that_cant_be_read_stops_tidy_as_damage_naming_it() {
                 said.contains(&format!("conflict record {record}")),
                 "{said}"
             );
+            assert!(said.contains(also), "{said}");
         }
         other => panic!("{other:?}"),
     }
     assert_eq!(pack_names(&repo), before);
+}
+
+/// A record kept by `keep` and by nothing else: `tidy` keeps it and its version, reading it once.
+fn kept_and_read_once(keep: impl FnOnce(&mut Repository, Id)) {
+    let (_dir, mut repo) = project(50);
+    let text = b"named by the conflict
+";
+    let record = plant_conflict(&mut repo, |packs| {
+        let mine = packs.add_content(text).unwrap();
+        Record {
+            terms: vec![term(EntryKind::File, mine, text.len() as u64), None, None],
+            own: None,
+        }
+    });
+    keep(&mut repo, record);
+    age_packs(&repo, 48);
+    let asked = crate::store::counted::conflicts();
+    tidied(&mut repo);
+    assert_eq!(crate::store::counted::conflicts(), asked + 1);
+    assert!(reads(&repo, &record, ObjectKind::Conflict));
+    assert!(reads(&repo, &hash_content(text), ObjectKind::Content));
+}
+
+#[test]
+fn a_record_two_saves_hold_is_kept_and_read_once() {
+    kept_and_read_once(|repo, record| {
+        plant_root(repo, |packs| {
+            let other = many(packs, 1, EntryKind::File, hash_content(b"x"), 1);
+            let c = Entry {
+                name: "again".into(),
+                kind: EntryKind::Conflict,
+                id: record,
+                size: 0,
+            };
+            let d = Entry {
+                name: "d".into(),
+                kind: EntryKind::Folder,
+                id: other,
+                size: 0,
+            };
+            add_listing(packs, vec![c, d]).0
+        });
+    });
+}
+
+#[test]
+fn a_record_only_a_shelf_holds_is_kept_and_read_once() {
+    kept_and_read_once(|repo, _| {
+        let (_, entry) = repo.current().unwrap();
+        let shelved = tip(repo);
+        let before = repo.store().save(&shelved, false).unwrap().parents[0];
+        // Forty days ago the line went back, and the save with the conflict went on a shelf.
+        commit(repo, |e| {
+            e.who = days_ago(40);
+            e.state.lines = entry.state.lines.clone();
+            for at in e.state.lines.values_mut() {
+                if *at == shelved {
+                    *at = before;
+                }
+            }
+            e.state.shelves = vec![("1".into(), shelved)];
+        });
+    });
 }
 
 #[test]

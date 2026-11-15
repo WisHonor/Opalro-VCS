@@ -1,7 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use super::*;
 use crate::chunks::{Chunk, ChunkList};
-use crate::conflict::{Record, Term};
+use crate::conflict::{Own, Record, Term};
 use crate::diary::{Action, FolderChange};
 use crate::history::tip_of;
 use crate::id::hash_content;
@@ -1292,9 +1292,16 @@ fn verify_finds_a_term_that_is_missing() {
     plant_conflict(&mut repo, |_| {
         three(term(EntryKind::File, absent, 10), None)
     });
+    let save = tip(&repo);
     let v = checked(&repo);
     assert_eq!(kinds(&v), [ProblemKind::ObjectMissing], "{:?}", v.problems);
-    assert_eq!(v.problems[0].object, Some(absent));
+    let p = &v.problems[0];
+    assert_eq!(p.object, Some(absent));
+    assert_eq!(
+        p.message,
+        "It isn't in any pack. A conflict names it as your version."
+    );
+    assert_eq!(p.needed_by, Some((save, "c".to_owned())));
 }
 
 #[test]
@@ -1311,7 +1318,7 @@ fn verify_finds_a_term_of_the_wrong_size() {
     assert_eq!(p.object, Some(record));
     assert_eq!(
         p.message,
-        "It gives version 1 as 999 bytes, but what is stored for it is 6 bytes."
+        "It gives your version as 999 bytes, but what is stored for it is 6 bytes."
     );
     assert_eq!(p.needed_by, Some((save, "c".to_owned())));
 }
@@ -1328,13 +1335,15 @@ fn verify_finds_a_term_of_another_kind() {
         listing = Some(id);
         three(None, term(EntryKind::File, id, 1))
     });
+    let save = tip(&repo);
     let v = checked(&repo);
     assert_eq!(kinds(&v), [ProblemKind::ObjectMissing], "{:?}", v.problems);
     assert_eq!(v.problems[0].object, listing);
     assert_eq!(
         v.problems[0].message,
-        "It is stored, but as another kind of object than what needs it."
+        "It is stored, but as another kind of object than what needs it. A conflict names it as their version."
     );
+    assert_eq!(v.problems[0].needed_by, Some((save, "c".to_owned())));
 }
 
 #[test]
@@ -1420,8 +1429,46 @@ fn without_the_feature_verify_reports_as_v01_does() {
     assert_eq!(p.object, Some(root));
     assert!(
         p.message
-            .contains("holds a conflict, which this version of Opalro can't follow"),
+            .contains("holds a conflict, and this project isn't set to keep conflicts."),
         "{p:?}"
     );
     assert!(v.problems.iter().all(|p| p.object != Some(record)));
+}
+
+#[test]
+fn nesting_is_looked_for_in_what_a_conflict_stands_as() {
+    // Own version the folder holding a conflict: reported. Own version a file while yours is that
+    // folder: not, since the file is what stands in the folder.
+    for own_is_folder in [true, false] {
+        let (_dir, mut repo) = project(0);
+        let record = plant_conflict(&mut repo, |packs| {
+            let text = packs.add_content(b"inner\n").unwrap();
+            let inner = three(term(EntryKind::File, text, 6), None);
+            let inner = packs
+                .add_record(ObjectKind::Conflict, &inner.encode())
+                .unwrap();
+            let holds = add_listing(packs, vec![entry("i", EntryKind::Conflict, inner)]).0;
+            let folder = term(EntryKind::Folder, holds, 0);
+            let file = term(EntryKind::File, packs.add_content(b"mine\n").unwrap(), 5);
+            let (mine, own) = if own_is_folder {
+                (file, folder)
+            } else {
+                (folder, file)
+            };
+            Record {
+                terms: vec![mine, None, None],
+                own: Some(Own {
+                    version: own,
+                    marker: 0,
+                }),
+            }
+        });
+        let v = checked(&repo);
+        if !own_is_folder {
+            assert_eq!(v.problems_total, 0, "{:?}", v.problems);
+            continue;
+        }
+        assert_eq!(kinds(&v), [ProblemKind::NestedConflict], "{:?}", v.problems);
+        assert_eq!(v.problems[0].object, Some(record));
+    }
 }

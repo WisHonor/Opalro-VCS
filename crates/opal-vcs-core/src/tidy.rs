@@ -464,8 +464,11 @@ pub(crate) struct Noted {
     pub(crate) known: HashMap<Id, Held>,
     /// Chunks to find the files of, as well as those no index names.
     pub(crate) watch: HashSet<Id>,
-    /// Each chunk no index names, or watched, with the file whose list names it.
+    /// Each chunk no index names, or watched, with the file whose list names it; and each version
+    /// a conflict record names, with the record.
     pub(crate) via: HashMap<Id, Id>,
+    /// What each version a conflict record names is to it, as findings name it.
+    pub(crate) versions: HashMap<Id, String>,
     /// The saves read.
     pub(crate) saves: Vec<Id>,
     /// The diary entries read from the current one back.
@@ -533,11 +536,15 @@ impl Noted {
     fn record_read(&mut self, id: Id, record: &Record) {
         self.stands.insert(id, stands_as(record));
         let own = record.own.and_then(|own| own.version);
+        let count = record.terms.len();
         let terms = record.terms.iter().enumerate();
-        let named = terms.map(|(n, term)| (format!("version {}", n + 1), *term));
+        let named = terms.map(|(n, term)| (version_name(n, count), *term));
         for (name, term) in named.chain([("its own version".to_owned(), own)]) {
             if let Some(t) = term {
                 self.file_named(id, &name, t.kind, t.id, t.size);
+                // So that what is missing of it is needed at the conflict's place.
+                self.via.entry(t.id).or_insert(id);
+                self.versions.entry(t.id).or_insert(name);
             }
         }
     }
@@ -581,6 +588,16 @@ impl Noted {
         if self.absent.insert(id) {
             self.unread.push((id, why));
         }
+    }
+}
+
+/// The term `n` (from 0) of a record of `count`, as a finding names it.
+fn version_name(n: usize, count: usize) -> String {
+    match (count, n) {
+        (3, 0) => "your version".to_owned(),
+        (3, 1) => "the version where the lines parted".to_owned(),
+        (3, _) => "their version".to_owned(),
+        _ => format!("version {} of {count}", n + 1),
     }
 }
 
@@ -1065,8 +1082,8 @@ impl Marks<'_> {
                 for entry in listing.entries() {
                     if entry.kind == EntryKind::Conflict && !self.src.conflicts {
                         let said = format!(
-                            "folder listing {id} holds a conflict, which this version of \
-                             Opalro can't follow"
+                            "folder listing {id} holds a conflict, and this project isn't set \
+                             to keep conflicts"
                         );
                         let Some(noted) = &mut self.noted else {
                             return Err(damaged(said));
