@@ -199,7 +199,9 @@ fn put(store: &Store, empty: Id, t: &Tree, packs: &mut PackSet) -> Id {
         };
         changes.insert(path.clone(), Some(put));
     }
-    overlay(store, empty, &changes, packs).unwrap()
+    let unstored = HashMap::new();
+    let stored = crate::conflict::Listings::stored(store, &unstored);
+    overlay(&stored, empty, &changes, packs).unwrap()
 }
 
 /// Every path of a tree, folders as `Folder`, with listings from `made` first.

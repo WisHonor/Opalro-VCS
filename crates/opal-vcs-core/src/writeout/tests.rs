@@ -905,12 +905,13 @@ fn a_link_is_written_as_one_only_inside_the_project_through_folders_of_the_save(
     let (_dir, mut repo) = project();
     let save = planted(&mut repo, &files(&[("d/f", b"f")])).0;
     let root = repo.store().save(&save, false).unwrap().root;
-    let stored = HashMap::new();
+    let unstored = HashMap::new();
+    let stored = Listings::stored(repo.store(), &unstored);
     let exact = Drive {
         ignores_case: false,
         composes_unicode: false,
     };
-    let mut tree = Tree::new(repo.store(), &stored, root, exact);
+    let mut tree = Tree::new(&stored, root, exact);
     let too_long = format!("{}d/f", "./".repeat(2100));
     for (path, target) in [
         ("out", "/tmp"),
@@ -941,12 +942,13 @@ fn a_link_through_a_name_write_out_wont_write_is_a_placeholder() {
     ]);
     let save = planted(&mut repo, &tree_files).0;
     let root = repo.store().save(&save, false).unwrap().root;
-    let stored = HashMap::new();
+    let unstored = HashMap::new();
+    let stored = Listings::stored(repo.store(), &unstored);
     let exact = Drive {
         ignores_case: false,
         composes_unicode: false,
     };
-    let mut tree = Tree::new(repo.store(), &stored, root, exact);
+    let mut tree = Tree::new(&stored, root, exact);
     // The save's own `.git` folder is never written, so a link into it can't be one either.
     for (path, target) in [
         ("hook", ".git/hooks/pre-commit"),
@@ -1730,4 +1732,230 @@ fn a_plan_reads_no_listing_of_the_save_it_is_on_again() {
     // files no more than the two saves took (less when the walk left their block held).
     assert_eq!(crate::store::counted::listings(), listings);
     assert!(reads() - start <= saves, "{} reads", reads() - start);
+}
+
+// A conflict's place in write-out: written, compared and kept as what it stands as.
+
+use crate::conflict::tests::file_of;
+use crate::conflict::{Record, Term};
+use crate::lines::Target;
+
+/// Yours (`mine`), none where the lines parted, and theirs.
+fn record(mine: Option<Term>) -> Record {
+    Record {
+        terms: vec![mine, None, Some(file_of(b"theirs"))],
+        own: None,
+    }
+}
+
+/// Goes to `save` as `opalro goto` does.
+fn go(repo: &mut Repository, save: Id) -> crate::switch::GotoOutcome {
+    crate::switch::goto(repo, &Target::Save(save), &who(), "goto", None, &mut |_| {}).unwrap()
+}
+
+/// Every listing below the top listing `root`, as stored, with its ID.
+fn stored_listings(repo: &Repository, root: Id) -> Vec<(Id, Listing)> {
+    let (mut found, mut todo) = (Vec::new(), vec![root]);
+    while let Some(id) = todo.pop() {
+        let listing = repo.store().listing(&id).unwrap();
+        for e in listing.entries() {
+            if e.kind == EntryKind::Folder {
+                todo.push(e.id);
+            }
+        }
+        found.push((id, listing));
+    }
+    found
+}
+
+#[test]
+fn goto_in_a_project_without_conflicts_reads_nothing_more() {
+    let paths: Vec<String> = (0..4)
+        .flat_map(|a| (0..3).map(move |b| format!("f{a}/g{b}/h/file{a}{b}.txt")))
+        .collect();
+    let reads = |without: bool| {
+        let (dir, mut repo) = project();
+        let first = current_save(&repo).unwrap();
+        let one: Vec<(&str, EntryKind, &[u8])> = paths
+            .iter()
+            .map(|p| (p.as_str(), EntryKind::File, &b"same"[..]))
+            .collect();
+        let mut two = one.clone();
+        two[5].2 = &b"changed"[..];
+        two.push(("f3/new.txt", EntryKind::File, &b"new"[..]));
+        let (one, _) = planted(&mut repo, &one);
+        let (two, _) = planted(&mut repo, &two);
+        go(&mut repo, first);
+        go(&mut repo, one);
+        let mut repo = if without {
+            crate::test_support::without_conflicts_feature(dir.path())
+        } else {
+            Repository::open(dir.path()).unwrap()
+        };
+        let store =
+            |repo: &Repository| (repo.store().listings_read(), repo.store().conflicts_read());
+        let before = store(&repo);
+        let done = go(&mut repo, two);
+        assert_eq!(done.applied.written, 2);
+        assert!(!done.holds_conflicts);
+        let after = store(&repo);
+        (after.0 - before.0, after.1 - before.1)
+    };
+    let with = reads(false);
+    assert_eq!(with, reads(true));
+    assert_eq!(with.1, 0);
+    assert!(with.0 > 0);
+}
+
+#[test]
+fn a_kept_save_names_only_stored_listings() {
+    let (dir, mut repo) = project();
+    let first = current_save(&repo).unwrap();
+    let held = plant_save(
+        &mut repo,
+        &[
+            ("dir/x.txt", EntryKind::File, b"x"),
+            ("dir/y.txt", EntryKind::File, b"y"),
+            ("t", EntryKind::File, b"theirs"),
+        ],
+    );
+    let folder = Term {
+        kind: EntryKind::Folder,
+        id: held.get("dir").unwrap().id,
+        size: 0,
+    };
+    let files = [("a.txt", EntryKind::File, &b"a"[..])];
+    crate::test_support::plant_with(&mut repo, &files, &[("dir", record(Some(folder)))]);
+    let conflicted = current_save(&repo).unwrap();
+    go(&mut repo, first);
+    go(&mut repo, conflicted);
+    fs::write(dir.path().join("dir/x.txt"), b"half").unwrap();
+    let paths = ["dir/x.txt".to_owned()];
+    let done = crate::switch::discard(
+        &mut repo,
+        Some(&paths),
+        &who(),
+        "discard",
+        None,
+        &mut |_| {},
+    )
+    .unwrap();
+    assert_eq!(done.restored, ["dir/x.txt"]);
+    assert_eq!(fs::read(dir.path().join("dir/x.txt")).unwrap(), b"x");
+    let change = repo.current().unwrap().1.folder_change.unwrap();
+    for save in [change.from, change.to] {
+        let root = repo.store().save(&save, false).unwrap().root;
+        for (id, listing) in stored_listings(&repo, root) {
+            assert_eq!(listing.id(), id, "a listing kept under an ID not its own");
+        }
+    }
+    // The "from" save pictures the folder: the conflict's place is the folder it stood as.
+    let root = repo.store().save(&change.from, false).unwrap().root;
+    let top = repo.store().listing(&root).unwrap();
+    let dir_entry = top.get("dir").unwrap();
+    assert_eq!(dir_entry.kind, EntryKind::Folder);
+    let inside = repo.store().listing(&dir_entry.id).unwrap();
+    assert_eq!(inside.get("x.txt").unwrap().id, hash_content(b"half"));
+    assert_eq!(inside.get("y.txt").unwrap().id, hash_content(b"y"));
+}
+
+#[test]
+fn two_saves_compared_as_stored_still_see_kind_6() {
+    let (_dir, mut repo) = project();
+    let (before, _) = planted(
+        &mut repo,
+        &[
+            ("c", EntryKind::File, b"mine"),
+            ("t", EntryKind::File, b"theirs"),
+        ],
+    );
+    let files = [("t", EntryKind::File, &b"theirs"[..])];
+    crate::test_support::plant_with(&mut repo, &files, &[("c", record(Some(file_of(b"mine"))))]);
+    let after = current_save(&repo).unwrap();
+    let root = |save: Id| repo.store().save(&save, false).unwrap().root;
+    let mut seen = Vec::new();
+    crate::diff::for_each_change(repo.store(), Some(root(before)), root(after), |c| {
+        seen.push((c.path.to_owned(), c.kind, c.old_kind));
+        Ok::<(), StoreError>(())
+    })
+    .unwrap();
+    assert_eq!(
+        seen,
+        [("c".to_owned(), EntryKind::Conflict, Some(EntryKind::File))]
+    );
+}
+
+#[test]
+fn a_folder_term_is_written_under_write_outs_name_rules() {
+    let (_dir, mut repo) = project();
+    let first = current_save(&repo).unwrap();
+    plant_save(&mut repo, &[("t", EntryKind::File, b"theirs")]);
+    // A folder holding `.OPALRO`, spelled `-OPALRO` and then changed, as no listing Opalro makes
+    // holds one.
+    let mut hostile = Id([0; 32]);
+    crate::test_support::plant_root(&mut repo, |packs| {
+        let id = packs.add_content(b"x").unwrap();
+        let entry = Entry {
+            name: "-OPALRO".into(),
+            kind: EntryKind::File,
+            id,
+            size: 1,
+        };
+        let mut listing = Listing::new(vec![entry]).unwrap().encode();
+        let at = listing.windows(7).position(|w| w == b"-OPALRO").unwrap();
+        listing[at] = b'.';
+        hostile = packs
+            .add_record(ObjectKind::FolderListing, &listing)
+            .unwrap();
+        let folder = Term {
+            kind: EntryKind::Folder,
+            id: hostile,
+            size: 0,
+        };
+        let conflict = packs
+            .add_record(ObjectKind::Conflict, &record(Some(folder)).encode())
+            .unwrap();
+        let top = vec![Entry {
+            name: "dir".into(),
+            kind: EntryKind::Conflict,
+            id: conflict,
+            size: 0,
+        }];
+        crate::test_support::add_listing(packs, top).0
+    });
+    // Even leaving it would meet it, as leaving any save that holds one does: planned from the
+    // first save, whose folder the project folder still is.
+    let planted_there = current_save(&repo).unwrap();
+    let drive = this_drive(&mut repo);
+    match plan(&repo, first, planted_there, None, false, drive, None) {
+        Err(SaveError::Repo(RepoError::OpalName { save, .. })) => {
+            assert_eq!(save, Some(planted_there));
+        }
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
+fn a_link_term_leading_out_is_written_as_a_placeholder() {
+    let (dir, mut repo) = project();
+    let first = current_save(&repo).unwrap();
+    plant_save(
+        &mut repo,
+        &[
+            ("t", EntryKind::File, b"theirs"),
+            ("l", EntryKind::Symlink, b"../outside"),
+        ],
+    );
+    let link = Term {
+        kind: EntryKind::Symlink,
+        id: hash_content(b"../outside"),
+        size: 10,
+    };
+    crate::test_support::plant_with(&mut repo, &[], &[("c", record(Some(link)))]);
+    let conflicted = current_save(&repo).unwrap();
+    go(&mut repo, first);
+    let done = go(&mut repo, conflicted);
+    assert_eq!(done.applied.placeholders, ["c"]);
+    assert!(done.holds_conflicts);
+    assert_eq!(fs::read(dir.path().join("c")).unwrap(), b"../outside");
 }

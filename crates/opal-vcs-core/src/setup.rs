@@ -1,13 +1,14 @@
 //! `opalro setup`'s step: a preset's `opalro.toml` and `.opalroignore` written as one step that undo
 //! takes back (docs/storage-format.md section 9).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsStr;
 use std::io;
 use std::path::Path;
 
 use opal_platform::dir::{Dir, EntryType};
 
+use crate::conflict::Listings;
 use crate::diary::Action;
 use crate::history::tip_of;
 use crate::id::Id;
@@ -267,8 +268,11 @@ fn write_step(
     let paths: Vec<String> = before.keys().cloned().collect();
     let kept = switch::kept_on(&entry.state, current, "setup", &paths, who);
     let base_root = repo.store().save(&current, repo.signatures_allowed())?.root;
+    // Both sides picture the folder, a conflict's place holding what it stands as.
+    let unstored = HashMap::new();
+    let standing = Listings::standing(repo, &unstored);
     let mut side = |changes: &BTreeMap<String, Option<Put>>| -> Result<Id, SaveError> {
-        let root = kept::overlay(repo.store(), base_root, changes, &mut packs)?;
+        let root = kept::overlay(&standing, base_root, changes, &mut packs)?;
         if root == base_root {
             return Ok(current);
         }

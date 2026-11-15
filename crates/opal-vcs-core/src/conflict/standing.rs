@@ -1,8 +1,9 @@
 //! A stored listing as it stands in the folder: each conflict as what it stands as.
 
 use std::borrow::Cow;
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
+use std::rc::Rc;
 
 use super::{Record, nested, stands_as, unreadable};
 use crate::id::Id;
@@ -32,14 +33,12 @@ pub(crate) fn as_it_stands<'e>(
     })
 }
 
-/// What a reader as it stands has read: the records, by ID; the folder listings a conflict
-/// stands as, and those below them, where a conflict is nesting; and whether it replaced an
-/// entry with a file or link.
+/// What a reader as it stands has read: the records, by ID; and the folder listings a conflict
+/// stands as, and those below them, where a conflict is nesting.
 #[derive(Default)]
 struct Stood {
     records: HashMap<Id, Record>,
     below: HashSet<Id>,
-    stood_in: bool,
 }
 
 /// How a walk reads a listing: as stored (one save against another), or as it stands in the
@@ -48,22 +47,23 @@ pub(crate) struct Listings<'a> {
     store: &'a Store,
     unstored: &'a HashMap<Id, Listing>,
     /// `None`: as stored. Else the records read so far, and the folders a conflict stands as
-    /// (and those below them), where a kind-6 entry is refused as nesting.
-    standing: Option<RefCell<Stood>>,
+    /// (and those below them), where a kind-6 entry is refused as nesting; shared by its sides.
+    standing: Option<Rc<RefCell<Stood>>>,
+    /// Whether this side replaced an entry with a file or link.
+    stood_in: Cell<bool>,
 }
 
 impl<'a> Listings<'a> {
-    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn stored(store: &'a Store, unstored: &'a HashMap<Id, Listing>) -> Listings<'a> {
         Listings {
             store,
             unstored,
             standing: None,
+            stood_in: Cell::new(false),
         }
     }
 
     /// As it stands, in a project that keeps conflicts; as stored in one that doesn't.
-    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn standing(
         repo: &'a Repository,
         unstored: &'a HashMap<Id, Listing>,
@@ -71,15 +71,30 @@ impl<'a> Listings<'a> {
         Listings {
             store: repo.store(),
             unstored,
-            standing: repo.keeps_conflicts().then(RefCell::default),
+            standing: repo.keeps_conflicts().then(Rc::default),
+            stood_in: Cell::new(false),
         }
+    }
+
+    /// Another side of the same command: the records read are shared, and so is what is
+    /// nesting, but each side says for itself whether it stood a conflict in.
+    pub(crate) fn side(&self) -> Listings<'a> {
+        Listings {
+            store: self.store,
+            unstored: self.unstored,
+            standing: self.standing.clone(),
+            stood_in: Cell::new(false),
+        }
+    }
+
+    pub(crate) fn store(&self) -> &'a Store {
+        self.store
     }
 
     /// The listing `id`: from `unstored`, else the store; as it stands, each kind-6 entry
     /// replaced by what its record stands as (its name, the term's kind, ID and size) or left
     /// out when that is nothing. The listing keeps the ID it was asked by. A kind-6 entry in a
     /// listing below a folder a conflict stands as is damage ("a conflict inside a conflict").
-    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) fn read(&self, id: &Id) -> Result<Listing, StoreError> {
         let listing = match self.unstored.get(id) {
             Some(listing) => listing.clone(),
@@ -120,7 +135,7 @@ impl<'a> Listings<'a> {
                     stood.below.insert(t.id);
                 }
                 EntryKind::File | EntryKind::Executable | EntryKind::Symlink => {
-                    stood.stood_in = true;
+                    self.stood_in.set(true);
                 }
                 _ => {}
             }
@@ -150,10 +165,9 @@ impl<'a> Listings<'a> {
         Ok(record)
     }
 
-    /// Whether any entry this reader replaced was written as a file or link: for `goto`'s words.
-    #[cfg_attr(not(test), expect(dead_code))]
+    /// Whether any entry this side replaced was written as a file or link: for `goto`'s words.
     pub(crate) fn stood_in(&self) -> bool {
-        self.standing.as_ref().is_some_and(|s| s.borrow().stood_in)
+        self.stood_in.get()
     }
 }
 

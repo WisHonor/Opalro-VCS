@@ -14,7 +14,6 @@ pub(crate) mod markers;
 pub(crate) mod standing;
 
 pub(crate) use markers::Left;
-#[expect(unused_imports)]
 pub(crate) use standing::Listings;
 
 /// One version a conflict names: an entry's kind, ID and size, without a name.

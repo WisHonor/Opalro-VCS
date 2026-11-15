@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 use crate::ancestry::only_in;
 use crate::combine::Made;
+use crate::conflict::Listings;
 use crate::diff::{file_change, for_each_entry_change_in};
 use crate::id::Id;
 use crate::kept::EXACT;
@@ -222,8 +223,9 @@ pub(crate) fn followed(
         (Some(from), Some(tip)) if !made.notes_spent => noted(repo, made, from, start.root, tip)?,
         _ => BTreeMap::new(),
     };
-    let mut at_start = Tree::new(store, &made.listings, start.root, EXACT);
-    let mut on_side = Tree::new(store, &made.listings, side.root, EXACT);
+    let stored = Listings::stored(store, &made.listings);
+    let mut at_start = Tree::new(&stored, start.root, EXACT);
+    let mut on_side = Tree::new(&stored, side.root, EXACT);
     let mut out = Followed {
         notes_unbelieved: made.notes_spent,
         ..Followed::default()
@@ -278,6 +280,7 @@ fn noted(
     let most = only_in(repo, tip, &[start])?;
     let read = |id: Id| repo.store().save(&id, repo.signatures_allowed());
     let unstored = HashMap::new();
+    let stored = Listings::stored(repo.store(), &unstored);
     // Where each file of the tip was, as the walk goes back: there, to its path at the tip.
     let mut back: HashMap<String, String> = HashMap::new();
     // Paths at the tip whose file arrived there later than the save the walk is at.
@@ -285,7 +288,7 @@ fn noted(
     let mut save = read(tip)?;
     let mut reads = 1u64;
     // Each save is read once; its tree and its parent's keep only the listings its notes need.
-    let mut after = Tree::new(repo.store(), &unstored, save.root, EXACT);
+    let mut after = Tree::new(&stored, save.root, EXACT);
     loop {
         let Some(&parent) = save.parents.first() else {
             return none;
@@ -308,7 +311,7 @@ fn noted(
             Some(read(parent)?)
         };
         let parent_root = parent_save.as_ref().map_or(start_root, |p| p.root);
-        let mut before = Tree::new(repo.store(), &unstored, parent_root, EXACT);
+        let mut before = Tree::new(&stored, parent_root, EXACT);
         // A save's notes all hold between it and its first parent, so they are taken together.
         // A file removed and made again in a later save is taken for the same file, as an edit.
         let mut true_notes = Vec::new();

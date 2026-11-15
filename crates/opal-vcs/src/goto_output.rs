@@ -60,6 +60,12 @@ pub fn switched(
         Position::AtSave(_) => format!("{switched} to save {at}. You are not on a line.\n"),
     };
     let mut details = written(&done.applied, done.carried);
+    if done.holds_conflicts {
+        let status = style::whole(&s.paint(Role::Command, "opalro status"));
+        details.push(format!(
+            "The save you went to holds places in conflict: {status} lists them."
+        ));
+    }
     if let Position::AtSave(_) = &done.position {
         details.push("Saving here asks for a new line's name.".to_owned());
         match keep {

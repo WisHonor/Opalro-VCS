@@ -2182,6 +2182,7 @@ fn goto_command(json: bool, text: &str, opened: &mut Option<Repository>) -> Resu
             "placeholders": done.applied.placeholders,
             "safety_copies": done.safety_copies,
             "recorded": done.recorded,
+            "holds_conflicts": done.holds_conflicts,
             "warnings": output::warnings_json(&warnings),
         });
         format!("{document}\n")

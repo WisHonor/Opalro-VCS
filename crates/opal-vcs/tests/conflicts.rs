@@ -1,5 +1,6 @@
-//! How `opalro status` and `opalro changes` show the places a combined save holds in conflict.
-//! Saves are planted with their conflicts, and the folder is written as each place should show.
+//! How `opalro status` and `opalro changes` show the places a combined save holds in conflict,
+//! and how `goto`, `discard`, the shelf, `undo` and `redo` write and protect them. Saves are
+//! planted with their conflicts.
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use opal_core::conflict::{Own, Record, Term};
@@ -563,4 +564,260 @@ fn without_the_feature_status_shows_a_planted_conflict_as_v01_does() {
     assert_eq!(doc["changes"][0]["change"], "kind_changed");
     let doc = json(&env, &["changes"]);
     assert_eq!(doc["changes"][0]["in_conflict"], false);
+}
+
+// Writing the folder: `goto`, `discard`, the shelf, `undo` and `redo`.
+
+/// A started project at its first save, not on a line, with `main` moved to a planted save
+/// holding `plain.txt` and a conflict at each of `conflicts`. The first save's ID, and the
+/// conflicted save's.
+fn away_from(conflicts: &[(&str, Record)]) -> (Env, Id, Id) {
+    let env = started();
+    let first = support::main_tip(&env);
+    run(&env, &["goto", &first.to_hex()], 0);
+    plant(&env, &[("plain.txt", b"one\n")], conflicts);
+    let conflicted = support::main_tip(&env);
+    (env, first, conflicted)
+}
+
+/// Shown with markers, your version, and nothing.
+fn three_kinds() -> (Env, Id, Id) {
+    away_from(&[
+        ("gone.png", versions(None)),
+        ("marked.txt", marked()),
+        ("yours.png", versions(Some(term(PICTURE)))),
+    ])
+}
+
+fn written_conflicts() -> support::Files {
+    support::Files::from([
+        ("marked.txt".to_owned(), MARKED.to_vec()),
+        ("plain.txt".to_owned(), b"one\n".to_vec()),
+        ("yours.png".to_owned(), PICTURE.to_vec()),
+    ])
+}
+
+/// The ID of the save the project is on.
+fn on_save(env: &Env) -> Id {
+    let repo = opal_core::repo::Repository::open(env.root()).unwrap();
+    opal_core::history::current_save(&repo).unwrap()
+}
+
+#[test]
+fn goto_a_conflicted_save_writes_marked_texts_and_your_versions() {
+    let (env, _, conflicted) = three_kinds();
+    run(&env, &["goto", "main"], 0);
+    assert_eq!(support::files(env.root()), written_conflicts());
+    // Nothing is unsaved: each place holds what its conflict stands as.
+    assert!(support::changed(&env).is_empty());
+    let doc = json(&env, &["status"]);
+    assert_eq!(doc["conflicts"].as_array().unwrap().len(), 3, "{doc}");
+    support::assert_folder_is_goto_of(&env, conflicted);
+}
+
+#[test]
+fn goto_away_removes_them_and_goto_back_writes_them_again() {
+    let (env, first, conflicted) = three_kinds();
+    let before = support::files(env.root());
+    run(&env, &["goto", "main"], 0);
+    run(&env, &["goto", &first.to_hex()], 0);
+    assert_eq!(support::files(env.root()), before);
+    support::assert_folder_is_goto_of(&env, first);
+    run(&env, &["goto", "main"], 0);
+    assert_eq!(support::files(env.root()), written_conflicts());
+    support::assert_folder_is_goto_of(&env, conflicted);
+}
+
+#[test]
+fn an_untouched_conflict_file_is_not_unsaved_work() {
+    let (env, first, _) = three_kinds();
+    run(&env, &["goto", "main"], 0);
+    let doc = json(&env, &["goto", &first.to_hex()]);
+    assert_eq!(doc["safety_copies"], 0, "{doc}");
+    assert_eq!(on_save(&env), first);
+    assert!(!env.root().join("marked.txt").exists());
+}
+
+/// `goto <to>` refused for unsaved work at `path`: exit 1, the path named, and nothing changed.
+fn refused_for(env: &Env, to: &str, path: &str) {
+    let (before, on) = (support::files(env.root()), env.state().1);
+    let (shown, said) = run(env, &["goto", to], 1);
+    assert_eq!(shown, "");
+    assert!(
+        said.contains("are in the way, so nothing was changed:"),
+        "{said}"
+    );
+    assert!(said.contains(&format!(":\n  {path}\n\n")), "{said}");
+    assert_eq!(support::files(env.root()), before);
+    assert_eq!(env.state().1, on);
+}
+
+#[test]
+fn a_half_fixed_file_stops_a_goto_it_is_in_the_way_of() {
+    let (env, first, _) = three_kinds();
+    run(&env, &["goto", "main"], 0);
+    put(&env, "marked.txt", HALF);
+    refused_for(&env, &first.to_hex(), "marked.txt");
+}
+
+#[test]
+fn a_changed_version_conflict_is_unsaved_work_too() {
+    let (env, first, _) = three_kinds();
+    run(&env, &["goto", "main"], 0);
+    put(&env, "yours.png", b"painted over");
+    refused_for(&env, &first.to_hex(), "yours.png");
+}
+
+#[test]
+fn discard_gives_back_the_marked_text_and_keeps_a_safety_copy() {
+    let (env, _, conflicted) = three_kinds();
+    run(&env, &["goto", "main"], 0);
+    put(&env, "marked.txt", HALF);
+    let doc = json(&env, &["discard", "marked.txt"]);
+    assert_eq!(doc["restored_paths"], serde_json::json!(["marked.txt"]));
+    assert_eq!(doc["safety_copies"], 1, "{doc}");
+    assert_eq!(support::files(env.root()), written_conflicts());
+    // The step's "from" save holds what the folder held: the half-fixed bytes, and each other
+    // place as it stood.
+    let change = support::head(&env).1.folder_change.unwrap();
+    let held = support::saved_files(&env, change.from);
+    assert_eq!(held["marked.txt"], HALF);
+    assert_eq!(held["yours.png"], PICTURE);
+    assert!(!held.contains_key("gone.png"));
+    support::assert_folder_is_goto_of(&env, conflicted);
+}
+
+/// A save whose `dir` is a conflict standing as a folder holding `x.txt`, as `three_kinds`.
+fn folder_conflict() -> (Env, Id) {
+    let env = started();
+    let first = support::main_tip(&env);
+    run(&env, &["goto", &first.to_hex()], 0);
+    let files: [(&str, EntryKind, &[u8]); 1] = [("x.txt", EntryKind::File, MINE)];
+    support::plant_save(env.root(), |pack| {
+        for bytes in [BASE, THEIRS] {
+            pack.add_content(bytes).unwrap();
+        }
+        let folder = support::listings(pack, &files);
+        let record = versions(Some(Term {
+            kind: EntryKind::Folder,
+            id: folder,
+            size: 0,
+        }));
+        support::listings_with_conflicts(pack, &[], &[("dir", &record)])
+    });
+    let conflicted = support::main_tip(&env);
+    (env, conflicted)
+}
+
+#[test]
+fn discard_below_a_conflict_that_stands_as_a_folder_finds_the_path() {
+    let (env, conflicted) = folder_conflict();
+    run(&env, &["goto", "main"], 0);
+    assert_eq!(std::fs::read(env.root().join("dir/x.txt")).unwrap(), MINE);
+    put(&env, "dir/x.txt", b"changed\n");
+    let doc = json(&env, &["discard", "dir/x.txt"]);
+    assert_eq!(doc["restored_paths"], serde_json::json!(["dir/x.txt"]));
+    assert_eq!(std::fs::read(env.root().join("dir/x.txt")).unwrap(), MINE);
+    support::assert_folder_is_goto_of(&env, conflicted);
+}
+
+#[test]
+fn shelf_and_unshelf_carry_a_half_fixed_file_and_the_conflict_stays_in_the_save() {
+    let (env, _, conflicted) = three_kinds();
+    run(&env, &["goto", "main"], 0);
+    put(&env, "marked.txt", HALF);
+    let doc = json(&env, &["shelf"]);
+    assert_eq!(doc["shelf"]["files"], 1, "{doc}");
+    assert_eq!(support::files(env.root()), written_conflicts());
+    let doc = json(&env, &["shelf", "--list"]);
+    assert_eq!(doc["shelves"][0]["files"], 1, "{doc}");
+    // The conflict stays in the save, and the line stays where it was.
+    assert_eq!(support::main_tip(&env), conflicted);
+    let top = support::top_folder(env.root());
+    assert_eq!(top.get("marked.txt").unwrap().kind, EntryKind::Conflict);
+    let doc = json(&env, &["status"]);
+    assert_eq!(doc["conflicts"][1]["path"], "marked.txt", "{doc}");
+    assert_eq!(doc["changes"], serde_json::json!([]));
+    run(&env, &["unshelf"], 0);
+    assert_eq!(std::fs::read(env.root().join("marked.txt")).unwrap(), HALF);
+    assert_eq!(support::main_tip(&env), conflicted);
+}
+
+#[test]
+fn undo_and_redo_over_a_goto_to_a_conflicted_save() {
+    let (env, first, conflicted) = three_kinds();
+    let before = support::files(env.root());
+    run(&env, &["goto", "main"], 0);
+    run(&env, &["undo"], 0);
+    assert_eq!(support::files(env.root()), before);
+    assert_eq!(on_save(&env), first);
+    support::assert_folder_is_goto_of(&env, first);
+    run(&env, &["redo"], 0);
+    assert_eq!(support::files(env.root()), written_conflicts());
+    assert_eq!(on_save(&env), conflicted);
+    support::assert_folder_is_goto_of(&env, conflicted);
+    // A half-fixed file is unsaved work an undo stops for, as for any.
+    put(&env, "marked.txt", HALF);
+    let (_, said) = run(&env, &["undo"], 1);
+    assert!(said.contains("marked.txt"), "{said}");
+    assert_eq!(std::fs::read(env.root().join("marked.txt")).unwrap(), HALF);
+}
+
+#[test]
+fn goto_says_when_the_save_gone_to_holds_a_conflict() {
+    let (env, first, _) = three_kinds();
+    let said = "The save you went to holds places in conflict: opalro status lists them.";
+    let (shown, _) = run(&env, &["goto", "main"], 0);
+    assert!(shown.contains(said), "{shown}");
+    // Leaving it for a save without says nothing of the one left.
+    let (shown, _) = run(&env, &["goto", &first.to_hex()], 0);
+    assert!(!shown.contains("conflict"), "{shown}");
+    assert_eq!(json(&env, &["goto", "main"])["holds_conflicts"], true);
+    let doc = json(&env, &["goto", &first.to_hex()]);
+    assert_eq!(doc["holds_conflicts"], false, "{doc}");
+}
+
+#[test]
+fn without_the_feature_write_out_leaves_a_conflicts_place_alone() {
+    let (env, _, _) = three_kinds();
+    support::without_conflicts_feature(env.root());
+    let doc = json(&env, &["goto", "main"]);
+    assert_eq!(doc["holds_conflicts"], false, "{doc}");
+    let written = support::files(env.root());
+    assert_eq!(written["plain.txt"], b"one\n");
+    for place in ["gone.png", "marked.txt", "yours.png"] {
+        assert!(!written.contains_key(place), "{written:?}");
+    }
+}
+
+/// Wherever a goto to a conflicted save stops, the next command that changes the project
+/// finishes it, or it never happened: the folder is what a goto to the save it is on writes.
+#[cfg(feature = "fault-injection")]
+#[test]
+fn a_goto_to_a_conflicted_save_stopped_at_every_step_is_finished_or_never_happened() {
+    let (template, first, conflicted) = three_kinds();
+    let mut stopped = 0;
+    for n in 1.. {
+        assert!(n < 200, "the goto never finished");
+        let env = Env::empty();
+        support::copy_dir(template.root(), env.root());
+        let out = env
+            .opalro()
+            .args(["goto", "main"])
+            .env("OPALRO_FAULT_AT", n.to_string())
+            .output()
+            .unwrap();
+        if !text(&out.stderr).contains("injected crash") {
+            assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+            break;
+        }
+        stopped += 1;
+        run(&env, &["discard"], 0);
+        let journal = env.root().join(".opalro/state/journal");
+        assert!(!journal.exists(), "fault {n}");
+        let on = on_save(&env);
+        assert!(on == first || on == conflicted, "fault {n}");
+        support::assert_folder_is_goto_of(&env, on);
+    }
+    assert!(stopped > 1, "no fault point was reached");
 }

@@ -17,6 +17,7 @@ use std::time::Duration;
 
 use crate::ancestry::{Starts, common_starts, only_in};
 use crate::changes::deadline;
+use crate::conflict::Listings;
 use crate::diary::{Position, State};
 use crate::history::tip_of;
 use crate::id::{ChangeId, Id};
@@ -469,8 +470,8 @@ pub(crate) fn merge_three(
     // Each followed file's name at the start, by where it went: its rule is asked under both.
     let mut moved = BTreeMap::new();
     {
-        let mut trees =
-            [start, ours, theirs].map(|v| Tree::new(store, &made.listings, v.root, EXACT));
+        let stored = Listings::stored(store, &made.listings);
+        let mut trees = [start, ours, theirs].map(|v| Tree::new(&stored, v.root, EXACT));
         let froms: BTreeSet<&String> = went[0].went.keys().chain(went[1].went.keys()).collect();
         for from in froms {
             let (moved_on, to, apart) = match (went[0].went.get(from), went[1].went.get(from)) {
@@ -573,18 +574,12 @@ pub(crate) fn merge_three(
         let mut built = Vec::new();
         // A folder emptied only by these changes (moved files put in place, a conflict's path
         // cleared) is no version's own.
-        *root = overlay_with(
-            store,
-            &made.listings,
-            *root,
-            changes,
-            true,
-            &mut |listing| {
-                let id = store_listing(store, packs, listing)?;
-                built.push((id, listing.clone()));
-                Ok(id)
-            },
-        )?;
+        let stored = Listings::stored(store, &made.listings);
+        *root = overlay_with(&stored, *root, changes, true, &mut |listing| {
+            let id = store_listing(store, packs, listing)?;
+            built.push((id, listing.clone()));
+            Ok(id)
+        })?;
         made.listings.extend(built);
     }
     let [s, o, t] = roots;

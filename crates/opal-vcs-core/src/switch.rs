@@ -35,6 +35,9 @@ pub struct GotoOutcome {
     pub carried: usize,
     /// Whether this goto recorded a step of its own; not when the project already was there.
     pub recorded: bool,
+    /// Whether the save gone to holds a place in conflict that this goto met. It may not say so
+    /// when the folder already held that conflict.
+    pub holds_conflicts: bool,
 }
 
 /// What `discard` did.
@@ -620,6 +623,7 @@ fn go(
     let from = tip_of(&entry)?;
     let (position, to) = landing(repo, &entry.state, target)?;
     let (plan, drive) = plan_switch(repo, from, to, git_excludes)?;
+    let holds_conflicts = plan.holds_conflicts;
     let mut state = entry.state.clone();
     state.position = position.clone();
     if state == entry.state && plan.actions.is_empty() {
@@ -631,6 +635,7 @@ fn go(
             safety_copies: 0,
             carried: 0,
             recorded: false,
+            holds_conflicts,
         });
     }
     let planned = Planned {
@@ -651,6 +656,7 @@ fn go(
         safety_copies,
         carried,
         recorded: true,
+        holds_conflicts,
     })
 }
 

@@ -231,6 +231,7 @@ Saving gives one of two documents, told apart by `result`.
 | `placeholders` | list of string | The paths of links written as plain files holding their targets (see `placeholders_written` in §4). `[]` if none. |
 | `safety_copies` | number | How many safety copies of unsaved work the switch kept. `goto` never overwrites unsaved work, so it is `0` for now. |
 | `recorded` | boolean | Whether the command recorded a step, which `opalro undo` takes back. `false` when the project already was there and there was nothing to write, so nothing changed. |
+| `holds_conflicts` | boolean | Whether a folder of the save gone to that the switch read holds a place in conflict, written as what it stands as. It is about the save gone to, never the one left, and may be `false` when the folder already held that conflict; `opalro status --json` lists them. No count. |
 | `warnings` | list | See §4. |
 
 **Files in use.** When another program holds files the switch must write (Windows), `goto` writes the rest and then fails (exit code 1) with the files named in `error`, and the failure document's warnings include `files_in_use` (§4). The switch isn't finished then: `head` and `.opalro/state/journal` stay, `status` gives `switch_unfinished`, and the next command that changes the project finishes it. `discard`, `shelf` and `unshelf` fail the same way. A document of a switch that succeeded never names files in use.
