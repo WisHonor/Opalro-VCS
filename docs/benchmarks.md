@@ -1,6 +1,6 @@
 # Opalro Benchmarks
 
-> **Status:** started 2026-11-09 with the two speed gates for v0.1; Opalro against Git and Git LFS, the speeds of a save's parts and the ruling on compressing again were added the same day. A third gate, against Git on a code project, and the profile milestone 6 starts from (§7) were added on 2026-11-10; the numbers in §1 to §6 are from before milestone 6's speed work, and §8, added the same day, gives them after it; §9, added that day too, measures both halves of milestone 6 together; §10, added on 2026-11-11, has the gate's new rule for v0.1, its ten runs on the finished code, and the finished code beside `main` turn by turn; §11, added on 2026-11-14, has milestone 7's walk on Git's own history, and the gate before and after milestone 7 on the runners' new image, where `status` now sits at its limit; §12, added the same day, has milestone 8's common starting points and its search through every parent on Git's own history, the gate after milestone 8, and the cost of the move notes every save now works out. Every speed or size claim Opalro makes comes from this page, the ones Git or Git LFS wins included ([decision 088](decisions/088-benchmarks-and-the-speed-gates.md)).
+> **Status:** started 2026-11-09 with the two speed gates for v0.1; Opalro against Git and Git LFS, the speeds of a save's parts and the ruling on compressing again were added the same day. A third gate, against Git on a code project, and the profile milestone 6 starts from (§7) were added on 2026-11-10; the numbers in §1 to §6 are from before milestone 6's speed work, and §8, added the same day, gives them after it; §9, added that day too, measures both halves of milestone 6 together; §10, added on 2026-11-11, has the gate's new rule for v0.1, its ten runs on the finished code, and the finished code beside `main` turn by turn; §11, added on 2026-11-14, has milestone 7's walk on Git's own history, and the gate before and after milestone 7 on the runners' new image, where `status` now sits at its limit; §12, added the same day, has milestone 8's common starting points and its search through every parent on Git's own history, the gate after milestone 8, and the cost of the move notes every save now works out; §13, added the same day, has a combine over saves that hold 100,000 move notes each; §14, added on 2026-11-15, has what the `conflicts` feature of milestone 9 costs `status` and `goto`. Every speed or size claim Opalro makes comes from this page, the ones Git or Git LFS wins included ([decision 088](decisions/088-benchmarks-and-the-speed-gates.md)).
 
 **In plain words.** Opalro promises three things before v0.1 (decisions [023](decisions/023-v0.1-speed-bar.md) and [099](decisions/099-a-third-speed-gate-within-twice-gits-time.md)): saving a huge file must not eat the computer's memory, asking what changed in a big project must be quick, and on an everyday code project Opalro must stay within twice Git's time. This page says how each was measured, on which machines, and what came out, pass or fail. It then puts Opalro beside Git and Git LFS on the same files, step by step, and says where each one wins.
 
@@ -1071,3 +1071,59 @@ Measured on 2026-11-14 on the owner's Windows computer, with the history the pro
 **What stays.** Reading a save costs in proportion to its size, whoever reads it: about 5 ms for each of these, about 260 readings in this combine. `opalro history` over the fifty saves still builds every note (5.5 s in the red team's debug build). A history planted with thousands of such saves stays slow to walk; whether to make large saves cheap for every reader is the owner's call ([the follow-ups](plans/2026-11-01-milestone-1-follow-ups.md), "Deferred by milestone 8").
 
 The proof test asserts no time (a debug build still takes 13 seconds, almost all of it reading, and no bound on the clock separates fixed from unfixed on three kinds of computer); it prints the time it took, and asserts that the combine goes through and gives the warning.
+
+## 14. v0.2, milestone 9: what keeping conflicts costs `status` and `goto`
+
+**In plain words.** From milestone 9 every new project can keep conflicts ([decision 178](decisions/178-the-conflicts-feature.md)), and almost none holds one at any given moment, so the ability must cost nothing until it is used ([decision 179](decisions/179-every-command-and-a-conflict.md)). On a project of 100,003 files it costs nothing that can be measured: `status` with the feature and no conflict is within 7 ms of `status` without it, where single runs of either spread over 150 to 250 ms, and `goto` within 6 ms either way. Three conflicts seven folders deep cost nothing that can be measured either.
+
+Measured on 2026-11-15 on the Windows laptop of §1 (AMD Ryzen 7 7730U, 8 cores (16 threads), 16 GB of RAM, a 1 TB NVMe SSD (WD PC SN560); Windows 11 Home 10.0.26200), with a release build of `milestone-9` at `2b639a4` (`cargo build --release -p opal-vcs`), by `bench/conflicts.py`. Everything here was measured; nothing is estimated.
+
+### The project
+
+- 100,003 text files: 100 folders, each with 10 folders, each with 100 files of 8 short lines, and 3 more files seven folders deep (`d050/s5/x/y/z/w/deep.txt`, and the same under `d051` and `d052`).
+- Made with `opalro start --preset custom` (no rule files) and saved once. A second save on `main` changes one line in each of the 3 deep files.
+- **Without the feature** is the same folder with `.opalro/format` rewritten without its line `feature conflicts`, which is how a project made by Opalro 0.1 has it (and how the engine's tests make such a project). The two were timed in turns in the same folder, so both read the same files from the same disk.
+- **With conflicts:** a line `side` started at the first save changes the same line of the same 3 files another way; `opalro combine side` on `main` keeps 3 conflicts (`Combined side into main: save … "Combine side into main", with 3 places in conflict:`), each a marked text in the folder. `opalro status --json` lists 3 conflicts.
+
+### How it was timed
+
+- Each time is the whole command, from starting the program to its end, by a clock around the process (Python's `time.perf_counter` around `subprocess.run`), output thrown away.
+- `status`: after a 3 second wait (the cache doesn't vouch for a file changed in the last 2 seconds) and one run that is not timed.
+- `goto` back: from the newer save to the one before it. `goto` forward: back again. Each way writes 3 files. In the plain project the two saves are the first and the second; in the project with conflicts they are `main`'s save before the combine and the combined save, so going forward writes the 3 marked texts.
+- Medians, with the least and the most in brackets, in milliseconds.
+
+### First run: 10 runs of each
+
+Without the feature and with it took turns (5 rounds of 2 runs each). The project with conflicts came next, then the plain project once more (at its second save, with the feature), as a check that the machine had not drifted.
+
+| The project | `status` | `goto` back | `goto` forward |
+|---|---|---|---|
+| Without the feature | 967.1 (957.6 to 1,345.5) | 1,036.8 (1,003.5 to 1,457.7) | 1,069.5 (1,029.2 to 1,251.8) |
+| With the feature, no conflict | 1,038.8 (952.4 to 1,223.7) | 1,030.7 (981.8 to 1,348.8) | 1,071.4 (1,027.9 to 2,985.8) |
+| With the feature, 3 conflicts seven folders deep | 971.1 (945.2 to 981.6) | 1,053.3 (1,017.4 to 1,069.7) | 1,055.9 (1,040.5 to 1,883.4) |
+| The plain project again, afterwards | 984.2 (974.9 to 988.7) | 1,066.8 (1,032.9 to 1,078.0) | 1,083.0 (1,036.6 to 1,142.7) |
+
+`status` with the feature and no conflict had the higher median in this run (1,038.8 against 967.1) with the same least time (952.4 against 957.6), and the project with conflicts, measured right after with the feature on, was back at 971.1. A reviewer was reading files on the same machine during this run. So `status` was measured again, alone, on a quiet machine.
+
+### Second run: `status` alone, 36 runs of each
+
+At the second save (no conflict), 12 rounds of 3 runs each, the order of the two swapped every round.
+
+| The project | `status` |
+|---|---|
+| Without the feature | 1,021.8 (929.4 to 1,182.8) |
+| With the feature, no conflict | 1,028.8 (939.8 to 1,095.6) |
+
+### What the numbers say
+
+- **A project that keeps conflicts and has none pays nothing that can be measured:** 7 ms between the medians of `status` (0.7 %), where single runs of either spread over 150 to 250 ms; `goto` within 6 ms either way.
+- **Three conflicts deep in the tree cost nothing that can be measured either:** `status` 971.1 against 984.2 for the plain project measured right after; `goto` 1,053.3 and 1,055.9 against 1,066.8 and 1,083.0.
+- These are a laptop's times, not a gate's. What does not depend on a clock is in the engine's tests, which count what is read: `a_project_without_conflicts_reads_nothing_more` (in `crates/opal-vcs-core/src/status.rs`) and `save_in_a_project_without_conflicts_reads_nothing_more` (in `crates/opal-vcs-core/src/snapshot.rs`) ([testing.md](testing.md) §3).
+- The Nightly workflow's speed gates (Opalro against Git on the code set) passed on `6392c1b`, after the tasks that changed what `status` and `save` read ([run 43694818719](https://github.com/WisHonor/Opalro-VCS/actions/runs/43694818719)): Linux `status` at 1.887 times Git against a limit of 2.
+
+### Not measured
+
+- A project with very many conflicts (thousands), and a record of the largest size (255 versions): the red-team session measures what a planted save can cost.
+- Linux and macOS: the numbers above are from one Windows laptop.
+
+A Nightly run on the milestone's last commit is still to come.

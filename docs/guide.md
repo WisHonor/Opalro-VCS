@@ -1559,7 +1559,7 @@ The `--json` reference, published on https://opalro.com, describes every documen
 ## 13. What v0.1 doesn't do yet
 
 - **No server, no sharing.** v0.1 is one person on one computer. Opalro can't yet copy a project from a server, or send and get changes (syncing is planned for v0.3).
-- **No keeping conflicts.** `opalro combine` stops when both lines changed the same place in a file, and Opalro can't yet show who changed each line of a file.
+- **Conflicts, as far as they go.** A combine keeps its conflicts and `opalro resolve` records your fixes ([`opalro combine`](#opalro-combine)), but Opalro can't yet: show who changed each line of a file; mark in `opalro history` a save that holds conflicts (`opalro status` and `opalro show` say so); combine two lines that both changed a place one of them holds in conflict (fix it on that line first); merge line by line a file that the saves the two lines started from disagree about (you get both lines' versions whole); start a merge program (copy a version out with `opalro resolve <file> --copy theirs --to <somewhere>` and open it in yours); or take one file out of any save.
 - **No locking.** Rules can mark files lockable, but nothing locks them until syncing arrives (v0.3).
 - **No repair.** `opalro verify` finds damage but can't fix it.
 - **No export to Git yet,** and an import happens once: bringing in Git's newer commits later comes after v0.1.
