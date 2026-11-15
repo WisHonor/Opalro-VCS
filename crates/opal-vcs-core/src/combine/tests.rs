@@ -1187,38 +1187,47 @@ fn every_clash_has_its_words() {
         ),
         (
             Clash::MovedApart {
-                ours_to: to("x\u{7}"),
-                theirs_to: to("y"),
+                from: to("x\u{7}"),
+                moved_on: Side::Ours,
+                other_to: to("y\u{7}"),
             },
-            format!("moved to x\\x07 on {o}, and to y on {t}"),
+            format!("moved here from x\\x07 on {o}, and to y\\x07 on {t}"),
+        ),
+        (
+            Clash::MovedApart {
+                from: to("x"),
+                moved_on: Side::Theirs,
+                other_to: to("y"),
+            },
+            format!("moved here from x on {t}, and to y on {o}"),
         ),
         (
             Clash::MovedRemoved {
                 moved_on: Side::Ours,
-                to: to("x\u{7}"),
+                from: to("x\u{7}"),
             },
-            format!("moved to x\\x07 on {o}, removed on {t}"),
+            format!("moved here from x\\x07 on {o}, removed on {t}"),
         ),
         (
             Clash::MovedRemoved {
                 moved_on: Side::Theirs,
-                to: to("x"),
+                from: to("x"),
             },
-            format!("moved to x on {t}, removed on {o}"),
+            format!("moved here from x on {t}, removed on {o}"),
         ),
         (
             Clash::MovedOnto {
                 moved_on: Side::Ours,
-                to: to("x\u{7}"),
+                from: to("x\u{7}"),
             },
-            format!("moved to x\\x07 on {o}, where {t} has something else"),
+            format!("moved here from x\\x07 on {o}, where {t} has something else"),
         ),
         (
             Clash::MovedOnto {
                 moved_on: Side::Theirs,
-                to: to("x"),
+                from: to("x"),
             },
-            format!("moved to x on {t}, where {o} has something else"),
+            format!("moved here from x on {t}, where {o} has something else"),
         ),
         (
             Clash::StartUnknown,
@@ -1952,7 +1961,10 @@ fn moved_apart_conflicts() {
     let t = h.save("side", s, &moved_to("B/Player.cs", f(BODY)));
     assert_eq!(
         h.conflicts(s, o, t),
-        ["Player.cs: moved to A/Player.cs on main, and to B/Player.cs on side"]
+        [
+            "A/Player.cs: moved here from Player.cs on main, and to B/Player.cs on side",
+            "B/Player.cs: moved here from Player.cs on side, and to A/Player.cs on main",
+        ]
     );
 }
 
@@ -1964,11 +1976,11 @@ fn moved_and_removed_conflicts() {
     let removed = h.save("side", s, &tree(&[("Other.cs", f("other\n"))]));
     assert_eq!(
         h.conflicts(s, moved, removed),
-        ["Player.cs: moved to Characters/Player.cs on main, removed on side"]
+        ["Characters/Player.cs: moved here from Player.cs on main, removed on side"]
     );
     assert_eq!(
         h.conflicts(s, removed, moved),
-        ["Player.cs: moved to Characters/Player.cs on side, removed on main"]
+        ["Characters/Player.cs: moved here from Player.cs on side, removed on main"]
     );
 }
 
@@ -1984,20 +1996,17 @@ fn moved_onto_something_new_conflicts() {
     assert_eq!(
         h.conflicts(s, o, t),
         [
-            "Characters/Player.cs: added on both lines, differently",
-            "Player.cs: moved to Characters/Player.cs on main, where side has something else",
+            "Characters/Player.cs: moved here from Player.cs on main, where side has something else",
+            "Player.cs: changed on side, removed on main",
         ]
     );
-    // A file where the moved file's folder would be.
+    // A file where the moved file's folder would be: that clash holds the moved file.
     let mut added = moved_to("Player.cs", f(BODY));
     added.insert("Characters".to_owned(), f("new\n"));
     let t = h.save("side", s, &added);
     assert_eq!(
         h.conflicts(s, o, t),
-        [
-            "Characters: a file on side, a folder on main",
-            "Player.cs: moved to Characters/Player.cs on main, where side has something else",
-        ]
+        ["Characters: a file on side, a folder on main"]
     );
 }
 
@@ -2193,7 +2202,10 @@ fn moved_away_and_made_again_against_a_move_elsewhere_conflicts() {
     let t = h.save("side", s, &moved_to("Y.cs", f(BODY)));
     assert_eq!(
         h.conflicts(s, o, t),
-        ["Player.cs: moved to Z.cs on main, and to Y.cs on side"]
+        [
+            "Y.cs: moved here from Player.cs on side, and to Z.cs on main",
+            "Z.cs: moved here from Player.cs on main, and to Y.cs on side",
+        ]
     );
 }
 
@@ -2228,17 +2240,14 @@ fn a_side_whose_notes_moved_a_file_has_moved_it_though_it_made_a_new_one_there()
     let t = h.save("side", s, &tree(&[("Other.cs", f("other\n"))]));
     assert_eq!(
         h.conflicts(s, o, t),
-        ["Player.cs: moved to Z.cs on main, removed on side"]
+        ["Z.cs: moved here from Player.cs on main, removed on side"]
     );
     let mut onto = moved_to("Player.cs", f(BODY));
     onto.insert("Z.cs".to_owned(), f("z\n"));
     let t = h.save("side", s, &onto);
     assert_eq!(
         h.conflicts(s, o, t),
-        [
-            "Player.cs: moved to Z.cs on main, where side has something else",
-            "Z.cs: added on both lines, differently",
-        ]
+        ["Z.cs: moved here from Player.cs on main, where side has something else"]
     );
     // Without its notes, a new file where one was is that file changed.
     let made_up = Version {
@@ -2266,11 +2275,11 @@ fn a_file_moved_in_by_notes_where_one_was_removed_counts_as_removed() {
     assert!(side.replaced.contains("Player.cs"), "{side:?}");
     assert_eq!(
         h.conflicts(s, o, t),
-        ["Player.cs: moved to Z.cs on main, removed on side"]
+        ["Z.cs: moved here from Player.cs on main, removed on side"]
     );
     assert_eq!(
         h.conflicts(s, t, o),
-        ["Player.cs: moved to Z.cs on side, removed on main"]
+        ["Z.cs: moved here from Player.cs on side, removed on main"]
     );
     // Though the side has something where the file went, too.
     let mut onto = tree(&[("Player.cs", f("other\n"))]);
@@ -2278,10 +2287,7 @@ fn a_file_moved_in_by_notes_where_one_was_removed_counts_as_removed() {
     let t = h.save("side", t, &onto);
     assert_eq!(
         h.conflicts(s, o, t),
-        [
-            "Player.cs: moved to Z.cs on main, removed on side",
-            "Z.cs: added on both lines, differently",
-        ]
+        ["Z.cs: moved here from Player.cs on main, where side has something else"]
     );
 }
 
@@ -3234,22 +3240,27 @@ fn clash_kind(c: &Clash) -> &'static str {
     }
 }
 
+/// `n` start files, alike but for their first and last lines, so that an edit of one merges
+/// cleanly into another's contents.
+fn start_files(n: usize) -> Tree {
+    (0..n)
+        .map(|i| {
+            let text = format!("start {i}\nmid\nmid\nmid\nend {i}\n");
+            (format!("s{i}"), f(&text))
+        })
+        .collect()
+}
+
 /// Builds a start of `n` files, does `ours` and `theirs` on two lines, and checks the merge that
-/// follows moves against a model of it. Gives the conflicts.
+/// follows moves against a model of it, without keeping conflicts and keeping them. Gives the
+/// conflicts it names without keeping them.
 fn moves_case(
     h: &mut Hist,
     n: usize,
     ours: &Work,
     theirs: &Work,
 ) -> Result<Vec<(String, Clash)>, TestCaseError> {
-    // Alike but for their first and last lines, so that an edit of one merges cleanly
-    // into another's contents.
-    let files: Tree = (0..n)
-        .map(|i| {
-            let text = format!("start {i}\nmid\nmid\nmid\nend {i}\n");
-            (format!("s{i}"), f(&text))
-        })
-        .collect();
+    let files = start_files(n);
     let first = h.first;
     let s = h.save("main", first, &files);
     let (o, mut noted_o) = do_work(h, "main", s, &files, ours);
@@ -3292,9 +3303,12 @@ fn moves_case(
     let listed = |m: &BTreeMap<String, String>| m.clone().into_iter().collect::<Vec<_>>();
     prop_assert_eq!(h.followed(vs, vo), listed(&went[0]));
     prop_assert_eq!(h.followed(vs, vt), listed(&went[1]));
-    // The table, applied to the three versions as stored.
+    // The table, applied to the three versions as stored: nothing a line holds is cleared.
     let mut was = three.clone();
-    let mut clashes: BTreeMap<String, Clash> = BTreeMap::new();
+    // Each place a moved file landed in two ways, with its clash and the start's path.
+    let mut places: BTreeMap<String, (Clash, String)> = BTreeMap::new();
+    // The name a clash of the tree merge takes where two added things meet.
+    let mut renames: BTreeMap<String, Clash> = BTreeMap::new();
     let froms: BTreeSet<&String> = went[0].keys().chain(went[1].keys()).collect();
     for a in froms {
         let (moved_on, to, other) = match (went[0].get(a), went[1].get(a)) {
@@ -3304,11 +3318,21 @@ fn moves_case(
                 continue;
             }
             (Some(x), Some(y)) => {
-                let clash = Clash::MovedApart {
-                    ours_to: x.clone(),
-                    theirs_to: y.clone(),
-                };
-                clashes.insert(a.clone(), clash);
+                for (moved_on, at, other_to) in [(Side::Ours, x, y), (Side::Theirs, y, x)] {
+                    let clash = Clash::MovedApart {
+                        from: a.clone(),
+                        moved_on,
+                        other_to: other_to.clone(),
+                    };
+                    places.insert(at.clone(), (clash, a.clone()));
+                    let onto = Clash::MovedOnto {
+                        moved_on,
+                        from: a.clone(),
+                    };
+                    renames.entry(at.clone()).or_insert(onto);
+                }
+                // What a line holds where it was is new there.
+                was[0].remove(a);
                 continue;
             }
             (Some(x), None) => (Side::Ours, x, 2),
@@ -3321,19 +3345,28 @@ fn moves_case(
             three[other].get(a)
         };
         let to = to.clone();
-        let clash = match held {
-            None => Clash::MovedRemoved { moved_on, to },
-            Some(v) if !matches!(v, V::File(..)) => continue,
-            Some(_) if !room(&three[other], &to) => Clash::MovedOnto { moved_on, to },
+        let from = a.clone();
+        match held {
+            None => {
+                let onto = Clash::MovedOnto {
+                    moved_on,
+                    from: from.clone(),
+                };
+                renames.entry(to.clone()).or_insert(onto);
+                places.insert(to, (Clash::MovedRemoved { moved_on, from }, a.clone()));
+                was[0].remove(a);
+            }
+            Some(v) if !matches!(v, V::File(..)) => {}
+            Some(_) if !room(&three[other], &to) => {
+                renames.insert(to, Clash::MovedOnto { moved_on, from });
+            }
             Some(_) => {
                 for v in [0, other] {
                     let moved = was[v].remove(a).unwrap();
                     was[v].insert(to.clone(), moved);
                 }
-                continue;
             }
-        };
-        clashes.insert(a.clone(), clash);
+        }
     }
     // A start file where a side's notes brought another is gone on that side.
     let arrived: BTreeSet<&String> = replaced[0].union(&replaced[1]).copied().collect();
@@ -3359,20 +3392,9 @@ fn moves_case(
                 }
             }
         };
-        match clash {
-            None => {
-                was[0].remove(at);
-            }
-            Some(clash) => {
-                clashes.insert(at.clone(), clash);
-            }
-        }
-    }
-    // A conflict found here is the only one at its place.
-    for a in clashes.keys() {
-        let below = format!("{a}/");
-        for v in &mut was {
-            v.retain(|p, _| p != a && !p.starts_with(&below));
+        was[0].remove(at);
+        if let Some(clash) = clash {
+            renames.insert(at.clone(), clash);
         }
     }
     // A folder these steps emptied is no version's own: only one a version held empty stays.
@@ -3391,28 +3413,104 @@ fn moves_case(
             }
         }
     }
-    let mut want = model(&was[0], &was[1], &was[2], None);
-    want.conflicts.extend(clashes.keys().cloned());
-    let lock = h.repo.lock_for_change("test", &mut |_| {}).unwrap();
-    let mut packs = h.repo.new_packs().unwrap();
-    let mut made = Made::default();
-    let rules = RuleMatcher::new(&RulesRead::default(), &RulesRead::default());
-    let m = merge_three(&h.repo, &mut packs, &mut made, false, &vs, &vo, &vt, &rules).unwrap();
-    let got: BTreeSet<String> = m.conflicts.iter().map(|c| c.path.clone()).collect();
-    prop_assert_eq!(&got, &want.conflicts);
-    for c in &m.conflicts {
-        match clashes.get(&c.path) {
-            Some(clash) => prop_assert_eq!(&c.clash, clash),
-            None => prop_assert!(!is_move_clash(&c.clash), "{c:?}"),
+    let mut out = Vec::new();
+    for keep in [false, true] {
+        let marks = keep.then(|| {
+            let one = ChangeId([3; 16]);
+            let [labels, nothing] =
+                [Parted::One(one), Parted::Nothing(Some(one))].map(|p| sides().labels(p));
+            [labels.ours, labels.base, nothing.base, labels.theirs]
+        });
+        let mut want = model(&was[0], &was[1], &was[2], marks);
+        // Where two added things clash, the tree merge's conflict is named by what brought them.
+        let mut want_clash: BTreeMap<String, Clash> = BTreeMap::new();
+        for (at, clash) in &renames {
+            let both_added = node(&was[0], at) == Node::Missing
+                && matches!(node(&was[1], at), Node::Leaf(_))
+                && matches!(node(&was[2], at), Node::Leaf(_));
+            if both_added && want.conflicts.contains(at) {
+                want_clash.insert(at.clone(), clash.clone());
+            }
+        }
+        // A move clash's place is named, and kept, only where the merge left a plain entry
+        // under plain folders: a conflict at it or above it holds what each line has there.
+        for (at, (clash, from)) in &places {
+            let plain = |p: &str| want.files.get(p).is_some_and(|v| *v == V::Folder);
+            let open = crate::scope::ancestors(at).all(plain)
+                && want.files.get(at).is_some_and(|v| *v != KEPT);
+            if !open {
+                continue;
+            }
+            want.conflicts.insert(at.clone());
+            want_clash.insert(at.clone(), clash.clone());
+            if keep {
+                let whole = |n: Node| match n {
+                    Node::Folder(below) => Node::Folder(with_folders(&below)),
+                    n => n,
+                };
+                let terms = [
+                    whole(node(&three[1], at)),
+                    whole(node(&three[0], from)),
+                    whole(node(&three[2], at)),
+                ];
+                let shown = if terms[0] == Node::Missing {
+                    Shown::Nothing
+                } else {
+                    Shown::Yours
+                };
+                want.files.insert(at.clone(), KEPT);
+                want.kept.insert(at.clone(), Want { terms, shown });
+            }
+        }
+        let lock = h.repo.lock_for_change("test", &mut |_| {}).unwrap();
+        let mut packs = h.repo.new_packs().unwrap();
+        let mut made = Made {
+            keep: keep.then(sides),
+            ..Made::default()
+        };
+        let rules = RuleMatcher::new(&RulesRead::default(), &RulesRead::default());
+        let m = merge_three(&h.repo, &mut packs, &mut made, false, &vs, &vo, &vt, &rules).unwrap();
+        let got: BTreeSet<String> = m.conflicts.iter().map(|c| c.path.clone()).collect();
+        prop_assert_eq!(&got, &want.conflicts);
+        for c in &m.conflicts {
+            match want_clash.get(&c.path) {
+                Some(clash) => prop_assert_eq!(&c.clash, clash),
+                None => prop_assert!(!is_move_clash(&c.clash), "{c:?}"),
+            }
+            prop_assert_eq!(c.stands.is_some(), keep);
+        }
+        if got.is_empty() || keep {
+            // Texts merged line by line are only in the pack set until it is stored.
+            h.repo.store_packs(&lock, packs).unwrap();
+            let store = h.repo.store();
+            let mut merged = read_tree(store, m.root, &made.listings);
+            for (path, kept) in &want.kept {
+                let Some(V::Conflict(id)) = merged.insert(path.clone(), KEPT) else {
+                    return Err(TestCaseError::fail(format!("no conflict at {path}")));
+                };
+                let r = store.conflict(&id).unwrap();
+                let terms: Vec<Node> = r.terms.iter().map(|t| term_node(store, *t)).collect();
+                prop_assert_eq!(&terms, &kept.terms, "{}", path);
+                let own = r
+                    .own
+                    .map(|own| (own.marker, own.version.map(|v| leaf(store, v.kind, v.id))));
+                let shown = match own {
+                    Some((7, Some(v))) => Shown::Marked(v),
+                    None if r.mine().is_some() => Shown::Yours,
+                    None => Shown::Nothing,
+                    other => return Err(TestCaseError::fail(format!("{path}: {other:?}"))),
+                };
+                // The model marks whole files; where the marks fall is the text merge's to test.
+                let kind = std::mem::discriminant::<Shown>;
+                prop_assert_eq!(kind(&shown), kind(&kept.shown), "{}", path);
+            }
+            prop_assert_eq!(merged, want.files);
+        }
+        if !keep {
+            out = m.conflicts.into_iter().map(|c| (c.path, c.clash)).collect();
         }
     }
-    if got.is_empty() {
-        // Texts merged line by line are only in the pack set until it is stored.
-        h.repo.store_packs(&lock, packs).unwrap();
-        let merged = read_tree(h.repo.store(), m.root, &made.listings);
-        prop_assert_eq!(merged, want.files);
-    }
-    Ok(m.conflicts.into_iter().map(|c| (c.path, c.clash)).collect())
+    Ok(out)
 }
 
 fn bounds() -> Bounds {
@@ -6421,4 +6519,385 @@ fn a_held_conflict_met_after_places_were_kept_leaves_nothing_behind() {
     );
     // No pack, and so no record, marked text or listing, and nothing in `tmp`; the line stays.
     assert_untouched(&h, &before);
+}
+
+// Moves keep conflicts at the places the file went.
+
+/// The record at `path` of the stored tree `root`, with what each of its terms holds.
+fn record_in(h: &Hist, root: Id, path: &str) -> (Record, Vec<Option<V>>) {
+    let store = h.repo.store();
+    let V::Conflict(id) = read_tree(store, root, &HashMap::new())[path] else {
+        panic!("no conflict at {path}");
+    };
+    let r = store.conflict(&id).unwrap();
+    let terms = r
+        .terms
+        .iter()
+        .map(|t| t.map(|t| leaf(store, t.kind, t.id)))
+        .collect();
+    (r, terms)
+}
+
+fn kept_at(path: &str, clash: Clash, stands: Stands) -> Conflict {
+    Conflict {
+        path: path.into(),
+        clash,
+        stands: Some(stands),
+    }
+}
+
+fn paths_of(h: &Hist, root: Id) -> Vec<String> {
+    read_tree(h.repo.store(), root, &HashMap::new())
+        .into_keys()
+        .collect()
+}
+
+#[test]
+fn moved_apart_keeps_two_conflicts() {
+    let mut h = Hist::new();
+    let s = player(&mut h);
+    let o = h.save("main", s, &moved_to("A/Player.cs", f(BODY)));
+    let t = h.save("side", s, &moved_to("B/Player.cs", f(BODY)));
+    let t = h.save("side", t, &moved_to("B/Player.cs", edit(1, "TWO")));
+    let m = h.kept(s, o, t, &no_rules());
+    let apart = |moved_on, other_to: &str| Clash::MovedApart {
+        from: "Player.cs".into(),
+        moved_on,
+        other_to: other_to.into(),
+    };
+    assert_eq!(
+        m.conflicts,
+        [
+            kept_at(
+                "A/Player.cs",
+                apart(Side::Ours, "B/Player.cs"),
+                Stands::Yours
+            ),
+            kept_at(
+                "B/Player.cs",
+                apart(Side::Theirs, "A/Player.cs"),
+                Stands::Nothing
+            ),
+        ]
+    );
+    assert_eq!(m.more, 0);
+    let (r, terms) = record_in(&h, m.root, "A/Player.cs");
+    assert_eq!(r.own, None);
+    assert_eq!(terms, [Some(f(BODY)), Some(f(BODY)), None]);
+    let (r, terms) = record_in(&h, m.root, "B/Player.cs");
+    assert_eq!(r.own, None);
+    assert_eq!(terms, [None, Some(f(BODY)), Some(edit(1, "TWO"))]);
+    assert_eq!(
+        paths_of(&h, m.root),
+        ["A", "A/Player.cs", "B", "B/Player.cs", "Other.cs"]
+    );
+}
+
+#[test]
+fn moved_and_removed_keeps_the_moved_file_where_it_went() {
+    let mut h = Hist::new();
+    let s = player(&mut h);
+    let at = "Characters/Player.cs";
+    let moved = h.save("main", s, &moved_to(at, f(BODY)));
+    let removed = h.save("side", s, &tree(&[("Other.cs", f("other\n"))]));
+    let clash = |moved_on| Clash::MovedRemoved {
+        moved_on,
+        from: "Player.cs".into(),
+    };
+    let m = h.kept(s, moved, removed, &no_rules());
+    assert_eq!(m.conflicts, [kept_at(at, clash(Side::Ours), Stands::Yours)]);
+    assert_eq!(
+        record_in(&h, m.root, at).1,
+        [Some(f(BODY)), Some(f(BODY)), None]
+    );
+    let m = h.kept(s, removed, moved, &no_rules());
+    assert_eq!(
+        m.conflicts,
+        [kept_at(at, clash(Side::Theirs), Stands::Nothing)]
+    );
+    assert_eq!(
+        record_in(&h, m.root, at).1,
+        [None, Some(f(BODY)), Some(f(BODY))]
+    );
+    assert_eq!(paths_of(&h, m.root), ["Characters", at, "Other.cs"]);
+}
+
+/// On `main`, `Player.cs` moved to `Characters/Player.cs`; on `side`, something new put there
+/// and `Player.cs` held as `old`. Gives the three saves.
+fn moved_onto_new(h: &mut Hist, old: V) -> (Id, Id, Id) {
+    let s = player(h);
+    let o = h.save("main", s, &moved_to("Characters/Player.cs", f(BODY)));
+    let mut added = moved_to("Player.cs", old);
+    added.insert("Characters/Player.cs".to_owned(), f("new\n"));
+    let t = h.save("side", s, &added);
+    (s, o, t)
+}
+
+#[test]
+fn moved_onto_something_new_keeps_two_added_things_with_markers() {
+    let mut h = Hist::new();
+    let (s, o, t) = moved_onto_new(&mut h, f(BODY));
+    let at = "Characters/Player.cs";
+    let m = h.kept(s, o, t, &no_rules());
+    let onto = Clash::MovedOnto {
+        moved_on: Side::Ours,
+        from: "Player.cs".into(),
+    };
+    assert_eq!(
+        m.conflicts,
+        [kept_at(at, onto, Stands::Markers { places: 1 })]
+    );
+    let (r, terms) = record_in(&h, m.root, at);
+    assert_eq!(terms, [Some(f(BODY)), None, Some(f("new\n"))]);
+    assert_eq!(r.own.unwrap().marker, 7);
+    // Side left it as it was where it was: it went with the move.
+    assert_eq!(paths_of(&h, m.root), ["Characters", at, "Other.cs"]);
+}
+
+#[test]
+fn moved_onto_while_the_other_line_changed_it_in_place_keeps_that_change_at_the_old_place() {
+    let mut h = Hist::new();
+    let (s, o, t) = moved_onto_new(&mut h, edit(1, "TWO"));
+    let m = h.kept(s, o, t, &no_rules());
+    let onto = Clash::MovedOnto {
+        moved_on: Side::Ours,
+        from: "Player.cs".into(),
+    };
+    let removed = Clash::ChangedRemoved {
+        removed_on: Side::Ours,
+    };
+    assert_eq!(
+        m.conflicts,
+        [
+            kept_at("Characters/Player.cs", onto, Stands::Markers { places: 1 }),
+            kept_at("Player.cs", removed, Stands::Nothing),
+        ]
+    );
+    assert_eq!(
+        record_in(&h, m.root, "Player.cs").1,
+        [None, Some(f(BODY)), Some(edit(1, "TWO"))]
+    );
+}
+
+#[test]
+fn a_move_clash_place_in_a_new_folder_makes_the_folder() {
+    let mut h = Hist::new();
+    let s = player(&mut h);
+    let at = "New/Deeper/Player.cs";
+    let removed = h.save("main", s, &tree(&[("Other.cs", f("other\n"))]));
+    let moved = h.save("side", s, &moved_to(at, f(BODY)));
+    let m = h.kept(s, removed, moved, &no_rules());
+    let clash = Clash::MovedRemoved {
+        moved_on: Side::Theirs,
+        from: "Player.cs".into(),
+    };
+    assert_eq!(m.conflicts, [kept_at(at, clash, Stands::Nothing)]);
+    let top = h.repo.store().listing(&m.root).unwrap();
+    assert_eq!(top.get("New").unwrap().kind, EntryKind::Folder);
+    assert_eq!(paths_of(&h, m.root), ["New", "New/Deeper", at, "Other.cs"]);
+}
+
+#[test]
+fn the_count_includes_move_clash_places() {
+    let mut h = Hist::new();
+    let s = player(&mut h);
+    let ours = moved_to("A/Player.cs", f(BODY));
+    h.save("main", s, &ours);
+    h.save("side", s, &moved_to("B/Player.cs", f(BODY)));
+    h.on("main", &ours);
+    let (saved, made, count) = kept_combine(&mut h);
+    let paths: Vec<&str> = made.iter().map(|c| c.path.as_str()).collect();
+    assert_eq!((paths, count), (vec!["A/Player.cs", "B/Player.cs"], 2));
+    assert!(matches!(saved["A/Player.cs"], V::Conflict(_)));
+    assert!(matches!(saved["B/Player.cs"], V::Conflict(_)));
+    // Standing as yours: your file where you put it, nothing where they did.
+    let folder = h.folder();
+    assert_eq!(folder.get("A/Player.cs"), Some(&f(BODY)));
+    assert!(!folder.contains_key("B/Player.cs"), "{folder:?}");
+}
+
+#[test]
+fn a_move_clash_below_a_kept_conflict_is_held_by_that_conflict() {
+    let mut h = Hist::new();
+    let first = h.first;
+    let s = h.save("main", first, &tree(&[("a.txt", f(BODY))]));
+    let ui = [("ui/a.txt", f(BODY)), ("ui/b.txt", f("b\n"))];
+    let o = h.save("main", s, &tree(&ui));
+    let theirs = [("c.txt", f(BODY)), ("ui", f("ui\n"))];
+    let t = h.save("side", s, &tree(&theirs));
+    let m = h.kept(s, o, t, &no_rules());
+    let apart = Clash::MovedApart {
+        from: "a.txt".into(),
+        moved_on: Side::Theirs,
+        other_to: "ui/a.txt".into(),
+    };
+    let folder_on = Side::Ours;
+    assert_eq!(
+        m.conflicts,
+        [
+            kept_at("c.txt", apart, Stands::Nothing),
+            kept_at("ui", Clash::FileAndFolder { folder_on }, Stands::Yours),
+        ]
+    );
+    // No record below `ui`: your folder there holds the moved file, and `b.txt`.
+    assert_eq!(paths_of(&h, m.root), ["c.txt", "ui"]);
+    let (r, terms) = record_in(&h, m.root, "ui");
+    assert_eq!(terms, [Some(V::Folder), None, Some(f("ui\n"))]);
+    let yours = r.terms[0].unwrap();
+    let held = read_tree(h.repo.store(), yours.id, &HashMap::new());
+    assert_eq!(held, tree(&[("a.txt", f(BODY)), ("b.txt", f("b\n"))]));
+    assert_eq!(
+        record_in(&h, m.root, "c.txt").1,
+        [None, Some(f(BODY)), Some(f(BODY))]
+    );
+}
+
+#[test]
+fn a_scene_moved_onto_a_text_is_kept_as_yours_when_its_old_name_says_no_markers() {
+    let mut h = Hist::new();
+    let first = h.first;
+    let s = h.save("main", first, &tree(&[("Main.unity", f(BODY))]));
+    let o = h.save("main", s, &tree(&[("notes.txt", f(BODY))]));
+    let both = [("Main.unity", f(BODY)), ("notes.txt", f("notes\n"))];
+    let t = h.save("side", s, &tree(&both));
+    let onto = Clash::MovedOnto {
+        moved_on: Side::Ours,
+        from: "Main.unity".into(),
+    };
+    let m = h.kept(s, o, t, &scene_rule());
+    assert_eq!(
+        m.conflicts,
+        [kept_at("notes.txt", onto.clone(), Stands::Yours)]
+    );
+    assert_eq!(record_in(&h, m.root, "notes.txt").0.own, None);
+    // Its new name alone would have been marked.
+    let m = h.kept(s, o, t, &no_rules());
+    assert_eq!(
+        m.conflicts,
+        [kept_at("notes.txt", onto, Stands::Markers { places: 1 })]
+    );
+}
+
+/// Every entry below the stored listing `root`, by path, folders too, read apart from the merge.
+fn entries_below(store: &Store, root: Id) -> Vec<(String, Entry)> {
+    let mut out = Vec::new();
+    let mut todo = vec![(String::new(), root)];
+    while let Some((at, id)) = todo.pop() {
+        for e in store.listing(&id).unwrap().entries() {
+            let path = if at.is_empty() {
+                e.name.clone()
+            } else {
+                format!("{at}/{}", e.name)
+            };
+            if e.kind == EntryKind::Folder {
+                todo.push((path.clone(), e.id));
+            }
+            out.push((path, e.clone()));
+        }
+    }
+    out
+}
+
+#[test]
+fn nothing_a_line_saved_is_left_out() {
+    let h = std::cell::RefCell::new(Hist::new());
+    let seen: std::cell::RefCell<BTreeMap<&str, usize>> = Default::default();
+    let rng = TestRng::deterministic_rng(RngAlgorithm::ChaCha);
+    let mut runner = TestRunner::new_with_rng(Config::with_cases(128), rng);
+    runner
+        .run(&(1..=6usize, work(), work()), |(n, ours, theirs)| {
+            let mut h = h.borrow_mut();
+            let files = start_files(n);
+            let first = h.first;
+            let s = h.save("main", first, &files);
+            let (o, _) = do_work(&mut h, "main", s, &files, &ours);
+            let (t, _) = do_work(&mut h, "side", s, &files, &theirs);
+            let [vs, mut vo, mut vt] = [s, o, t].map(|x| h.version(x));
+            for (work, v) in [(&ours, &mut vo), (&theirs, &mut vt)] {
+                if work.made_up {
+                    v.save = None;
+                }
+            }
+            let lock = h.repo.lock_for_change("test", &mut |_| {}).unwrap();
+            let mut packs = h.repo.new_packs().unwrap();
+            let mut made = Made {
+                keep: Some(sides()),
+                ..Made::default()
+            };
+            let rules = no_rules();
+            let m = merge_three(&h.repo, &mut packs, &mut made, false, &vs, &vo, &vt, &rules)
+                .map_err(|e| TestCaseError::fail(format!("{e:?}")))?;
+            h.repo.store_packs(&lock, packs).unwrap();
+            let store = h.repo.store();
+            let mut seen = seen.borrow_mut();
+            for c in &m.conflicts {
+                *seen.entry(clash_kind(&c.clash)).or_default() += 1;
+            }
+            // What the result holds as entries, what its records hold, and what is below a
+            // folder a record holds.
+            let version = |e: &Entry| (e.kind as u8, e.id);
+            let (mut plain, mut held, mut below) =
+                (BTreeSet::new(), BTreeSet::new(), BTreeSet::new());
+            let mut landed = BTreeSet::new();
+            for (path, e) in entries_below(store, m.root) {
+                landed.insert(path.clone());
+                if e.kind != EntryKind::Conflict {
+                    plain.insert(version(&e));
+                    continue;
+                }
+                let r = store.conflict(&e.id).unwrap();
+                for t in r.terms.iter().flatten() {
+                    held.insert((t.kind as u8, t.id));
+                    if t.kind != EntryKind::Folder {
+                        continue;
+                    }
+                    for (p, e) in entries_below(store, t.id) {
+                        prop_assert!(e.kind != EntryKind::Conflict, "{p} in {path}");
+                        below.insert(version(&e));
+                    }
+                }
+            }
+            let start: BTreeMap<String, (u8, Id)> = entries_below(store, vs.root)
+                .into_iter()
+                .map(|(p, e)| (p, version(&e)))
+                .collect();
+            let moved_away: BTreeSet<Id> = start.values().map(|v| v.1).collect();
+            let start_versions: BTreeSet<(u8, Id)> = start.values().copied().collect();
+            for (side, v) in [("main", vo), ("side", vt)] {
+                for (path, e) in entries_below(store, v.root) {
+                    let x = version(&e);
+                    if e.kind == EntryKind::Folder || start.get(&path) == Some(&x) {
+                        continue;
+                    }
+                    if plain.contains(&x) || held.contains(&x) {
+                        continue;
+                    }
+                    // A start file a line only moved: what the result holds where it went took
+                    // the other line's change to it, so the line saved nothing new to keep.
+                    if start_versions.contains(&x) && landed.contains(&path) {
+                        *seen.entry("moved, changed on the other line").or_default() += 1;
+                        continue;
+                    }
+                    prop_assert!(
+                        below.contains(&x),
+                        "{side}'s {path} is left out: {:?}",
+                        m.conflicts
+                    );
+                    if moved_away.contains(&e.id) {
+                        *seen.entry("moved file below a conflict").or_default() += 1;
+                    }
+                }
+            }
+            Ok(())
+        })
+        .unwrap();
+    let seen = seen.into_inner();
+    for kind in [
+        "moved apart",
+        "moved, removed",
+        "moved onto",
+        "moved file below a conflict",
+    ] {
+        assert!(seen.get(kind).is_some_and(|&n| n >= 3), "{seen:?}");
+    }
 }

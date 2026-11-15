@@ -19,6 +19,7 @@ pub const MAX_SAVE_ENTRIES: u64 = 10_000_000;
 
 /// The limits for a whole save, and how much of a save one walk has met so far. Every walk over a
 /// save takes one of these (two when it compares two saves), so the rule lives here.
+#[derive(Debug)]
 pub struct SaveLimits {
     max_depth: usize,
     max_entries: u64,

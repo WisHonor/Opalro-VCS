@@ -98,14 +98,15 @@ pub(crate) struct Merged {
     /// the first 100 in path order, and how many more.
     pub undecided: Vec<Conflict>,
     pub undecided_more: u64,
-    /// Whether a clash was named without being kept as a conflict, where conflicts are kept.
-    pub unkept: bool,
     /// Files whose comparison ran past its deadline.
     pub timed_out: Vec<String>,
     /// Sides where too many files left for moves to be followed by their contents.
     pub unfollowed: Vec<Side>,
     /// Whether, by the end of this merge, the combine's move notes were past what it checks.
     pub notes_unbelieved: bool,
+    /// Ours' and theirs' checks for a conflict below a folder: their limits, held across the
+    /// merge, and the folders walked already, each walked once however many places name it.
+    below: [(SaveLimits, HashSet<Id>); 2],
 }
 
 /// The three versions' entries, or listings, in the order of `Which`.
@@ -136,16 +137,20 @@ pub(crate) fn merge_trees(
         rules_not_whole: None,
         undecided: Vec::new(),
         undecided_more: 0,
-        unkept: false,
         timed_out: Vec::new(),
         unfollowed: Vec::new(),
         notes_unbelieved: false,
+        below: [(); 2].map(|()| {
+            (
+                SaveLimits::new(MAX_SAVE_DEPTH, made.max_below),
+                HashSet::new(),
+            )
+        }),
     };
     if let Some(root) = one_sides([start, ours, theirs].map(Some)) {
         merged.root = root.unwrap_or(ours);
         return Ok(merged);
     }
-    let max_below = made.max_below;
     let mut walk = Walk {
         store,
         packs,
@@ -155,7 +160,6 @@ pub(crate) fn merge_trees(
         moved,
         deadline,
         limits: [(); 3].map(|()| SaveLimits::default()),
-        below: [(); 2].map(|()| (SaveLimits::new(MAX_SAVE_DEPTH, max_below), HashSet::new())),
         merged,
     };
     // What is left to do waits here, not in a call per folder level: a save may nest deeper than
@@ -292,9 +296,6 @@ struct Walk<'a> {
     deadline: Duration,
     /// Each version is held to a save's limits on its own.
     limits: Three<SaveLimits>,
-    /// Ours' and theirs' checks for a conflict below a folder: their limits, held across the
-    /// merge, and the folders walked already, each walked once however many places name it.
-    below: [(SaveLimits, HashSet<Id>); 2],
     merged: Merged,
 }
 
@@ -641,12 +642,8 @@ impl Walk<'_> {
         self.record_at(path, name, clash, terms, None).map(Some)
     }
 
-    /// Makes the record of a conflict at `path`: `terms` in the record's order (yours, where the
-    /// lines parted, theirs), its own version if any (with its marker length and marked places),
-    /// into the pack set and `made.records`; checks first that no folder among yours and theirs
-    /// holds a conflict below it (`HeldConflict`); names the conflict with how it stands. Gives
-    /// the kind-6 entry.
-    pub(super) fn record_at(
+    /// [`record`] at `path`, as the entry `name` its folder holds.
+    fn record_at(
         &mut self,
         path: &str,
         name: String,
@@ -654,39 +651,8 @@ impl Walk<'_> {
         terms: Three<Option<Entry>>,
         own: Option<(Entry, u8, u64)>,
     ) -> Result<Entry, CombineError> {
-        for (term, v, on) in [(&terms[0], 1, Held::Ours), (&terms[2], 2, Held::Theirs)] {
-            let Some(folder) = folder_id(term.as_ref()) else {
-                continue;
-            };
-            if let Some(at) = self.conflict_below(path, folder, v)? {
-                return Err(CombineError::HeldConflict {
-                    names: Names::default(),
-                    path: path.to_owned(),
-                    at,
-                    on,
-                });
-            }
-        }
-        let term = |e: &Entry| Term {
-            kind: e.kind,
-            id: e.id,
-            size: e.size,
-        };
-        let record = Record {
-            terms: terms.iter().map(|e| e.as_ref().map(term)).collect(),
-            own: own.as_ref().map(|(e, marker, _)| Own {
-                version: Some(term(e)),
-                marker: *marker,
-            }),
-        };
-        let stands = match (&own, &terms[0]) {
-            (Some((.., places)), _) => Stands::Markers { places: *places },
-            (None, Some(_)) => Stands::Yours,
-            (None, None) => Stands::Nothing,
-        };
-        let id = store_record(self.store, self.packs, &record)?;
-        self.made.records.insert(id, record);
-        self.conflict(path, clash, Some(stands));
+        let (store, made, merged) = (self.store, &mut *self.made, &mut self.merged);
+        let id = record(store, self.packs, made, merged, path, clash, terms, own)?;
         Ok(Entry {
             name,
             kind: EntryKind::Conflict,
@@ -695,51 +661,8 @@ impl Walk<'_> {
         })
     }
 
-    /// The first conflict found in the folder listing `id` at `path` of version `v`, or below
-    /// it (`v` 1 for ours, 2 for theirs): only folders not walked before are read, all of them
-    /// together held to that version's limits.
-    fn conflict_below(
-        &mut self,
-        path: &str,
-        id: Id,
-        v: usize,
-    ) -> Result<Option<String>, CombineError> {
-        let [ours, theirs] = &mut self.below;
-        let (limits, seen) = if v == 1 { ours } else { theirs };
-        let mut todo = vec![(path.to_owned(), id, path.split('/').count())];
-        while let Some((at, id, depth)) = todo.pop() {
-            // A listing met again holds what it held the first time; a conflict found in one
-            // stops the combine, so every folder in `seen` holds none.
-            if !seen.insert(id) {
-                continue;
-            }
-            limits.check_depth(depth).map_err(past(v))?;
-            let here = listing(self.store, self.made, &id)?;
-            limits.add(here.entries().len()).map_err(past(v))?;
-            if let Some(e) = here
-                .entries()
-                .iter()
-                .find(|e| e.kind == EntryKind::Conflict)
-            {
-                return Ok(Some(join(&at, &e.name)));
-            }
-            let folders = here.entries().iter().rev();
-            todo.extend(
-                folders
-                    .filter(|e| e.kind == EntryKind::Folder)
-                    .map(|e| (join(&at, &e.name), e.id, depth + 1)),
-            );
-        }
-        Ok(None)
-    }
-
     fn conflict(&mut self, path: &str, clash: Clash, stands: Option<Stands>) {
-        let conflict = Conflict {
-            path: path.to_owned(),
-            clash,
-            stands,
-        };
-        name_in(&mut self.merged.conflicts, &mut self.merged.more, conflict);
+        named(&mut self.merged, path, clash, stands);
     }
 
     /// Builds and stores a merged folder's listing once all of it is worked out: its ID, and
@@ -771,6 +694,107 @@ enum Contents {
     /// The text with markers, their length, and the places marked.
     Marked(Vec<u8>, u8, u64),
     Not(NotMerged),
+}
+
+/// Makes the record of a conflict at `path`: `terms` in the record's order (yours, where the
+/// lines parted, theirs), its own version if any (with its marker length and marked places),
+/// into the pack set and `made.records`; checks first that no folder among yours and theirs
+/// holds a conflict below it (`HeldConflict`); names the conflict with how it stands. Gives the
+/// record's ID.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn record(
+    store: &Store,
+    packs: &mut PackSet,
+    made: &mut Made,
+    merged: &mut Merged,
+    path: &str,
+    clash: Clash,
+    terms: Three<Option<Entry>>,
+    own: Option<(Entry, u8, u64)>,
+) -> Result<Id, CombineError> {
+    for (term, v, on) in [(&terms[0], 1, Held::Ours), (&terms[2], 2, Held::Theirs)] {
+        let Some(folder) = folder_id(term.as_ref()) else {
+            continue;
+        };
+        let below = &mut merged.below[v - 1];
+        if let Some(at) = conflict_below(store, made, below, path, folder, v)? {
+            return Err(CombineError::HeldConflict {
+                names: Names::default(),
+                path: path.to_owned(),
+                at,
+                on,
+            });
+        }
+    }
+    let term = |e: &Entry| Term {
+        kind: e.kind,
+        id: e.id,
+        size: e.size,
+    };
+    let record = Record {
+        terms: terms.iter().map(|e| e.as_ref().map(term)).collect(),
+        own: own.as_ref().map(|(e, marker, _)| Own {
+            version: Some(term(e)),
+            marker: *marker,
+        }),
+    };
+    let stands = match (&own, &terms[0]) {
+        (Some((.., places)), _) => Stands::Markers { places: *places },
+        (None, Some(_)) => Stands::Yours,
+        (None, None) => Stands::Nothing,
+    };
+    let id = store_record(store, packs, &record)?;
+    made.records.insert(id, record);
+    named(merged, path, clash, Some(stands));
+    Ok(id)
+}
+
+/// Names the conflict at `path` among the merge's.
+pub(super) fn named(merged: &mut Merged, path: &str, clash: Clash, stands: Option<Stands>) {
+    let conflict = Conflict {
+        path: path.to_owned(),
+        clash,
+        stands,
+    };
+    name_in(&mut merged.conflicts, &mut merged.more, conflict);
+}
+
+/// The first conflict found in the folder listing `id` at `path` of version `v`, or below it
+/// (`v` 1 for ours, 2 for theirs): only folders not walked before are read, all of them together
+/// held to that version's limits.
+fn conflict_below(
+    store: &Store,
+    made: &Made,
+    (limits, seen): &mut (SaveLimits, HashSet<Id>),
+    path: &str,
+    id: Id,
+    v: usize,
+) -> Result<Option<String>, CombineError> {
+    let mut todo = vec![(path.to_owned(), id, path.split('/').count())];
+    while let Some((at, id, depth)) = todo.pop() {
+        // A listing met again holds what it held the first time; a conflict found in one stops
+        // the combine, so every folder in `seen` holds none.
+        if !seen.insert(id) {
+            continue;
+        }
+        limits.check_depth(depth).map_err(past(v))?;
+        let here = listing(store, made, &id)?;
+        limits.add(here.entries().len()).map_err(past(v))?;
+        if let Some(e) = here
+            .entries()
+            .iter()
+            .find(|e| e.kind == EntryKind::Conflict)
+        {
+            return Ok(Some(join(&at, &e.name)));
+        }
+        let folders = here.entries().iter().rev();
+        todo.extend(
+            folders
+                .filter(|e| e.kind == EntryKind::Folder)
+                .map(|e| (join(&at, &e.name), e.id, depth + 1)),
+        );
+    }
+    Ok(None)
 }
 
 /// Names `c` in `list`, the first `MAX_NAMED`, else counts it in `more`.

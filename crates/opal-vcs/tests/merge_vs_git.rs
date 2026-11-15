@@ -971,7 +971,7 @@ fn a_move_saved_by_itself_is_followed_and_one_saved_with_an_edit_is_not() {
         if apart {
             let said = opalro(&env, &["combine", "side"], 1);
             assert!(
-                said.contains("\n  a.txt: moved to b.txt on main, removed on side"),
+                said.contains("\n  b.txt: moved here from a.txt on main, removed on side"),
                 "{said}"
             );
         } else {
