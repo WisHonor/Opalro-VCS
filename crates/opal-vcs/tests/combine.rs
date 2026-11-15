@@ -449,6 +449,7 @@ fn a_combine_that_made_none_but_carries_some_says_the_lines_held_them() {
         let doc = json(&env, &["combine", "other"], 0);
         assert_eq!(doc["conflicts"], serde_json::json!([]), "{doc}");
         assert_eq!(doc["conflict_count"], if two { 2 } else { 1 }, "{doc}");
+        assert_eq!(doc["holds_conflicts"], true, "{doc}");
     }
 }
 

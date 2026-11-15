@@ -4300,6 +4300,100 @@ fn only_if_clean_stops_a_forward_onto_a_save_that_holds_a_conflict() {
 }
 
 #[test]
+fn only_if_clean_stops_a_forward_onto_a_save_past_the_limits() {
+    let mut h = Hist::new();
+    h.keep = Keep::OnlyIfClean;
+    ahead_onto_a_conflict(&mut h);
+    let before = h.untouched();
+    // The target holds two entries: past a limit of one, it can't be looked through.
+    let tight = Bounds {
+        limits: SaveLimits::new(crate::listing::MAX_SAVE_DEPTH, 1),
+        ..bounds()
+    };
+    let err = combine_by(&mut h, "side", None, tight).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            CombineError::Past {
+                which: Which::Theirs,
+                ..
+            }
+        ),
+        "{err:?}"
+    );
+    assert!(
+        err.to_string().starts_with("side is past Opalro's limits"),
+        "{err}"
+    );
+    assert_untouched(&h, &before);
+}
+
+#[test]
+fn a_forward_without_the_flag_reads_nothing_more() {
+    // Onto a clean save: as many listings and records read as where conflicts aren't kept.
+    let mut reads = vec![];
+    for (feature, keep) in [
+        (false, Keep::Conflicts),
+        (true, Keep::Conflicts),
+        (true, Keep::OnlyIfClean),
+    ] {
+        let mut h = Hist::new();
+        if !feature {
+            h.repo = crate::test_support::without_conflicts_feature(h.dir.path());
+        }
+        h.keep = keep;
+        let first = h.first;
+        let base = tree(&[("a.txt", f("a\n"))]);
+        let b = h.plant(&[first], &base, Some(&[]));
+        let t = h.plant(&[b], &with(&base, &[("d/x.txt", f("x\n"))]), Some(&[]));
+        h.set(|s| {
+            s.lines.insert("side".into(), t);
+            s.lines.insert("main".into(), b);
+        });
+        h.on("main", &base);
+        let store = h.repo.store();
+        let before = (store.listings_read(), store.conflicts_read());
+        let done = combine_in(&mut h, "side").unwrap();
+        assert_eq!(done.result, Combined::Forward);
+        let store = h.repo.store();
+        reads.push((
+            store.listings_read() - before.0,
+            store.conflicts_read() - before.1,
+        ));
+    }
+    assert_eq!(reads[0], reads[1]);
+    // Asked for a clean line, the target is looked through: the measure is counted.
+    assert!(reads[2].0 > reads[1].0, "{reads:?}");
+}
+
+#[test]
+fn only_if_clean_stops_for_a_conflict_inside_a_folder_one_line_changed() {
+    let mut h = Hist::new();
+    h.keep = Keep::OnlyIfClean;
+    let c = plant_record(&mut h, [b"mine\n", b"was\n", b"theirs\n"]);
+    let base = tree(&[("a.txt", f("a\n")), ("d/k.txt", f("k\n"))]);
+    let main = with(&base, &[("a.txt", f("main\n"))]);
+    let side = with(&base, &[("d/x.txt", V::Conflict(c))]);
+    planted_lines(&mut h, &base, &main, &side);
+    let before = h.untouched();
+    let err = combine_in(&mut h, "side").unwrap_err();
+    assert!(
+        matches!(
+            &err,
+            CombineError::Conflicts {
+                conflicts,
+                held: 1,
+                forward: false,
+                why: NotKept::OnlyIfClean,
+                ..
+            } if conflicts.is_empty()
+        ),
+        "{err:?}"
+    );
+    assert_untouched(&h, &before);
+}
+
+#[test]
 fn without_the_feature_a_forward_is_not_looked_through() {
     let mut reads = vec![];
     for keep in [Keep::Conflicts, Keep::OnlyIfClean] {

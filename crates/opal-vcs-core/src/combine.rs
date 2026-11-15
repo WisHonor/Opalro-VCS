@@ -1068,7 +1068,7 @@ fn combine_locked(
     if only_in(repo, from, &[with])? == 0 {
         // Asked for a clean line, the target's save is looked through for conflicts.
         if asked.keep == Keep::OnlyIfClean && repo.keeps_conflicts() {
-            let held = held_in(repo, with, bounds.limits)?;
+            let held = held_in(repo, &names, with, bounds.limits)?;
             if held > 0 {
                 return Err(CombineError::Conflicts {
                     names,
@@ -1420,9 +1420,14 @@ fn tangled() -> CombineError {
     }
 }
 
-/// How many places in conflict `save` holds, measured as a combined save is; none when it is
-/// past the limits, which the switch to it then says.
-fn held_in(repo: &Repository, save: Id, mut limits: SaveLimits) -> Result<u64, CombineError> {
+/// How many places in conflict the target's `save` holds, measured as a combined save is. One
+/// past the limits can't be looked through, so it is refused as a combine refuses such a target.
+fn held_in(
+    repo: &Repository,
+    names: &Names,
+    save: Id,
+    mut limits: SaveLimits,
+) -> Result<u64, CombineError> {
     let store = repo.store();
     let root = version_of(repo, save)?.root;
     let stand = |id: &Id| {
@@ -1432,7 +1437,11 @@ fn held_in(repo: &Repository, save: Id, mut limits: SaveLimits) -> Result<u64, C
             .map_err(|e| unreadable("in the save combined in", id, e))
     };
     let measured = limits.add_all_standing(root, 0, 0, |id| store.listing(id), stand)?;
-    Ok(measured.unwrap_or(0))
+    measured.map_err(|detail| CombineError::Past {
+        names: names.clone(),
+        which: Which::Theirs,
+        detail,
+    })
 }
 
 fn version_of(repo: &Repository, save: Id) -> Result<Version, CombineError> {

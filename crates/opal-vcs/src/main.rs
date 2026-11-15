@@ -2307,9 +2307,11 @@ fn combine_command(
             "conflicts": conflicts,
             "more_conflicts": more,
             "conflict_count": count,
-            "holds_conflicts": match count {
-                Some(count) => count > 0,
-                None => done.holds_conflicts,
+            // Nothing to combine looks at no save, so it can't say.
+            "holds_conflicts": match done.result {
+                Combined::Nothing => None,
+                Combined::Forward => Some(done.holds_conflicts),
+                Combined::Made { conflict_count, .. } => Some(conflict_count > 0),
             },
             "written": done.applied.written,
             "removed": done.applied.removed,
