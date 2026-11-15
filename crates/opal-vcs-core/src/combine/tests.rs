@@ -2403,6 +2403,119 @@ fn a_true_note_past_what_a_combine_checks_is_not_believed() {
     };
     assert_eq!(followed_with(&h, &mut made, s, tip), (pairs(&[]), true));
     assert_eq!((made.notes_left, made.notes_spent), (0, true));
+    // Past what is left at the newest save, the save before it, of two notes, isn't read.
+    let (vs, vt) = (h.version(s), h.version(tip));
+    let mut made = Made {
+        notes_left: 0,
+        ..Made::default()
+    };
+    crate::save::NOTES_BUILT.set(0);
+    assert!(
+        followed(&h.repo, &mut made, &vs, &vt)
+            .unwrap()
+            .notes_unbelieved
+    );
+    assert_eq!(crate::save::NOTES_BUILT.get(), 1);
+}
+
+/// A start of two files alike and two others alike, and lines that each move one pair with true
+/// notes: `main` `a` and `b`, `side` `p` and `q`. Only notes tell either pair apart.
+fn both_lines_noted(h: &mut Hist) -> Tree {
+    let first = h.first;
+    let none: &[(&str, &str)] = &[];
+    let (x, y) = (f(BODY), f("y\n"));
+    let at =
+        |names: [&str; 4]| tree(&names.map(|n| (n, if n < "m" { x.clone() } else { y.clone() })));
+    let s = h.plant(&[first], &at(["a", "b", "p", "q"]), Some(none));
+    let main_t = at(["c", "d", "p", "q"]);
+    let main = h.plant(&[s], &main_t, Some(&[("a", "c"), ("b", "d")][..]));
+    let side = h.plant(
+        &[s],
+        &at(["a", "b", "r", "t"]),
+        Some(&[("p", "r"), ("q", "t")][..]),
+    );
+    h.set(|st| {
+        st.lines.insert("main".into(), main);
+        st.lines.insert("side".into(), side);
+    });
+    h.on("main", &main_t);
+    at(["c", "d", "r", "t"])
+}
+
+#[test]
+fn both_lines_notes_share_what_a_combine_checks() {
+    for (most, told, checked) in [(4, 0, 4), (3, 1, 2)] {
+        let mut h = Hist::new();
+        let want = both_lines_noted(&mut h);
+        NOTES_CHECKED.set(0);
+        let bounds = Bounds {
+            max_notes: most,
+            ..bounds()
+        };
+        let done = combine_by(&mut h, "side", None, bounds).unwrap();
+        let warned = done
+            .applied
+            .warnings
+            .iter()
+            .filter(|w| w.kind == warning::TOO_MANY_MOVE_NOTES)
+            .count();
+        // `main`'s two notes fit either way; `side`'s two fit only in four.
+        assert_eq!((warned, NOTES_CHECKED.get()), (told, checked), "{most}");
+        // Each pair, alike, is the same files whichever went where.
+        assert_eq!(h.folder(), want);
+    }
+}
+
+#[test]
+fn notes_spent_while_combining_starting_points_are_told_once() {
+    // Three starting points, each moving one file with a note: the first inner combine checks
+    // two notes, the second one more.
+    let base = tree(&[
+        ("Player.cs", f(BODY)),
+        ("Other.cs", f("other\n")),
+        ("Third.cs", f("third\n")),
+    ]);
+    let moved = |name: &str| {
+        let mut t = base.clone();
+        let v = t.remove(name).unwrap();
+        t.insert(format!("src/{name}"), v);
+        t
+    };
+    let all = tree(&[
+        ("src/Player.cs", f(BODY)),
+        ("src/Other.cs", f("other\n")),
+        ("src/Third.cs", f("third\n")),
+    ]);
+    for (most, told) in [(3, 0), (2, 1)] {
+        let mut h = Hist::new();
+        let starts = [moved("Player.cs"), moved("Other.cs"), moved("Third.cs")];
+        let crossed = crossed(&mut h, &base, &starts, &all);
+        tips(
+            &mut h,
+            crossed,
+            &with(&all, &[("m.txt", f("m\n"))]),
+            &with(&all, &[("s.txt", f("s\n"))]),
+        );
+        NOTES_CHECKED.set(0);
+        let bounds = Bounds {
+            max_notes: most,
+            ..bounds()
+        };
+        let done = combine_by(&mut h, "side", None, bounds).unwrap();
+        let Combined::Made { starts, .. } = &done.result else {
+            panic!("{done:?}");
+        };
+        assert_eq!(starts.len(), 3);
+        let warned = done
+            .applied
+            .warnings
+            .iter()
+            .filter(|w| w.kind == warning::TOO_MANY_MOVE_NOTES)
+            .count();
+        // The budget is one for both inner combines: past it in the second, told once.
+        assert_eq!((warned, NOTES_CHECKED.get()), (told, most), "{most}");
+        assert!(h.folder().contains_key("src/Third.cs"));
+    }
 }
 
 #[test]
@@ -2465,39 +2578,6 @@ fn untrue_notes_past_what_a_combine_checks_are_told_once_and_moves_follow_conten
     );
     assert_eq!(h.folder(), moved_to("Characters/Player.cs", edit(1, "TWO")));
     assert_eq!(MAX_CHECKED_NOTES, 1_000_000);
-}
-
-#[test]
-fn notes_spent_while_combining_starting_points_are_told_once() {
-    let mut h = Hist::new();
-    let base = tree(&[("Player.cs", f(BODY)), ("Other.cs", f("other\n"))]);
-    let b1 = moved_to("src/Player.cs", f(BODY));
-    let b2 = tree(&[("Player.cs", f(BODY)), ("Other.cs", f("other, changed\n"))]);
-    let both = tree(&[
-        ("src/Player.cs", f(BODY)),
-        ("Other.cs", f("other, changed\n")),
-    ]);
-    let crossed = crossed(&mut h, &base, &[b1, b2], &both);
-    tips(
-        &mut h,
-        crossed,
-        &with(&both, &[("m.txt", f("m\n"))]),
-        &with(&both, &[("s.txt", f("s\n"))]),
-    );
-    // The starting point that moved `Player.cs` noted it, past a budget of none.
-    let none = Bounds {
-        max_notes: 0,
-        ..bounds()
-    };
-    let done = combine_by(&mut h, "side", None, none).unwrap();
-    let told = done
-        .applied
-        .warnings
-        .iter()
-        .filter(|w| w.kind == warning::TOO_MANY_MOVE_NOTES)
-        .count();
-    assert_eq!(told, 1);
-    assert!(h.folder().contains_key("src/Player.cs"));
 }
 
 #[test]

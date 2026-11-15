@@ -74,7 +74,7 @@ pub(crate) struct Merged {
     pub timed_out: Vec<String>,
     /// Sides where too many files left for moves to be followed by their contents.
     pub unfollowed: Vec<Side>,
-    /// Whether the combine's move notes were past what it checks, so none counted here.
+    /// Whether, by the end of this merge, the combine's move notes were past what it checks.
     pub notes_unbelieved: bool,
 }
 

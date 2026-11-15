@@ -290,23 +290,25 @@ fn noted(
         let Some(&parent) = save.parents.first() else {
             return none;
         };
-        let parent_save = if parent == start {
-            None
-        } else if reads > most {
+        if parent != start && reads > most {
             return none;
-        } else {
-            reads += 1;
-            Some(read(parent)?)
-        };
-        let parent_root = parent_save.as_ref().map_or(start_root, |p| p.root);
-        let mut before = Tree::new(repo.store(), &unstored, parent_root, EXACT);
-        // A chain followed half-way would be wrong, so a save past the budget spends it all.
+        }
+        // A chain followed half-way would be wrong, so a save past the budget spends it all,
+        // before anything more is read.
         let Some(left) = made.notes_left.checked_sub(save.move_notes.len()) else {
             made.notes_left = 0;
             made.notes_spent = true;
             return none;
         };
         made.notes_left = left;
+        let parent_save = if parent == start {
+            None
+        } else {
+            reads += 1;
+            Some(read(parent)?)
+        };
+        let parent_root = parent_save.as_ref().map_or(start_root, |p| p.root);
+        let mut before = Tree::new(repo.store(), &unstored, parent_root, EXACT);
         // A save's notes all hold between it and its first parent, so they are taken together.
         // A file removed and made again in a later save is taken for the same file, as an edit.
         let mut true_notes = Vec::new();

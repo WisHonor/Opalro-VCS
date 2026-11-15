@@ -356,13 +356,11 @@ pub fn assert_ancestry_matches_git(dir: &Path) -> (usize, bool, usize) {
 }
 
 /// Asserts that `common_starts([a], [b])`, as the Git commits its saves record, is what
-/// `git merge-base --all a b` prints, for the pairs `assert_ancestry_matches_git` takes.
-/// Returns how many pairs it compared with Git's answer, and how many it refused as `TooMany`
-/// where Git prints 16 or fewer.
-pub fn assert_starts_match_git(dir: &Path) -> (usize, usize) {
+/// `git merge-base --all a b` prints, for the pairs `assert_ancestry_matches_git` takes; it may
+/// be `TooMany` only where Git prints more than 16. Returns how many pairs it compared.
+pub fn assert_starts_match_git(dir: &Path) -> usize {
     let repo = Repository::open(dir).unwrap();
     let pairs = tip_pairs(&repo);
-    let mut refused = Vec::new();
     for ((a_name, a_tip, a_commit), (b_name, b_tip, b_commit)) in &pairs {
         let ours = common_starts(&repo, &[*a_tip], &[*b_tip]).unwrap();
         let out = git_with_input(dir, &["merge-base", "--all", a_commit, b_commit], b"");
@@ -381,26 +379,21 @@ pub fn assert_starts_match_git(dir: &Path) -> (usize, usize) {
                 ours.sort();
                 assert_eq!(ours, theirs, "{at}, as against git merge-base --all");
             }
-            Starts::TooMany(_) if theirs.len() > MAX_STARTS => {}
             Starts::TooMany(n) => {
-                refused.push(format!("{at}: {n} candidates, Git {}", theirs.len()))
+                assert_eq!(
+                    n,
+                    theirs.len(),
+                    "{at}: too many, as against git merge-base --all"
+                );
+                assert!(n > MAX_STARTS, "{at}: refused with {n} starting points");
             }
         }
     }
-    if !refused.is_empty() {
-        // Extra candidates come only from commits dated before a parent or at the same time.
-        assert!(
-            dated_at_or_before_a_parent(dir, &compared(&pairs)),
-            "refused though every commit is dated after its parents: {refused:?}"
-        );
-        println!(
-            "Refused where Git finds {MAX_STARTS} or fewer, as a commit is dated at or before a \
-             parent: {refused:?}"
-        );
-    }
-    let matched = pairs.len() - refused.len();
-    println!("The common starting points match git merge-base --all on {matched} pairs of tips.");
-    (matched, refused.len())
+    println!(
+        "The common starting points match git merge-base --all on {} pairs of tips.",
+        pairs.len()
+    );
+    pairs.len()
 }
 
 /// A tip's name, its save, and the Git commit that save records.
@@ -455,11 +448,6 @@ fn commit_of(repo: &Repository, id: Id) -> String {
 /// Whether a commit in the history of `tips` has a committer date earlier than a parent's.
 fn dated_before_a_parent(dir: &Path, tips: &[&str]) -> bool {
     parent_dated(dir, tips, |parent, child| parent > child)
-}
-
-/// Whether a commit in the history of `tips` has a committer date no later than a parent's.
-fn dated_at_or_before_a_parent(dir: &Path, tips: &[&str]) -> bool {
-    parent_dated(dir, tips, |parent, child| parent >= child)
 }
 
 /// Whether some commit in the history of `tips` and one of its parents have committer dates

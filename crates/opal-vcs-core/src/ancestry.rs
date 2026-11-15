@@ -19,6 +19,14 @@ const BELOW: u8 = 4;
 /// The most common starting points a combine takes at one level.
 pub const MAX_STARTS: usize = 16;
 
+#[cfg(test)]
+thread_local! {
+    /// How many candidates the last `common_starts` on this thread left before dropping.
+    pub(crate) static CANDIDATES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// How many times `common_starts` on this thread dropped its candidates in one pass.
+    pub(crate) static ONE_PASS_DROPS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// What `common_starts` found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Starts {
@@ -232,8 +240,12 @@ pub fn common_starts(repo: &Repository, ours: &[Id], theirs: &[Id]) -> Result<St
         .map(|(&id, _)| id)
         .collect();
     candidates.sort();
+    #[cfg(test)]
+    CANDIDATES.set(candidates.len());
     // Where saves are dated alike or before a parent, a candidate can be under another.
     let starts = if candidates.len() > MAX_STARTS {
+        #[cfg(test)]
+        ONE_PASS_DROPS.set(ONE_PASS_DROPS.get() + 1);
         drop_held_at_once(repo, &candidates, &walk.nodes)?
     } else {
         drop_held_each(repo, &candidates)?
@@ -309,7 +321,7 @@ mod tests {
     use super::*;
     use crate::diary::{Action, DiaryEntry};
     use crate::pack::ObjectKind;
-    use crate::save::{Person, Save};
+    use crate::save::{MoveNote, NOTES_BUILT, Person, Save};
     use proptest::prelude::*;
     use std::collections::{BTreeSet, HashSet};
 
@@ -331,6 +343,15 @@ mod tests {
     /// Stores one save per `(parents, time)`, its parents given as indexes of earlier ones, all
     /// in one command. Returns their IDs in order.
     fn plant(repo: &mut Repository, saves: &[(Vec<usize>, i64)]) -> Vec<Id> {
+        plant_noted(repo, saves, &[])
+    }
+
+    /// `plant`, each save holding `notes`.
+    fn plant_noted(
+        repo: &mut Repository,
+        saves: &[(Vec<usize>, i64)],
+        notes: &[MoveNote],
+    ) -> Vec<Id> {
         let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
         let (head, entry) = repo.current().unwrap();
         let start = repo
@@ -347,6 +368,7 @@ mod tests {
                     ..start.saver.clone()
                 },
                 message: n.to_string(),
+                move_notes: notes.to_vec(),
                 ..start.clone()
             };
             ids.push(packs.add_record(ObjectKind::Save, &save.encode()).unwrap());
@@ -698,6 +720,13 @@ mod tests {
         );
     }
 
+    fn note() -> MoveNote {
+        MoveNote {
+            from: "a".into(),
+            to: "b".into(),
+        }
+    }
+
     /// `roots` saves W after a first save, combined into V, then Z after V, and two sides that
     /// part at Z and each combine every W again, one save at a time. The first save, V and Z are
     /// dated `t`, the Ws `w` and the sides' saves `s`. Returns the saves, Z and the two tips.
@@ -730,21 +759,25 @@ mod tests {
         let (_dir, mut repo) = project();
         let t = 1_700_000_000_000;
         let (saves, z, [ours, theirs]) = parted_once(16, [t, t + 100_000, t + 300_000]);
-        let ids = plant(&mut repo, &saves);
-        assert!(plain_candidates(&saves, &ids, &[ours], &[theirs]).len() > MAX_STARTS);
-        let before = repo.store().saves_read();
+        // Every save holds a note, which no walk here builds.
+        let ids = plant_noted(&mut repo, &saves, &[note()]);
+        NOTES_BUILT.set(0);
+        let (before, drops) = (repo.store().saves_read(), ONE_PASS_DROPS.get());
         assert_eq!(
             common_starts(&repo, &[ids[ours]], &[ids[theirs]]).unwrap(),
             found(vec![ids[z]])
         );
+        assert_eq!(ONE_PASS_DROPS.get(), drops + 1, "the candidates were few");
         let read = repo.store().saves_read() - before;
         assert!(read <= saves.len(), "{read} saves read");
+        assert_eq!(NOTES_BUILT.get(), 0);
     }
 
     #[test]
     fn lines_that_parted_once_with_saves_dated_alike_have_one_starting_point() {
         // Only about one history in eight leaves many candidates, as the IDs fall; go on until
-        // one has.
+        // one has. Each project's first save is new, so every round's IDs differ.
+        let drops = ONE_PASS_DROPS.get();
         let mut crowded = 0;
         for k in 0..128 {
             if crowded > 0 && k >= 8 {
@@ -766,8 +799,7 @@ mod tests {
                 found(vec![ids[z + first]]),
                 "history {k}"
             );
-            crowded +=
-                usize::from(plain_candidates(&saves, &ids, &[ours], &[theirs]).len() > MAX_STARTS);
+            crowded = ONE_PASS_DROPS.get() - drops;
         }
         assert!(crowded > 0, "no history left many candidates");
     }
@@ -776,18 +808,29 @@ mod tests {
     fn dropping_many_candidates_reads_each_save_behind_them_once() {
         let (_dir, mut repo) = project();
         let (saves, z, _) = parted_once(16, [1000, 2000, 3000]);
-        let ids = plant(&mut repo, &saves);
-        // Z, V, every W, and the first save, which every W is on.
-        let behind = 19;
-        let mut candidates: Vec<Id> = ids[1..=16].to_vec();
-        candidates.push(ids[z]);
-        candidates.sort();
-        let before = repo.store().saves_read();
-        let got = drop_held_at_once(&repo, &candidates, &HashMap::new()).unwrap();
-        assert_eq!(got, [ids[z]]);
-        let read = repo.store().saves_read() - before;
-        assert!(read <= behind, "{read} saves read");
-        assert_eq!(drop_held_each(&repo, &candidates).unwrap(), [ids[z]]);
+        let ids = plant_noted(&mut repo, &saves, &[note()]);
+        NOTES_BUILT.set(0);
+        // The 17 candidates are read for their parents. Z last: its parent V is taken first, and
+        // through it every W, so nothing more is read. Z first: the first save, which every W is
+        // on, is reached 16 times and read once, then V.
+        for (z_first, want) in [(false, 18), (true, 19)] {
+            let mut candidates: Vec<Id> = ids[1..=16].to_vec();
+            if z_first {
+                candidates.insert(0, ids[z]);
+            } else {
+                candidates.push(ids[z]);
+            }
+            let before = repo.store().saves_read();
+            let got = drop_held_at_once(&repo, &candidates, &HashMap::new()).unwrap();
+            assert_eq!(got, [ids[z]]);
+            assert_eq!(
+                repo.store().saves_read() - before,
+                want,
+                "Z first: {z_first}"
+            );
+            assert_eq!(drop_held_each(&repo, &candidates).unwrap(), [ids[z]]);
+            assert_eq!(NOTES_BUILT.get(), 0);
+        }
     }
 
     #[test]
@@ -828,7 +871,7 @@ mod tests {
             let ids = plant(&mut repo, &saves);
             let got = common_starts(&repo, &[ids[o]], &[ids[t]]).unwrap();
             assert_eq!(got, found(vec![ids[d]]), "history {k}");
-            extra.insert(plain_candidates(&saves, &ids, &[o], &[t]).len());
+            extra.insert(CANDIDATES.get());
         }
         assert_eq!(extra, HashSet::from([1, 2]), "both tie orders");
     }
@@ -928,44 +971,6 @@ mod tests {
         (parents, saves)
     }
 
-    /// The walk's candidates, marked as plainly as can be: each turn a scan for the newest
-    /// waiting save, until every waiting save is under a common one.
-    fn plain_candidates(
-        saves: &[(Vec<usize>, i64)],
-        ids: &[Id],
-        ours: &[usize],
-        theirs: &[usize],
-    ) -> Vec<usize> {
-        let n = saves.len();
-        let (mut marks, mut spread) = (vec![0u8; n], vec![0u8; n]);
-        for &o in ours {
-            marks[o] |= OURS;
-        }
-        for &t in theirs {
-            marks[t] |= THEIRS;
-        }
-        loop {
-            let waiting: Vec<usize> = (0..n).filter(|&s| marks[s] != spread[s]).collect();
-            if waiting.iter().all(|&s| marks[s] & BELOW != 0) {
-                break;
-            }
-            let s = *waiting
-                .iter()
-                .max_by_key(|&&s| (saves[s].1, ids[s]))
-                .unwrap();
-            spread[s] = marks[s];
-            let give = if marks[s] & BOTH == BOTH {
-                marks[s] | BELOW
-            } else {
-                marks[s]
-            };
-            for &p in &saves[s].0 {
-                marks[p] |= give;
-            }
-        }
-        (0..n).filter(|&s| marks[s] == BOTH).collect()
-    }
-
     /// First saves added to a drawn history, each side holding all of them as parents.
     #[derive(Clone, Copy, Debug)]
     struct Crowd {
@@ -1031,7 +1036,7 @@ mod tests {
 
     #[test]
     fn common_starts_agrees_with_a_full_walk() {
-        use proptest::test_runner::{Config, TestRunner};
+        use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
         let strategy = (
             prop::collection::vec(
                 (
@@ -1060,9 +1065,17 @@ mod tests {
                 ),
             ),
         );
-        // Cases with more candidates than a combine takes, but few enough starting points.
+        // Histories `common_starts` dropped more than 16 candidates of in one pass, to few enough.
         let crowded_but_few = std::cell::Cell::new(0usize);
-        let mut runner = TestRunner::new(Config::with_cases(256));
+        // The seed is fixed, so every run draws the same shapes and a failure found once is
+        // drawn again; only the IDs differ, with each project's first save.
+        let config = Config {
+            cases: 256,
+            failure_persistence: None,
+            ..Config::default()
+        };
+        let rng = TestRng::deterministic_rng(RngAlgorithm::ChaCha);
+        let mut runner = TestRunner::new_with_rng(config, rng);
         let result = runner.run(&strategy, |(shape, ours, theirs, clock, crowd)| {
             let (mut parents, mut saves) = drawn(&shape, clock);
             let mut ours: Vec<usize> = ours.iter().map(|o| o.index(saves.len())).collect();
@@ -1095,30 +1108,34 @@ mod tests {
             answer.sort();
 
             let side = |tips: &[usize]| tips.iter().map(|&s| ids[s]).collect::<Vec<Id>>();
+            let drops = ONE_PASS_DROPS.get();
             let got = common_starts(&repo, &side(&ours), &side(&theirs)).unwrap();
             if answer.len() > MAX_STARTS {
                 prop_assert_eq!(got, Starts::TooMany(answer.len()));
             } else {
                 prop_assert_eq!(got, Starts::Found(answer.clone()));
+                if ONE_PASS_DROPS.get() > drops {
+                    crowded_but_few.set(crowded_but_few.get() + 1);
+                }
             }
 
-            // Both ways of dropping the candidates under another give the answer.
-            let mut candidates: Vec<Id> = plain_candidates(&saves, &ids, &ours, &theirs)
-                .into_iter()
-                .map(|c| ids[c])
-                .collect();
-            candidates.sort();
-            prop_assert_eq!(&drop_held_each(&repo, &candidates).unwrap(), &answer);
-            let at_once = drop_held_at_once(&repo, &candidates, &HashMap::new()).unwrap();
+            // Both ways of dropping the saves under another, from every save the sides share,
+            // give the answer.
+            let mut shared: Vec<Id> = common.iter().map(|&c| ids[c]).collect();
+            shared.sort();
+            prop_assert_eq!(&drop_held_each(&repo, &shared).unwrap(), &answer);
+            let at_once = drop_held_at_once(&repo, &shared, &HashMap::new()).unwrap();
             prop_assert_eq!(&at_once, &answer);
-            if candidates.len() > MAX_STARTS && answer.len() <= MAX_STARTS {
-                crowded_but_few.set(crowded_but_few.get() + 1);
-            }
             Ok(())
         });
         if let Err(e) = result {
             panic!("{e}");
         }
+        println!(
+            "{} histories dropped more than {MAX_STARTS} candidates in one pass, to {MAX_STARTS} \
+             starting points or fewer",
+            crowded_but_few.get()
+        );
         assert!(crowded_but_few.get() > 0, "no history had many candidates");
     }
 
