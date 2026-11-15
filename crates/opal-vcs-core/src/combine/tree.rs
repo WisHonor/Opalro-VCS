@@ -14,7 +14,7 @@ use crate::ingest::store_held;
 use crate::listing::{Entry, EntryKind, Listing, MAX_ENTRIES, SaveLimits};
 use crate::names::{PortabilityProblem, folder_problems};
 use crate::pack::PackSet;
-use crate::rules::RuleMatcher;
+use crate::rules::{LineMerge, RuleMatcher};
 use crate::snapshot::{ingest_failed, store_listing};
 use crate::store::{Store, StoreError};
 
@@ -70,6 +70,9 @@ pub(crate) struct Merged {
     /// The first 100 conflicts in path order (never more are kept), and how many more there were.
     pub conflicts: Vec<Conflict>,
     pub more: u64,
+    /// Whether a file, named or counted, is in conflict only because `opalro.toml` wasn't read
+    /// whole.
+    pub rules_not_whole: bool,
     /// Files whose comparison ran past its deadline.
     pub timed_out: Vec<String>,
     /// Sides where too many files left for moves to be followed by their contents.
@@ -101,6 +104,7 @@ pub(crate) fn merge_trees(
         merged_files: Vec::new(),
         conflicts: Vec::new(),
         more: 0,
+        rules_not_whole: false,
         timed_out: Vec::new(),
         unfollowed: Vec::new(),
         notes_unbelieved: false,
@@ -396,7 +400,8 @@ impl Walk<'_> {
         o: &Entry,
         t: &Entry,
     ) -> Result<Option<(Id, u64)>, CombineError> {
-        if !self.rules.conflict_markers(path) {
+        let rule = self.rules.line_merge(path);
+        if rule == LineMerge::RuleSaysNo {
             self.conflict(path, Clash::BothChanged(NotMerged::NoMarkers));
             return Ok(None);
         }
@@ -417,6 +422,12 @@ impl Walk<'_> {
                 return Ok(None);
             }
         };
+        // A file that clashes for a reason of its own keeps it; one that would merge doesn't.
+        if rule == LineMerge::RulesNotWhole {
+            self.merged.rules_not_whole = true;
+            self.conflict(path, Clash::BothChanged(NotMerged::RulesNotWhole));
+            return Ok(None);
+        }
         let id = store_held(self.packs, self.store, &bytes).map_err(|e| ingest_failed(e, path))?;
         let size = bytes.len() as u64;
         self.merged.merged_files.push(path.to_owned());

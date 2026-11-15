@@ -43,7 +43,6 @@ fn kinds(doc: &serde_json::Value) -> Vec<String> {
 /// It should leave the scene for the person (a conflict), or at least say the rules file was
 /// passed over (`rules_file_skipped`), as `save` does.
 #[test]
-#[ignore = "RT20-1: a combine merges a file its rule protects when opalro.toml can't be used, silently"]
 fn a_combine_with_an_unusable_rules_file_says_so_before_merging_a_protected_file() {
     let env = Env::empty();
     ok(&env, &["start", "--preset", "custom"]);

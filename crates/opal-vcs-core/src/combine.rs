@@ -91,6 +91,8 @@ pub enum NotMerged {
     TooManyLines,
     /// Its `conflict-markers` rule is `false`.
     NoMarkers,
+    /// It would have been merged, but `opalro.toml` wasn't read whole.
+    RulesNotWhole,
     /// A link, a project link, or not a file on every side.
     NotFiles,
 }
@@ -156,6 +158,9 @@ impl Conflict {
                 NotMerged::NoMarkers => {
                     format!("{both}, and opalro.toml says conflict-markers = false for it")
                 }
+                NotMerged::RulesNotWhole => format!(
+                    "{both}, and opalro.toml can't be read whole, so no file is merged line by line"
+                ),
                 NotMerged::NotFiles => {
                     format!("{both}, and only files are merged line by line")
                 }
@@ -228,12 +233,14 @@ pub enum CombineError {
         names.target
     )]
     Tangled { names: Names },
-    /// The first 100 conflicts in path order, and how many more there were.
+    /// The first 100 conflicts in path order, and how many more there were; `rules_not_whole`
+    /// says whether any, named or counted, is there because `opalro.toml` wasn't read whole.
     #[error("{}", conflicts_words(names, conflicts, *more))]
     Conflicts {
         names: Names,
         conflicts: Vec<Conflict>,
         more: u64,
+        rules_not_whole: bool,
     },
     #[error(
         "Combining {} into {} needs their common starting points combined first, and those \
@@ -302,6 +309,13 @@ impl CombineError {
                 "Go to a line first (opalro goto <line>), or start one here: opalro line new <name>"
             }
             CombineError::Unrelated { .. } => "Opalro combines only lines that share some history.",
+            CombineError::Conflicts {
+                rules_not_whole: true,
+                ..
+            } => {
+                "opalro setup says what is wrong with opalro.toml. Fix or remove it and save; then \
+                 run opalro combine again."
+            }
             CombineError::Conflicts { .. } => {
                 "For each of these files, make the two lines agree and save; then run opalro \
                  combine again."
@@ -711,7 +725,8 @@ fn combine_locked(
         from,
     };
     if only_in(repo, from, &[with])? == 0 {
-        let done = to.switch(repo, lock, earlier, asked, with, vec![])?;
+        let mut done = to.switch(repo, lock, earlier, asked, with, vec![])?;
+        done.0.warnings.extend(repo.read_rules().warnings());
         return Ok(outcome(Combined::Forward, with, done));
     }
     let made =
@@ -752,7 +767,9 @@ fn combine_locked(
                        their contents alone.";
         warnings.push(Warning::new(warning::TOO_MANY_MOVE_NOTES, message));
     }
-    let done = to.switch(repo, lock, earlier, asked, made.save, warnings)?;
+    let mut done = to.switch(repo, lock, earlier, asked, made.save, warnings)?;
+    // The rules file the switch left in the folder is the one the next combine reads.
+    done.0.warnings.extend(repo.read_rules().warnings());
     let result = Combined::Made {
         starts: made.starts,
         merged_files: made.merged_files,
@@ -828,7 +845,7 @@ fn make_save(
     with: Id,
     mut bounds: Bounds,
 ) -> Result<MadeSave, CombineError> {
-    let rules = RuleMatcher::new(&repo.rules().rules);
+    let rules = RuleMatcher::new(repo.rules());
     let mut made = Made {
         max_held: bounds.max_held,
         deadline: bounds.deadline,
@@ -866,6 +883,7 @@ fn make_save(
             names: Names::default(),
             conflicts: merged.conflicts,
             more: merged.more,
+            rules_not_whole: merged.rules_not_whole,
         });
     }
     let store = repo.store();

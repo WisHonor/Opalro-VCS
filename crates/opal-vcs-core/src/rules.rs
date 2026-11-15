@@ -79,16 +79,28 @@ const RULE_DRIVE: Drive = Drive {
     composes_unicode: false,
 };
 
+/// Whether a file both lines changed may be merged line by line.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LineMerge {
+    Yes,
+    /// Its rule says `conflict-markers = false`.
+    RuleSaysNo,
+    /// `opalro.toml`, or a part of it, was passed over: what it says can't be known, so no file is.
+    RulesNotWhole,
+}
+
 /// The project's `[[rule]]` tables, each turned into a matcher once.
 #[derive(Debug)]
 pub(crate) struct RuleMatcher {
     rules: Vec<(Matcher, Option<bool>)>,
+    /// Whether the whole of `opalro.toml` was read.
+    whole: bool,
 }
 
 impl RuleMatcher {
     #[must_use]
-    pub fn new(rules: &Rules) -> RuleMatcher {
-        let rules = rules.rules.iter().map(|rule| {
+    pub fn new(read: &RulesRead) -> RuleMatcher {
+        let rules = read.rules.rules.iter().map(|rule| {
             let mut text = Vec::new();
             // A pattern can't be split across lines of the one rule file it becomes.
             for pattern in rule.files.iter().filter(|p| !p.contains(['\n', '\r'])) {
@@ -105,13 +117,25 @@ impl RuleMatcher {
         });
         RuleMatcher {
             rules: rules.collect(),
+            whole: read.skipped.is_none() && read.ignored.is_empty(),
         }
     }
 
-    /// Whether a file at `path` (`a/b/c`) may be merged line by line: what the last rule that
-    /// matches it and gives `conflict-markers` says, `true` when none does.
+    /// Whether the file at `path` (`a/b/c`) may be merged line by line.
     #[must_use]
-    pub fn conflict_markers(&self, path: &str) -> bool {
+    pub fn line_merge(&self, path: &str) -> LineMerge {
+        if !self.conflict_markers(path) {
+            LineMerge::RuleSaysNo
+        } else if !self.whole {
+            LineMerge::RulesNotWhole
+        } else {
+            LineMerge::Yes
+        }
+    }
+
+    /// What the last rule that matches `path` and gives `conflict-markers` says, `true` when none
+    /// does.
+    fn conflict_markers(&self, path: &str) -> bool {
         let says = |(matcher, markers): &(Matcher, Option<bool>)| {
             markers.filter(|_| {
                 matcher.decide(path, false) == Decision::Ignored
@@ -451,7 +475,8 @@ impl RulesRead {
             let message = format!(
                 "Opalro passed over opalro.toml: {why}. Its own values apply instead: files of {} or \
                  more are stored in chunks, and a save asks first over {} or {} new files. Fix or \
-                 remove the file to use its rules.",
+                 remove the file to use its rules. Until it is fixed or removed, opalro combine \
+                 merges no file line by line.",
                 size_text(own.chunk_files_over),
                 size_text(own.ask_over_bytes),
                 thousands(own.ask_over_files)
@@ -471,7 +496,10 @@ impl RulesRead {
         if more > 0 {
             message.push_str(&format!("\n  and {more} more"));
         }
-        message.push_str("\nFix or remove them, or update Opalro if a newer one wrote them.");
+        message.push_str(
+            "\nFix or remove them, or update Opalro if a newer one wrote them. Until then, opalro \
+             combine merges no file line by line.",
+        );
         vec![Warning::new(warning::RULES_IGNORED, message)]
     }
 }
@@ -758,15 +786,76 @@ mod tests {
             lockable: None,
             conflict_markers: *markers,
         });
-        RuleMatcher::new(&Rules {
-            rules: rules.collect(),
-            ..Rules::default()
+        RuleMatcher::new(&RulesRead {
+            rules: Rules {
+                rules: rules.collect(),
+                ..Rules::default()
+            },
+            ..RulesRead::default()
         })
     }
 
     /// Whether a rule of `patterns` matches `path`.
     fn matches(patterns: &[&str], path: &str) -> bool {
         !matcher(&[(patterns, Some(false))]).conflict_markers(path)
+    }
+
+    fn read_text(text: &str) -> RulesRead {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("opalro.toml"), text).unwrap();
+        read_in(dir.path())
+    }
+
+    #[test]
+    fn no_file_is_merged_line_by_line_while_the_rules_are_not_read_whole() {
+        let rule = "[[rule]]\nfiles = [\"*.unity\"]\nconflict-markers = false\n";
+        let whole = RuleMatcher::new(&read_text(rule));
+        assert_eq!(whole.line_merge("a.txt"), LineMerge::Yes);
+        assert_eq!(whole.line_merge("Main.unity"), LineMerge::RuleSaysNo);
+        let none = RuleMatcher::new(&RulesRead::default());
+        assert_eq!(none.line_merge("Main.unity"), LineMerge::Yes);
+        // Passed over whole: no rule is known, and no file is merged.
+        let skipped = RuleMatcher::new(&read_text("[[rule]\nfiles = [\"*.unity\"]\n"));
+        for path in ["a.txt", "Main.unity"] {
+            assert_eq!(skipped.line_merge(path), LineMerge::RulesNotWhole, "{path}");
+        }
+        // One part passed over: the rules read still say no where they do.
+        for part in ["colour = \"red\"\n", ""] {
+            let inside = if part.is_empty() {
+                "lockabel = true\n"
+            } else {
+                ""
+            };
+            let text = format!(
+                "{part}[[rule]]\nfiles = [\"*.unity\"]\n{inside}conflict-markers = false\n"
+            );
+            let read = read_text(&text);
+            assert_eq!(read.ignored.len(), 1, "{text}");
+            let m = RuleMatcher::new(&read);
+            assert_eq!(m.line_merge("a.txt"), LineMerge::RulesNotWhole, "{text}");
+            assert_eq!(m.line_merge("Main.unity"), LineMerge::RuleSaysNo, "{text}");
+        }
+    }
+
+    #[test]
+    fn the_warnings_say_a_combine_merges_no_file_line_by_line_until_the_file_is_fixed() {
+        let skipped = read_text("[[rule]\n");
+        let warnings = skipped.warnings();
+        assert_eq!(
+            warnings[0].message,
+            "Opalro passed over opalro.toml: it isn't TOML: line 1: unclosed array table, expected `]`. Its \
+             own values apply instead: files of 1 MiB or more are stored in chunks, and a save \
+             asks first over 100 MB or 10,000 new files. Fix or remove the file to use its rules. \
+             Until it is fixed or removed, opalro combine merges no file line by line."
+        );
+        let ignored = read_text("colour = \"red\"\n");
+        assert_eq!(
+            ignored.warnings()[0].message,
+            "Opalro passed over these parts of opalro.toml, which it can't use, and used its own \
+             values for them; the rest of the file counts:\n  colour: Opalro doesn't know this \
+             key; a newer Opalro may have written it\nFix or remove them, or update Opalro if a \
+             newer one wrote them. Until then, opalro combine merges no file line by line."
+        );
     }
 
     #[test]
@@ -876,7 +965,10 @@ mod tests {
         let text = opal_toml(Preset::Game, &found).unwrap();
         let (rules, ignored) = parse(text.as_bytes()).unwrap();
         assert!(ignored.is_empty(), "{ignored:?}");
-        let m = RuleMatcher::new(&rules);
+        let m = RuleMatcher::new(&RulesRead {
+            rules,
+            ..RulesRead::default()
+        });
         assert!(!m.conflict_markers("Assets/Main.unity"));
         assert!(!m.conflict_markers("Assets/P.prefab"));
         assert!(!m.conflict_markers("Assets/P.prefab.meta"));

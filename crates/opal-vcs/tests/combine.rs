@@ -598,3 +598,132 @@ fn show_and_history_name_every_parent_of_a_save_with_many() {
     let doc = json(&env, &["history"], 0);
     assert_eq!(doc["saves"][0]["parents"].as_array().unwrap().len(), 40);
 }
+
+const BROKEN_RULES: &str = "[[rule]\nfiles = [\"*.unity\"]\n";
+const UNTIL_FIXED: &str =
+    "Until it is fixed or removed, opalro combine merges no file line by line.";
+
+#[test]
+fn while_opalro_toml_cant_be_read_whole_a_combine_merges_no_file_line_by_line() {
+    let env = project();
+    env.overwrite("opalro.toml", BROKEN_RULES);
+    run(&env, &["save", "Rules"], 0);
+    apart(
+        &env,
+        "one\n2\n3\n4\n5\n6\n7\n8\n",
+        "1\n2\n3\n4\n5\n6\n7\neight\n",
+    );
+    let before = env.standing();
+    let (shown, said) = run(&env, &["combine", "side"], 1);
+    assert_eq!(shown, "");
+    assert!(
+        said.contains(
+            "\n  a.txt: changed on both lines, and opalro.toml can't be read whole, so no file is \
+             merged line by line\n"
+        ),
+        "{said}"
+    );
+    assert!(
+        said.contains(
+            "hint: opalro setup says what is wrong with opalro.toml. Fix or remove it and save; \
+             then run opalro combine again."
+        ),
+        "{said}"
+    );
+    assert!(!said.contains("warning:"), "{said}");
+    assert_eq!(env.standing(), before);
+    let doc = json(&env, &["combine", "side"], 1);
+    let message = doc["error"]["message"].as_str().unwrap();
+    assert!(
+        message.ends_with(
+            "\n  a.txt: changed on both lines, and opalro.toml can't be read whole, so no file is \
+             merged line by line"
+        ),
+        "{doc}"
+    );
+    assert_eq!(
+        doc["error"]["hint"],
+        "opalro setup says what is wrong with opalro.toml. Fix or remove it and save; then run \
+         opalro combine again."
+    );
+    assert_eq!(doc["warnings"], serde_json::json!([]), "{doc}");
+    assert_eq!(env.standing(), before);
+}
+
+fn warning_kinds(doc: &serde_json::Value) -> Vec<&str> {
+    let warnings = doc["warnings"].as_array().unwrap();
+    warnings
+        .iter()
+        .map(|w| w["kind"].as_str().unwrap())
+        .collect()
+}
+
+#[test]
+fn a_combine_that_brings_in_a_broken_opalro_toml_says_so() {
+    let env = project();
+    run(&env, &["line", "new", "side"], 0);
+    env.overwrite("opalro.toml", BROKEN_RULES);
+    run(&env, &["save", "Rules"], 0);
+    run(&env, &["goto", "main"], 0);
+    env.overwrite("a.txt", "1\n2\n3\n4\n5\n6\n7\neight\n");
+    run(&env, &["save", "On main"], 0);
+    let (shown, said) = run(&env, &["combine", "side"], 0);
+    assert!(shown.starts_with("Combined side into main"), "{shown}");
+    assert!(
+        said.starts_with("warning: Opalro passed over opalro.toml: it isn't TOML"),
+        "{said}"
+    );
+    assert!(said.contains(UNTIL_FIXED), "{said}");
+    assert_eq!(said.matches("warning:").count(), 1, "{said}");
+    run(&env, &["undo"], 0);
+    let doc = json(&env, &["combine", "side"], 0);
+    assert_eq!(doc["result"], "combined");
+    assert_eq!(warning_kinds(&doc), ["rules_file_skipped"], "{doc}");
+    let message = doc["warnings"][0]["message"].as_str().unwrap();
+    assert!(message.ends_with(UNTIL_FIXED), "{message}");
+}
+
+#[test]
+fn a_line_moved_forward_onto_a_broken_opalro_toml_says_so() {
+    let env = project();
+    run(&env, &["line", "new", "side"], 0);
+    env.overwrite("opalro.toml", "colour = \"red\"\n");
+    run(&env, &["save", "Rules"], 0);
+    run(&env, &["goto", "main"], 0);
+    let (shown, said) = run(&env, &["combine", "side"], 0);
+    assert!(shown.starts_with("Moved main forward to side"), "{shown}");
+    assert!(
+        said.starts_with("warning: Opalro passed over these parts of opalro.toml"),
+        "{said}"
+    );
+    assert!(
+        said.contains(
+            "Fix or remove them, or update Opalro if a newer one wrote them. Until then, opalro \
+             combine merges no file line by line."
+        ),
+        "{said}"
+    );
+    run(&env, &["undo"], 0);
+    let doc = json(&env, &["combine", "side"], 0);
+    assert_eq!(doc["result"], "forward");
+    assert_eq!(warning_kinds(&doc), ["rules_ignored"], "{doc}");
+}
+
+#[test]
+fn a_combine_that_brings_in_the_fixed_opalro_toml_says_nothing_of_it() {
+    let env = project();
+    env.overwrite("opalro.toml", BROKEN_RULES);
+    run(&env, &["save", "Rules"], 0);
+    run(&env, &["line", "new", "side"], 0);
+    env.overwrite("opalro.toml", "[[rule]]\nfiles = [\"*.unity\"]\n");
+    run(&env, &["save", "Fixed"], 0);
+    run(&env, &["goto", "main"], 0);
+    env.overwrite("a.txt", "1\n2\n3\n4\n5\n6\n7\neight\n");
+    run(&env, &["save", "On main"], 0);
+    let (shown, said) = run(&env, &["combine", "side"], 0);
+    assert!(shown.starts_with("Combined side into main"), "{shown}");
+    assert_eq!(said, "");
+    run(&env, &["undo"], 0);
+    let doc = json(&env, &["combine", "side"], 0);
+    assert_eq!(doc["warnings"], serde_json::json!([]), "{doc}");
+}
