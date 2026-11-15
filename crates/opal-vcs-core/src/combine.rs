@@ -8,7 +8,7 @@ mod tree;
 use text::clash_whole;
 pub use text::{Text, merge_text};
 pub use tree::MAX_HELD_TEXT;
-pub(crate) use tree::Made;
+pub(crate) use tree::{Made, Unknown, is_unknown};
 use tree::{Merged, merge_trees};
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -341,18 +341,16 @@ pub enum CombineError {
         at: String,
         on: Held,
     },
+    /// A file in the starting points' own combine that the rules would decide, while `side`'s
+    /// `opalro.toml` can't be read whole.
     #[error(
-        "Combining {} into {} needs their common starting points combined first, and those \
-         conflict with each other, which Opalro can't keep yet, so nothing was changed.",
+        "Combining {} into {} needs their common starting points combined first, and {} would \
+         have to decide a file there but can't be read whole, so nothing was changed.",
         names.target,
-        names.line
+        names.line,
+        if *rules_not_whole == Side::Theirs { format!("the opalro.toml on {}", names.target) } else { "opalro.toml".to_owned() }
     )]
-    /// `rules_not_whole`: a file among them would have merged, but that side's `opalro.toml`
-    /// wasn't read whole.
-    StartsConflict {
-        names: Names,
-        rules_not_whole: Option<Side>,
-    },
+    StartsConflict { names: Names, rules_not_whole: Side },
     /// A merged folder would hold two names that clash; `folder` is `""` at the top.
     #[error(
         "Combining {} into {} would put two names in one folder that clash, so nothing was \
@@ -418,7 +416,7 @@ impl CombineError {
                 ..
             }
             | CombineError::StartsConflict {
-                rules_not_whole: Some(Side::Ours),
+                rules_not_whole: Side::Ours,
                 ..
             } => {
                 "opalro setup says what is wrong with opalro.toml. Fix or remove it and save; then \
@@ -429,7 +427,7 @@ impl CombineError {
                 ..
             }
             | CombineError::StartsConflict {
-                rules_not_whole: Some(Side::Theirs),
+                rules_not_whole: Side::Theirs,
                 ..
             } => {
                 "The other side's opalro.toml has a mistake in it. Go there, fix or remove it \
@@ -457,7 +455,6 @@ impl CombineError {
             CombineError::Switch(e) => return e.hint(),
             CombineError::Repo(e) => return e.hint(),
             CombineError::Tangled { .. }
-            | CombineError::StartsConflict { .. }
             | CombineError::Past { .. }
             | CombineError::HeldTooMuch { .. }
             | CombineError::TooBig { .. } => return None,
@@ -745,8 +742,10 @@ pub(crate) fn merge_three(
         *root = overlay_made(store, packs, made, *root, changes, true)?;
     }
     let [s, o, t] = roots;
-    let time = made.deadline;
-    let mut merged = merge_trees(store, packs, made, inner, s, o, t, rules, &moved, time)?;
+    let (time, unknown) = (made.deadline, made.unknown_in(start));
+    let mut merged = merge_trees(
+        store, packs, made, inner, s, o, t, rules, &moved, &unknown, time,
+    )?;
     merged.unfollowed = [Side::Ours, Side::Theirs]
         .into_iter()
         .zip(&went)
@@ -766,7 +765,7 @@ pub(crate) fn merge_three(
     }
     if !places.is_empty() {
         let keep = !inner && made.keep.is_some();
-        put_places(store, packs, made, &mut merged, places, keep)?;
+        put_places(store, packs, made, &mut merged, places, keep, inner)?;
     }
     Ok(merged)
 }
@@ -808,8 +807,10 @@ fn land(
 }
 
 /// Names each of `places` the merged result holds a plain entry at, under plain folders only, and
-/// where conflicts are kept (`keep`) puts its record there. A place at or below a conflict's entry
-/// gets nothing: that conflict already holds what each line has there.
+/// where conflicts are kept (`keep`) puts its record there; an `inner` merge leaves the place
+/// unknown, with nothing there. A place at or below a conflict's entry gets nothing: that
+/// conflict already holds what each line has there.
+#[allow(clippy::too_many_arguments)]
 fn put_places(
     store: &Store,
     packs: &mut PackSet,
@@ -817,6 +818,7 @@ fn put_places(
     merged: &mut Merged,
     mut places: Vec<Place>,
     keep: bool,
+    inner: bool,
 ) -> Result<(), CombineError> {
     places.sort_by(|a, b| a.path.cmp(&b.path));
     let mut open = Vec::new();
@@ -847,7 +849,10 @@ fn put_places(
     let mut all = std::mem::take(&mut merged.conflicts);
     let mut puts = BTreeMap::new();
     for p in open {
-        if keep {
+        if inner {
+            puts.insert(p.path.clone(), None);
+            merged.unknown.insert(p.path);
+        } else if keep {
             let id = tree::record(store, packs, made, merged, &p.path, p.clash, p.terms, None)?;
             puts.insert(p.path, Some((EntryKind::Conflict, id, 0)));
         } else {
@@ -1178,8 +1183,9 @@ fn make_save(
         left: bounds.max_inner,
         unfollowed: false,
     };
-    let start = inner.start_from(&starts)?;
+    let (start, unknown) = inner.start_from(&starts)?;
     let starts_unfollowed = inner.unfollowed;
+    made.unknown = unknown;
     let keeps = repo.keeps_conflicts();
     made.keeps = keeps;
     if asked.keep == Keep::Conflicts && keeps {
@@ -1312,14 +1318,10 @@ fn sides(
     })
 }
 
-/// A refusal met while combining starting points, in words about them: two names that clash
-/// there are their own conflict, and a version past the limits there is under the starting point.
+/// A refusal met while combining starting points, in words about them: a version past the limits
+/// there is under the starting point.
 fn of_starts(e: CombineError) -> CombineError {
     match e {
-        CombineError::NamesClash { names, .. } => CombineError::StartsConflict {
-            names,
-            rules_not_whole: None,
-        },
         CombineError::Past { names, detail, .. } => CombineError::Past {
             names,
             which: Which::Start,
@@ -1364,16 +1366,18 @@ impl Inner<'_> {
     /// The version to merge from, given the common starting points of the two sides, in ID
     /// order: one is itself; several are combined with each other first, two at a time, each pair
     /// from its own starting points. Every inner combine is counted, so this goes at most as
-    /// many calls deep as there are inner combines left.
-    fn start_from(&mut self, starts: &[Id]) -> Result<Version, CombineError> {
+    /// many calls deep as there are inner combines left. With it, where a made-up one is unknown.
+    fn start_from(&mut self, starts: &[Id]) -> Result<(Version, Unknown), CombineError> {
         let Some((first, rest)) = starts.split_first() else {
-            // Starting points that share no save are combined from nothing.
+            // Starting points that share no save parted from something unknown everywhere.
             let empty = Listing::empty();
             let root = store_listing(self.repo.store(), self.packs, &empty)?;
             self.made.listings.insert(root, empty);
-            return Ok(Version { root, save: None });
+            let everywhere = Unknown::from([String::new()]);
+            return Ok((Version { root, save: None }, everywhere));
         };
         let mut acc = version_of(self.repo, *first)?;
+        let mut acc_unknown = Unknown::new();
         let mut tips = vec![*first];
         for &next in rest {
             self.left = self.left.checked_sub(1).ok_or_else(tangled)?;
@@ -1381,25 +1385,27 @@ impl Inner<'_> {
                 Starts::TooMany(_) => return Err(tangled()),
                 Starts::Found(under) => under,
             };
-            let start = self.start_from(&under)?;
+            let (start, unknown) = self.start_from(&under)?;
             let theirs = version_of(self.repo, next)?;
+            self.made.unknown = unknown;
             let merged = merge_three(
                 self.repo, self.packs, self.made, true, &start, &acc, &theirs, self.rules,
             )
             .map_err(of_starts)?;
             self.unfollowed |= !merged.unfollowed.is_empty();
-            if !merged.conflicts.is_empty() {
+            if let Some(side) = merged.rules_not_whole {
                 return Err(CombineError::StartsConflict {
                     names: Names::default(),
-                    rules_not_whole: merged.rules_not_whole,
+                    rules_not_whole: side,
                 });
             }
             acc = Version {
                 root: merged.root,
                 save: None,
             };
+            acc_unknown = merged.unknown;
             tips.push(next);
         }
-        Ok(acc)
+        Ok((acc, acc_unknown))
     }
 }

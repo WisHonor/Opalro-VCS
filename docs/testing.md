@@ -76,7 +76,7 @@ What it reaches, counted once in 1,024 cases in a release build (16,539 actions,
 What it doesn't reach, so other tests must cover it or nothing does:
 - three or more common starting points, and so the order they are combined in and an inner combine with starting points of its own;
 - the budget of 64 inner combines and the 16 starting points per level;
-- the starting points' own conflict (`StartsConflict`): 0 times in the 1,024 cases;
+- the starting points' own stop (`StartsConflict`), which only an `opalro.toml` that can't be read whole makes and the model never writes; a start unknown where the starting points disagree is modelled, written apart from the engine;
 - two names alike, which `FILES` never holds;
 - a move note that is untrue or doubled: the model's saves are honest, and their notes are true by construction;
 - a move followed by contents alone, and the `moves_not_followed` warning;

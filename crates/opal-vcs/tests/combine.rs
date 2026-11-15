@@ -809,8 +809,8 @@ fn starting_points_that_cant_be_combined_while_opalro_toml_cant_be_read_whole_sa
     assert!(
         said.contains(
             "error: Combining side into main needs their common starting points combined first, \
-             and those conflict with each other, which Opalro can't keep yet, so nothing was \
-             changed.\n"
+             and opalro.toml would have to decide a file there but can't be read whole, so \
+             nothing was changed.\n"
         ),
         "{said}"
     );
@@ -824,8 +824,9 @@ fn starting_points_that_cant_be_combined_while_opalro_toml_cant_be_read_whole_sa
     let doc = json(&env, &["combine", "side"], 1);
     assert_eq!(
         doc["error"]["message"],
-        "Combining side into main needs their common starting points combined first, and those \
-         conflict with each other, which Opalro can't keep yet, so nothing was changed."
+        "Combining side into main needs their common starting points combined first, and \
+         opalro.toml would have to decide a file there but can't be read whole, so nothing was \
+         changed."
     );
     assert_eq!(
         doc["error"]["hint"],

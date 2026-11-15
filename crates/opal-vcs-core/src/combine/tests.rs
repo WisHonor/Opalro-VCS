@@ -6,7 +6,7 @@ use std::fs;
 use proptest::prelude::*;
 use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
 
-use super::tree::{MAX_HELD_TEXT, Made, Merged, merge_trees};
+use super::tree::{MAX_HELD_TEXT, Made, Merged, Unknown, merge_trees};
 use super::*;
 use crate::ancestry::only_in;
 use crate::changes::DEADLINE;
@@ -141,6 +141,7 @@ impl Fixture {
             t,
             rules,
             &BTreeMap::new(),
+            &Unknown::new(),
             DEADLINE,
         );
         self.repo.store_packs(&self.lock, packs).unwrap();
@@ -642,6 +643,7 @@ fn nothing_is_stored_while_merging() {
         t,
         &rules,
         &BTreeMap::new(),
+        &Unknown::new(),
         DEADLINE,
     )
     .unwrap();
@@ -722,6 +724,7 @@ fn a_later_merge_reads_what_an_earlier_one_made() {
         t,
         &rules,
         &BTreeMap::new(),
+        &Unknown::new(),
         DEADLINE,
     )
     .unwrap();
@@ -747,6 +750,7 @@ fn a_later_merge_reads_what_an_earlier_one_made() {
         later[2],
         &rules,
         &BTreeMap::new(),
+        &Unknown::new(),
         DEADLINE,
     )
     .unwrap();
@@ -1555,6 +1559,7 @@ fn tree_merge_agrees_with_a_path_by_path_model() {
                 t_id,
                 &rules,
                 &BTreeMap::new(),
+                &Unknown::new(),
                 DEADLINE,
             );
             match merged {
@@ -4158,34 +4163,199 @@ fn a_criss_cross_keeps_a_revert_that_one_starting_point_would_lose() {
     assert_eq!(h.folder(), with(&reverted, &[("s.txt", f("s\n"))]));
 }
 
-#[test]
-fn starting_points_that_conflict_stop_the_combine() {
-    let mut h = Hist::new();
+/// Two starting points that changed `f.txt` in the same place, the lines combined criss-cross,
+/// then `main_f` and `side_f` at `f.txt` on the two lines; the project is on `main`.
+fn starts_clash_at_f(h: &mut Hist, main_f: V, side_f: V) {
     let base = tree(&[("f.txt", f(BODY))]);
-    // A file that merges, so the inner combine builds something before it stops.
     let b1 = tree(&[("f.txt", edit(2, "one")), ("one.txt", f("1\n"))]);
     let b2 = tree(&[("f.txt", edit(2, "two"))]);
     let both = tree(&[("f.txt", f("settled\n")), ("one.txt", f("1\n"))]);
-    let crossed = crossed(&mut h, &base, &[b1, b2], &both);
+    let crossed = crossed(h, &base, &[b1, b2], &both);
     tips(
-        &mut h,
+        h,
         crossed,
-        &with(&both, &[("m.txt", f("m\n"))]),
-        &with(&both, &[("s.txt", f("s\n"))]),
+        &with(&both, &[("m.txt", f("m\n")), ("f.txt", main_f)]),
+        &with(&both, &[("s.txt", f("s\n")), ("f.txt", side_f)]),
     );
+}
+
+#[test]
+fn starting_points_that_conflict_are_unknown_where_they_clash() {
+    // Both lines hold it alike: that is the result.
+    let mut h = Hist::new();
+    starts_clash_at_f(&mut h, f("settled\n"), f("settled\n"));
+    let done = combine_in(&mut h, "side").unwrap();
+    let Combined::Made {
+        starts, conflicts, ..
+    } = &done.result
+    else {
+        panic!("{done:?}");
+    };
+    assert_eq!((starts.len(), conflicts.len()), (2, 0));
+    let want = tree(&[
+        ("f.txt", f("settled\n")),
+        ("m.txt", f("m\n")),
+        ("one.txt", f("1\n")),
+        ("s.txt", f("s\n")),
+    ]);
+    assert_eq!(h.folder(), want);
+
+    // Differently: the two whole, nothing known in the middle.
+    let mut h = Hist::new();
+    starts_clash_at_f(&mut h, f("mine\n"), f("theirs\n"));
+    let (saved, conflicts, count) = kept_combine(&mut h);
+    let markers = Stands::Markers { places: 1 };
+    assert_eq!(conflicts, [kept_at("f.txt", Clash::StartUnknown, markers)]);
+    assert_eq!(count, 1);
+    let V::Conflict(id) = saved["f.txt"] else {
+        panic!("{saved:?}");
+    };
+    let store = h.repo.store();
+    let r = store.conflict(&id).unwrap();
+    let terms: Vec<Option<V>> = (r.terms.iter())
+        .map(|t| t.map(|t| leaf(store, t.kind, t.id)))
+        .collect();
+    assert_eq!(terms, [Some(f("mine\n")), None, Some(f("theirs\n"))]);
+    let version = r.own.unwrap().version.unwrap();
+    let V::File(text, false) = leaf(store, version.kind, version.id) else {
+        panic!();
+    };
+    let text = String::from_utf8(text).unwrap();
+    assert!(
+        text.contains(", which Opalro can't tell here\n=======\n"),
+        "{text}"
+    );
+    assert!(
+        text.starts_with("<<<<<<< ") && text.contains("mine\n"),
+        "{text}"
+    );
+
+    // Asked to stop at a conflict, it names it.
+    let mut h = Hist::new();
+    h.keep = Keep::OnlyIfClean;
+    starts_clash_at_f(&mut h, f("mine\n"), f("theirs\n"));
     let before = h.untouched();
     let err = combine_in(&mut h, "side").unwrap_err();
-    assert!(
-        matches!(err, CombineError::StartsConflict { .. }),
-        "{err:?}"
-    );
+    let CombineError::Conflicts { conflicts, .. } = &err else {
+        panic!("{err:?}");
+    };
     assert_eq!(
-        err.to_string(),
-        "Combining side into main needs their common starting points combined first, and those \
-         conflict with each other, which Opalro can't keep yet, so nothing was changed."
+        conflicts
+            .iter()
+            .map(|c| c.describe("main", "side"))
+            .collect::<Vec<_>>(),
+        ["f.txt: changed on both lines, and Opalro can't tell what it held where they parted"]
     );
-    assert_eq!(err.hint(), None);
     assert_untouched(&h, &before);
+}
+
+/// A criss-cross whose two starting points added `u.txt` differently, `base` holding the rest,
+/// then `main_t` and `side_t` on the two lines; the project is on `main`.
+fn starts_added_u_apart(h: &mut Hist, base: &Tree, main_t: &Tree, side_t: &Tree) {
+    let b1 = with(base, &[("u.txt", f("1\n"))]);
+    let b2 = with(base, &[("u.txt", f("2\n"))]);
+    let both = with(base, &[("u.txt", f("both\n"))]);
+    let crossed = crossed(h, base, &[b1, b2], &both);
+    tips(h, crossed, main_t, side_t);
+}
+
+#[test]
+fn unknown_is_not_absent() {
+    let base = tree(&[("k.txt", f("k\n"))]);
+    let held = with(&base, &[("u.txt", f("both\n"))]);
+    // Gone on main, still there on side: neither a removal nor an addition is known.
+    for (main, side, terms, stands) in [
+        (
+            with(&base, &[("m.txt", f("m\n"))]),
+            with(&held, &[("s.txt", f("s\n"))]),
+            [None, None, Some(f("both\n"))],
+            Stands::Nothing,
+        ),
+        (
+            with(&held, &[("m.txt", f("m\n"))]),
+            with(&base, &[("s.txt", f("s\n"))]),
+            [Some(f("both\n")), None, None],
+            Stands::Yours,
+        ),
+    ] {
+        let mut h = Hist::new();
+        starts_added_u_apart(&mut h, &base, &main, &side);
+        let (saved, conflicts, _) = kept_combine(&mut h);
+        assert_eq!(conflicts, [kept_at("u.txt", Clash::StartUnknown, stands)]);
+        let V::Conflict(id) = saved["u.txt"] else {
+            panic!("{saved:?}");
+        };
+        let store = h.repo.store();
+        let r = store.conflict(&id).unwrap();
+        let got: Vec<Option<V>> = (r.terms.iter())
+            .map(|t| t.map(|t| leaf(store, t.kind, t.id)))
+            .collect();
+        assert_eq!(got, terms);
+        assert_eq!(r.own, None);
+    }
+}
+
+#[test]
+fn a_made_up_folder_equal_to_one_side_is_not_taken_as_unchanged() {
+    let base = tree(&[("d/x.txt", f("x\n"))]);
+    let b1 = with(&base, &[("d/y.txt", f("1\n"))]);
+    let b2 = with(&base, &[("d/y.txt", f("2\n"))]);
+    let both = with(&base, &[("d/y.txt", f("both\n"))]);
+    let mut h = Hist::new();
+    let crossed = crossed(&mut h, &base, &[b1, b2], &both);
+    // Main holds exactly the made-up start, at the top and in `d`; side holds `d/y.txt`.
+    tips(&mut h, crossed, &base, &with(&both, &[("s.txt", f("s\n"))]));
+    let (saved, conflicts, _) = kept_combine(&mut h);
+    assert_eq!(
+        conflicts,
+        [kept_at("d/y.txt", Clash::StartUnknown, Stands::Nothing)]
+    );
+    assert_eq!(saved["d/x.txt"], f("x\n"));
+    assert_eq!(saved["s.txt"], f("s\n"));
+}
+
+#[test]
+fn unknown_inside_two_folders_is_decided_entry_by_entry() {
+    // One starting point made `d` a file, the other changed the folder: `d` is unknown.
+    let base = tree(&[("d/a.txt", f("a\n"))]);
+    let b1 = tree(&[("d", f("d\n"))]);
+    let b2 = with(&base, &[("d/b.txt", f("b\n"))]);
+    let both = tree(&[("d/a.txt", f("a\n")), ("d/c.txt", f("c\n"))]);
+    let mut h = Hist::new();
+    let crossed = crossed(&mut h, &base, &[b1, b2], &both);
+    let main = with(&both, &[("d/m.txt", f("m\n"))]);
+    let side = with(&both, &[("d/a.txt", f("A\n")), ("d/s.txt", f("s\n"))]);
+    tips(&mut h, crossed, &main, &side);
+    let (saved, conflicts, _) = kept_combine(&mut h);
+    let unknown = Clash::StartUnknown;
+    assert_eq!(
+        conflicts,
+        [
+            kept_at("d/a.txt", unknown.clone(), Stands::Markers { places: 1 }),
+            kept_at("d/m.txt", unknown.clone(), Stands::Yours),
+            kept_at("d/s.txt", unknown, Stands::Nothing),
+        ]
+    );
+    assert_eq!(saved["d/c.txt"], f("c\n"));
+}
+
+#[test]
+fn a_move_into_or_out_of_an_unknown_place_is_not_followed() {
+    let base = tree(&[("k.txt", f("k\n")), ("w.txt", f("w\n"))]);
+    let main = with(&base, &[("u.txt", f("both\n")), ("m.txt", f("m\n"))]);
+    // `w.txt`'s contents left for `u.txt`, which the made-up start can't tell of.
+    let side = tree(&[
+        ("k.txt", f("k\n")),
+        ("u.txt", f("w\n")),
+        ("s.txt", f("s\n")),
+    ]);
+    let mut h = Hist::new();
+    starts_added_u_apart(&mut h, &base, &main, &side);
+    let (saved, conflicts, _) = kept_combine(&mut h);
+    let markers = Stands::Markers { places: 1 };
+    assert_eq!(conflicts, [kept_at("u.txt", Clash::StartUnknown, markers)]);
+    // Taken out on side, as any removal.
+    assert!(!saved.contains_key("w.txt"), "{saved:?}");
 }
 
 /// Two starting points that changed `a.txt` in different places, the lines combined criss-cross,
@@ -4215,7 +4385,7 @@ fn starting_points_that_cant_be_combined_while_the_rules_are_not_read_whole_say_
         matches!(
             err,
             CombineError::StartsConflict {
-                rules_not_whole: Some(Side::Ours),
+                rules_not_whole: Side::Ours,
                 ..
             }
         ),
@@ -4223,8 +4393,9 @@ fn starting_points_that_cant_be_combined_while_the_rules_are_not_read_whole_say_
     );
     assert_eq!(
         err.to_string(),
-        "Combining side into main needs their common starting points combined first, and those \
-         conflict with each other, which Opalro can't keep yet, so nothing was changed."
+        "Combining side into main needs their common starting points combined first, and \
+         opalro.toml would have to decide a file there but can't be read whole, so nothing was \
+         changed."
     );
     assert_eq!(err.hint().unwrap(), RULES_HINT);
     assert_untouched(&h, &before);
@@ -4900,11 +5071,17 @@ fn starting_points_that_cant_be_combined_for_the_other_sides_rules_say_so() {
         matches!(
             err,
             CombineError::StartsConflict {
-                rules_not_whole: Some(Side::Theirs),
+                rules_not_whole: Side::Theirs,
                 ..
             }
         ),
         "{err:?}"
+    );
+    assert_eq!(
+        err.to_string(),
+        "Combining side into main needs their common starting points combined first, and the \
+         opalro.toml on side would have to decide a file there but can't be read whole, so \
+         nothing was changed."
     );
     assert_eq!(err.hint().unwrap(), THEIRS_HINT);
     assert_untouched(&h, &before);
@@ -5231,26 +5408,29 @@ fn two_roots(h: &mut Hist, one: &Tree, two: &Tree, both: &Tree) -> (Id, Id) {
 }
 
 #[test]
-fn starting_points_with_no_save_in_common_are_combined_from_nothing() {
+fn starting_points_with_no_save_in_common_are_unknown_where_they_differ() {
     let mut h = Hist::new();
     let one = tree(&[("same.txt", f("same\n")), ("one.txt", f("1\n"))]);
     let two = tree(&[("same.txt", f("same\n")), ("two.txt", f("2\n"))]);
     let mut both = one.clone();
     both.extend(two.clone());
     let tips_at = two_roots(&mut h, &one, &two, &both);
-    // What only one starting point holds is in the start, so taking it away is kept; what both
-    // hold alike is in it once, so changing it is a change, not two adds.
+    // What both hold alike is in the start once, so changing it is a change, not two adds; what
+    // only one holds is unknown, so main taking it away is no removal.
     let main = tree(&[("same.txt", f("main\n")), ("two.txt", f("2\n"))]);
     let side = with(&both, &[("s.txt", f("s\n"))]);
     tips(&mut h, tips_at, &main, &side);
-    let done = combine_in(&mut h, "side").unwrap();
-    let Combined::Made { starts, .. } = &done.result else {
-        panic!("{done:?}");
-    };
-    assert_eq!(starts.len(), 2);
-    assert_eq!(h.folder(), with(&main, &[("s.txt", f("s\n"))]));
+    let (saved, conflicts, _) = kept_combine(&mut h);
+    assert_eq!(
+        conflicts,
+        [kept_at("one.txt", Clash::StartUnknown, Stands::Nothing)]
+    );
+    assert_eq!(saved["same.txt"], f("main\n"));
+    assert_eq!(saved["two.txt"], f("2\n"));
+    let mut want = with(&main, &[("s.txt", f("s\n"))]);
+    assert_eq!(h.folder(), want);
 
-    // A file the two hold differently is their own conflict.
+    // A file the two hold differently, which both lines then hold alike, is that.
     let mut h = Hist::new();
     let one = tree(&[("f.txt", f("one\n"))]);
     let two = tree(&[("f.txt", f("two\n"))]);
@@ -5259,17 +5439,20 @@ fn starting_points_with_no_save_in_common_are_combined_from_nothing() {
     let main = with(&both, &[("m.txt", f("m\n"))]);
     let side = with(&both, &[("s.txt", f("s\n"))]);
     tips(&mut h, tips_at, &main, &side);
-    let before = h.untouched();
-    let err = combine_in(&mut h, "side").unwrap_err();
-    assert!(
-        matches!(err, CombineError::StartsConflict { .. }),
-        "{err:?}"
-    );
-    assert_untouched(&h, &before);
+    let done = combine_in(&mut h, "side").unwrap();
+    let Combined::Made {
+        starts, conflicts, ..
+    } = &done.result
+    else {
+        panic!("{done:?}");
+    };
+    assert_eq!((starts.len(), conflicts.len()), (2, 0), "{conflicts:?}");
+    want = with(&main, &[("s.txt", f("s\n"))]);
+    assert_eq!(h.folder(), want);
 }
 
 #[test]
-fn names_that_clash_between_starting_points_are_their_conflict() {
+fn names_alike_inside_a_made_up_start_stop_nothing() {
     let mut h = Hist::new();
     let base = tree(&[("f.txt", f("f\n"))]);
     let b1 = with(&base, &[("Readme.md", f("one\n"))]);
@@ -5282,14 +5465,13 @@ fn names_that_clash_between_starting_points_are_their_conflict() {
         &with(&both, &[("m.txt", f("m\n"))]),
         &with(&both, &[("s.txt", f("s\n"))]),
     );
-    let before = h.untouched();
-    let err = combine_in(&mut h, "side").unwrap_err();
-    assert!(
-        matches!(err, CombineError::StartsConflict { .. }),
-        "{err:?}"
-    );
-    assert_eq!(err.hint(), None);
-    assert_untouched(&h, &before);
+    let done = combine_in(&mut h, "side").unwrap();
+    let Combined::Made { conflicts, .. } = &done.result else {
+        panic!("{done:?}");
+    };
+    assert!(conflicts.is_empty(), "{conflicts:?}");
+    let want = with(&both, &[("m.txt", f("m\n")), ("s.txt", f("s\n"))]);
+    assert_eq!(h.folder(), want);
 }
 
 /// A listing whose folders `x` and `y` are one listing 4,097 folders deep.

@@ -3,7 +3,7 @@
 
 use std::borrow::Cow;
 use std::cmp::Ordering;
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::time::Duration;
 
 use super::{
@@ -19,14 +19,55 @@ use crate::ingest::store_held;
 use crate::listing::{
     Entry, EntryKind, Listing, MAX_ENTRIES, MAX_SAVE_DEPTH, MAX_SAVE_ENTRIES, SaveLimits,
 };
+use crate::moves::Version;
 use crate::names::{PortabilityProblem, folder_problems};
 use crate::pack::PackSet;
 use crate::rules::{LineMerge, RuleMatcher};
+use crate::scope::ancestors;
 use crate::snapshot::{ingest_failed, store_listing, store_record};
 use crate::store::{Store, StoreError};
 
 /// The most text merged by inner combines that one combine holds in memory.
 pub const MAX_HELD_TEXT: u64 = 256 << 20;
+
+/// Paths where a made-up starting point can't tell what the lines parted from: at and below each.
+pub(crate) type Unknown = BTreeSet<String>;
+
+/// Whether the start is unknown at `path`: it or a folder above it is in `unknown`.
+pub(crate) fn is_unknown(unknown: &Unknown, path: &str) -> bool {
+    !unknown.is_empty()
+        && (unknown.contains("")
+            || unknown.contains(path)
+            || ancestors(path).any(|up| unknown.contains(up)))
+}
+
+/// How much of the start a merge knows at one path.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Known {
+    Whole,
+    /// Unknown somewhere below it.
+    Above,
+    Not,
+}
+
+fn known(unknown: &Unknown, path: &str) -> Known {
+    if unknown.is_empty() {
+        return Known::Whole;
+    }
+    if is_unknown(unknown, path) {
+        return Known::Not;
+    }
+    let below = if path.is_empty() {
+        true
+    } else {
+        let folder = format!("{path}/");
+        unknown
+            .range(folder.clone()..)
+            .next()
+            .is_some_and(|p| p.starts_with(&folder))
+    };
+    if below { Known::Above } else { Known::Whole }
+}
 
 /// Conflicts named; the rest are only counted.
 pub(super) const MAX_NAMED: usize = 100;
@@ -62,6 +103,19 @@ pub(crate) struct Made {
     /// The most entries the checks for a conflict below a folder may read in each version
     /// (`MAX_SAVE_ENTRIES`; tests lower it).
     pub max_below: u64,
+    /// Where the made-up starting point of the next merge is unknown. Set for each merge, not
+    /// kept by root: two made-up starts can share a listing and differ in what is unknown.
+    pub unknown: Unknown,
+}
+
+impl Made {
+    /// Where `start` is unknown: nowhere for a save's own version.
+    pub(crate) fn unknown_in(&self, start: &Version) -> Unknown {
+        match start.save {
+            Some(_) => Unknown::new(),
+            None => self.unknown.clone(),
+        }
+    }
 }
 
 impl Default for Made {
@@ -79,6 +133,7 @@ impl Default for Made {
             keep: None,
             keeps: false,
             max_below: MAX_SAVE_ENTRIES,
+            unknown: Unknown::new(),
         }
     }
 }
@@ -105,6 +160,8 @@ pub(crate) struct Merged {
     pub unfollowed: Vec<Side>,
     /// Whether, by the end of this merge, the combine's move notes were past what it checks.
     pub notes_unbelieved: bool,
+    /// For an inner merge: the paths it couldn't settle, which are unknown in what it made.
+    pub unknown: Unknown,
     /// Ours' and theirs' checks for a conflict below a folder: their limits, held across the
     /// merge, and the folders walked already, each walked once however many places name it.
     below: [(SaveLimits, HashSet<Id>); 2],
@@ -117,7 +174,8 @@ pub(super) const WHICH: Three<Which> = [Which::Start, Which::Ours, Which::Theirs
 /// Merges `ours` and `theirs` against `start`, all root listings. `inner`: this merge makes a
 /// made-up starting point, whose merged texts a later merge reads. `moved` gives a followed
 /// file's name at the start, by where it is now, and whether it came onto a start file the other
-/// line changed there, so that the two clash whole.
+/// line changed there, so that the two clash whole. `start_unknown`: where the start can't tell
+/// what the lines parted from.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn merge_trees(
     store: &Store,
@@ -129,6 +187,7 @@ pub(crate) fn merge_trees(
     theirs: Id,
     rules: &RuleMatcher,
     moved: &BTreeMap<String, (String, bool)>,
+    start_unknown: &Unknown,
     deadline: Duration,
 ) -> Result<Merged, CombineError> {
     let mut merged = Merged {
@@ -142,6 +201,7 @@ pub(crate) fn merge_trees(
         timed_out: Vec::new(),
         unfollowed: Vec::new(),
         notes_unbelieved: false,
+        unknown: Unknown::new(),
         below: [(); 2].map(|()| {
             (
                 SaveLimits::new(MAX_SAVE_DEPTH, made.max_below),
@@ -149,7 +209,12 @@ pub(crate) fn merge_trees(
             )
         }),
     };
-    if let Some(root) = one_sides([start, ours, theirs].map(Some)) {
+    let top = known(start_unknown, "");
+    let taken = match top {
+        Known::Whole => one_sides([start, ours, theirs].map(Some)),
+        _ => (ours == theirs).then_some(Some(theirs)),
+    };
+    if let Some(root) = taken {
         merged.root = root.unwrap_or(ours);
         return Ok(merged);
     }
@@ -160,6 +225,7 @@ pub(crate) fn merge_trees(
         inner,
         rules,
         moved,
+        unknown: start_unknown,
         deadline,
         limits: [(); 3].map(|()| SaveLimits::default()),
         merged,
@@ -167,7 +233,11 @@ pub(crate) fn merge_trees(
     // What is left to do waits here, not in a call per folder level: a save may nest deeper than
     // a stack. Each folder's listing is built as the walk leaves it.
     let root = GoIn {
-        ids: [Some(start), Some(ours), Some(theirs)],
+        ids: [
+            (top != Known::Not).then_some(start),
+            Some(ours),
+            Some(theirs),
+        ],
         counted: [false; 3],
     };
     let mut folders = vec![walk.enter(String::new(), String::new(), 0, root)?];
@@ -184,7 +254,8 @@ pub(crate) fn merge_trees(
                     folders.push(folder);
                 }
                 None => {
-                    if let Some(e) = walk.decide(&path, next.name, next.entries)? {
+                    let unknown = next.unknown;
+                    if let Some(e) = walk.decide(&path, next.name, next.entries, unknown)? {
                         here.entries.push(e);
                     }
                 }
@@ -262,6 +333,8 @@ struct Todo {
     name: String,
     entries: Three<Option<Entry>>,
     into: Option<GoIn>,
+    /// The start can't tell what the lines parted from here, or somewhere below.
+    unknown: bool,
 }
 
 impl Todo {
@@ -295,6 +368,7 @@ struct Walk<'a> {
     inner: bool,
     rules: &'a RuleMatcher,
     moved: &'a BTreeMap<String, (String, bool)>,
+    unknown: &'a Unknown,
     deadline: Duration,
     /// Each version is held to a save's limits on its own.
     limits: Three<SaveLimits>,
@@ -325,7 +399,17 @@ impl Walk<'_> {
         let mut entries = Vec::new();
         let mut todo = Vec::new();
         for (name, three) in names(s, o, t) {
-            if let Some(taken) = one_sides(three.map(version)) {
+            let here = if self.unknown.is_empty() {
+                Known::Whole
+            } else {
+                known(self.unknown, &join(&path, name))
+            };
+            // Where the start isn't known whole, no side is "unchanged": only alike is taken.
+            let taken = match here {
+                Known::Whole => one_sides(three.map(version)),
+                _ => (version(three[1]) == version(three[2])).then(|| version(three[2])),
+            };
+            if let Some(taken) = taken {
                 if taken.is_some() {
                     let side = if version(three[2]) == taken { 2 } else { 1 };
                     entries.extend(three[side].cloned());
@@ -334,8 +418,9 @@ impl Walk<'_> {
             }
             todo.push(Todo {
                 name: name.to_owned(),
-                into: going_into(three),
+                into: going_into(three, here),
                 entries: three.map(|e| e.cloned()),
+                unknown: here != Known::Whole,
             });
         }
         let at = if path.is_empty() { 0 } else { path.len() + 1 };
@@ -386,6 +471,7 @@ impl Walk<'_> {
         path: &str,
         name: String,
         [s, o, t]: Three<Option<Entry>>,
+        unknown: bool,
     ) -> Result<Option<Entry>, CombineError> {
         let held = |e: &Option<Entry>| e.as_ref().is_some_and(|e| e.kind == EntryKind::Conflict);
         // A conflict is never made inside another one: the line holding it fixes it first.
@@ -405,8 +491,9 @@ impl Walk<'_> {
                 on,
             });
         }
-        if held(&s) && self.keeping().is_some() {
-            // Each line changed it its own way since: what it held where they parted is unknown.
+        // Starting points that disagree here, or a conflict where the lines parted that each changed
+        // its own way since: what it held is unknown, never absent.
+        if unknown || (held(&s) && self.keeping().is_some()) {
             return self.no_start(
                 path,
                 name,
@@ -567,7 +654,7 @@ impl Walk<'_> {
         // and where conflicts are kept one that overlaps too. Any other keeps its own reason.
         let decided = match &text {
             Text::Merged(_) => true,
-            Text::Not(NotMerged::Overlap { .. }) => self.keeping().is_some(),
+            Text::Not(NotMerged::Overlap { .. }) => self.inner || self.keeping().is_some(),
             _ => false,
         };
         if let (LineMerge::RulesNotWhole { theirs }, true) = (rule, decided) {
@@ -668,7 +755,12 @@ impl Walk<'_> {
     }
 
     fn conflict(&mut self, path: &str, clash: Clash, stands: Option<Stands>) {
-        named(&mut self.merged, path, clash, stands);
+        if self.inner {
+            // A clash between starting points leaves what they parted from unknown there.
+            self.merged.unknown.insert(path.to_owned());
+        } else {
+            named(&mut self.merged, path, clash, stands);
+        }
     }
 
     /// Builds and stores a merged folder's listing once all of it is worked out: its ID, and
@@ -679,7 +771,13 @@ impl Walk<'_> {
                 detail: "a folder in it would hold more than 1,000,000 entries".to_owned(),
             });
         }
-        if let Some(problem) = unheld_clash(&folder) {
+        // The starting points' own combine is never written to a drive.
+        let clash = if self.inner {
+            None
+        } else {
+            unheld_clash(&folder)
+        };
+        if let Some(problem) = clash {
             return Err(CombineError::NamesClash {
                 names: Names::default(),
                 folder: folder.path,
@@ -864,14 +962,19 @@ fn unheld_clash(folder: &Folder) -> Option<PortabilityProblem> {
 }
 
 /// The folder a name both sides changed is merged as, if it is one: two folders, or a folder
-/// against a removal where the start has the folder.
-fn going_into([s, o, t]: Three<Option<&Entry>>) -> Option<GoIn> {
+/// against a removal where the start has the folder. Where the start is unknown only two folders
+/// are, from nothing; where it is unknown below, a folder against nothing is too.
+fn going_into([s, o, t]: Three<Option<&Entry>>, here: Known) -> Option<GoIn> {
     let both = is_folder(o) && is_folder(t);
-    let against_removal =
-        is_folder(s) && ((is_folder(o) && t.is_none()) || (o.is_none() && is_folder(t)));
+    let against_removal = match here {
+        Known::Whole => is_folder(s),
+        Known::Above => true,
+        Known::Not => false,
+    } && ((is_folder(o) && t.is_none()) || (o.is_none() && is_folder(t)));
     if !both && !against_removal {
         return None;
     }
+    let s = if here == Known::Not { None } else { s };
     Some(GoIn {
         // The start's folder only if it is one: else the folders merge from nothing.
         ids: [folder_id(s), folder_id(o), folder_id(t)],

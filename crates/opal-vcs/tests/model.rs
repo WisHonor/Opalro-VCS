@@ -2030,7 +2030,6 @@ const MOST_INNER: usize = 64;
 enum Stopped {
     Unrelated,
     Tangled,
-    StartsConflict,
     /// The paths that conflict, and the rows some of them are named with.
     Conflicts(Clashes),
 }
@@ -2039,8 +2038,7 @@ impl Stopped {
     fn holds(&self, done: &Result<combine::CombineOutcome, CombineError>) {
         match (self, done) {
             (Stopped::Unrelated, Err(CombineError::Unrelated { .. }))
-            | (Stopped::Tangled, Err(CombineError::Tangled { .. }))
-            | (Stopped::StartsConflict, Err(CombineError::StartsConflict { .. })) => {}
+            | (Stopped::Tangled, Err(CombineError::Tangled { .. })) => {}
             (
                 Stopped::Conflicts((want, rows)),
                 Err(CombineError::Conflicts {
@@ -2197,18 +2195,32 @@ fn common_starts(m: &Model, a: &[usize], b: &[usize]) -> Vec<usize> {
     starts
 }
 
-/// One version a merge reads, and its save, `None` when it is made up.
+/// One version a merge reads, and its save, `None` when it is made up; for a made-up one, the
+/// places where its starting points disagreed (`""` for everywhere), so nothing is known there or
+/// below.
 #[derive(Debug, Clone)]
 struct Ver {
     tree: Tree,
     save: Option<usize>,
+    unsure: BTreeSet<String>,
 }
 
 fn ver(m: &Model, save: usize) -> Ver {
     Ver {
         tree: m.saves[save].tree.clone(),
         save: Some(save),
+        unsure: BTreeSet::new(),
     }
+}
+
+/// Whether `unsure` says nothing is known at `path`: it, or a folder holding it, is listed.
+fn unsure_at(unsure: &BTreeSet<String>, path: &str) -> bool {
+    unsure.iter().any(|u| u.is_empty() || within(path, u))
+}
+
+/// Whether something listed in `unsure` is inside the folder `path`.
+fn unsure_inside(unsure: &BTreeSet<String>, path: &str) -> bool {
+    unsure.iter().any(|u| u != path && within(u, path))
 }
 
 /// The combined save's files, the common starting points, and the files merged line by line.
@@ -2227,18 +2239,26 @@ fn combined(
     }
     let mut left = MOST_INNER;
     let start = start_from(m, &starts, &mut left)?;
-    let (tree, merged) =
-        merge(m, &start, &ver(m, from), &ver(m, with)).map_err(Stopped::Conflicts)?;
-    Ok((tree, starts, merged))
+    let done = merge(m, &start, &ver(m, from), &ver(m, with));
+    if !done.conflicts.is_empty() {
+        return Err(Stopped::Conflicts((done.conflicts, done.rows)));
+    }
+    Ok((done.tree, starts, done.merged))
 }
 
 /// The version to merge from: one starting point is itself; several are combined first, two at a
 /// time in ID order, each pair from its own starting points, while `left` inner combines remain.
 fn start_from(m: &Model, starts: &[usize], left: &mut usize) -> Result<Ver, Stopped> {
-    // Starting points that share no save, after an amend of the first save, merge from nothing.
+    // Starting points that share no save, after an amend of the first save, merge from a start
+    // that knows nothing.
     let Some((&first, rest)) = starts.split_first() else {
         let tree = Tree::default();
-        return Ok(Ver { tree, save: None });
+        let unsure = BTreeSet::from([String::new()]);
+        return Ok(Ver {
+            tree,
+            save: None,
+            unsure,
+        });
     };
     let (mut acc, mut tips) = (ver(m, first), vec![first]);
     for &next in rest {
@@ -2248,9 +2268,17 @@ fn start_from(m: &Model, starts: &[usize], left: &mut usize) -> Result<Ver, Stop
             return Err(Stopped::Tangled);
         }
         let start = start_from(m, &under, left)?;
-        let (tree, _) =
-            merge(m, &start, &acc, &ver(m, next)).map_err(|_| Stopped::StartsConflict)?;
-        acc = Ver { tree, save: None };
+        // Where the two clash, the start of the next merge holds nothing and is unsure.
+        let done = merge(m, &start, &acc, &ver(m, next));
+        let mut tree = done.tree;
+        for c in &done.conflicts {
+            tree.files.remove(c);
+        }
+        acc = Ver {
+            tree,
+            save: None,
+            unsure: done.conflicts,
+        };
         tips.push(next);
     }
     Ok(acc)
@@ -2340,8 +2368,11 @@ fn followed(m: &Model, start: &Ver, side: &Ver) -> Went {
         (Some(s), Some(t)) => noted(m, s, t),
         _ => BTreeMap::new(),
     };
+    // A place the start is unsure of is never where a move began or ended.
     let fits = |from: &str, to: &str| {
-        start.tree.files.contains_key(from)
+        !unsure_at(&start.unsure, from)
+            && !unsure_at(&start.unsure, to)
+            && start.tree.files.contains_key(from)
             && room(&start.tree, to)
             && side.tree.files.contains_key(to)
     };
@@ -2374,9 +2405,17 @@ fn relocate(tree: &mut Tree, from: &str, to: &str) {
 /// (ours) and `T` (theirs).
 type Clashes = (BTreeSet<String>, BTreeMap<String, String>);
 
-/// Merges `ours` and `theirs` from `start`, following moves: the merged tree and the files merged
-/// line by line, or the paths that conflict.
-fn merge(m: &Model, start: &Ver, ours: &Ver, theirs: &Ver) -> Result<(Tree, Vec<String>), Clashes> {
+/// What a merge gave: the merged tree (a conflict's place holds what the path merge left there),
+/// the files merged line by line, and the paths that conflict with the rows some are named with.
+struct Merge {
+    tree: Tree,
+    merged: Vec<String>,
+    conflicts: BTreeSet<String>,
+    rows: BTreeMap<String, String>,
+}
+
+/// Merges `ours` and `theirs` from `start`, following moves.
+fn merge(m: &Model, start: &Ver, ours: &Ver, theirs: &Ver) -> Merge {
     let went = [followed(m, start, ours), followed(m, start, theirs)];
     let was = [&start.tree, &ours.tree, &theirs.tree];
     let mut trees = was.map(Tree::clone);
@@ -2501,18 +2540,27 @@ fn merge(m: &Model, start: &Ver, ours: &Ver, theirs: &Ver) -> Result<(Tree, Vec<
     let [s, o, t] = &trees;
     let mut paths = PathMerge {
         three: [s, o, t],
+        unsure: &start.unsure,
         out: Tree::default(),
         conflicts,
+        unsure_clashes: Vec::new(),
         merged: Vec::new(),
     };
     for c in paths.children("") {
         paths.merge_at(&c);
     }
+    for at in &paths.unsure_clashes {
+        let row = format!(
+            "{at}: changed on both lines, and Opalro can't tell what it held where they parted"
+        );
+        rows.insert(at.clone(), row);
+    }
     // Two files added where a file went, which the path merge found clashing.
     for (at, row) in onto {
         let added = |t: &Tree| t.files.contains_key(at);
         let two = !s.files.contains_key(at) && !s.folders.contains(at) && added(o) && added(t);
-        if two && paths.conflicts.contains(at) {
+        // A place the start is unsure of keeps its own row.
+        if two && paths.conflicts.contains(at) && !paths.unsure_clashes.contains(at) {
             rows.insert(at.clone(), row);
         }
     }
@@ -2525,14 +2573,17 @@ fn merge(m: &Model, start: &Ver, ours: &Ver, theirs: &Ver) -> Result<(Tree, Vec<
         }
         if plain {
             paths.conflicts.insert(at.clone());
-            rows.insert(at.clone(), row);
+            // Two rows for one place: the first is the one named.
+            rows.entry(at.clone()).or_insert(row);
         }
     }
-    if !paths.conflicts.is_empty() {
-        return Err((paths.conflicts, rows));
-    }
     paths.merged.sort();
-    Ok((paths.out, paths.merged))
+    Merge {
+        tree: paths.out,
+        merged: paths.merged,
+        conflicts: paths.conflicts,
+        rows,
+    }
 }
 
 /// What a tree holds at one path.
@@ -2570,8 +2621,12 @@ fn alike(a: &Tree, b: &Tree, path: &str) -> bool {
 /// The merge of the start, ours and theirs, path by path, after the moves.
 struct PathMerge<'a> {
     three: [&'a Tree; 3],
+    /// Where the start knows nothing.
+    unsure: &'a BTreeSet<String>,
     out: Tree,
     conflicts: BTreeSet<String>,
+    /// The conflicts at places the start is unsure of, at them or inside them.
+    unsure_clashes: Vec<String>,
     merged: Vec<String>,
 }
 
@@ -2601,6 +2656,33 @@ impl PathMerge<'_> {
 
     fn merge_at(&mut self, path: &str) {
         let [s, o, t] = self.three;
+        // Where the start is unsure, at the path or inside it, nothing counts as unchanged: the
+        // two sides alike are the result; two folders, or a folder against nothing when only
+        // something inside is unsure, are merged inside; anything else conflicts.
+        let here = unsure_at(self.unsure, path);
+        if here || unsure_inside(self.unsure, path) {
+            if alike(o, t, path) {
+                return self.out.take(path, o);
+            }
+            let inside = match (at(o, path), at(t, path)) {
+                (At::Folder, At::Folder) => true,
+                (At::Folder, At::Nothing) | (At::Nothing, At::Folder) => !here,
+                _ => false,
+            };
+            if !inside {
+                self.conflicts.insert(path.to_owned());
+                self.unsure_clashes.push(path.to_owned());
+                return;
+            }
+            for c in self.children(path) {
+                self.merge_at(&c);
+            }
+            let both = at(o, path) == At::Folder && at(t, path) == At::Folder;
+            if both && (holds_nothing(o, path) || holds_nothing(t, path)) {
+                self.out.add_folder(path);
+            }
+            return;
+        }
         // Equal sides are the result; else the side that changed it.
         if alike(o, t, path) || alike(s, t, path) {
             return self.out.take(path, o);

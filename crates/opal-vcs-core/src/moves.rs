@@ -4,7 +4,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use crate::ancestry::only_in;
-use crate::combine::Made;
+use crate::combine::{Made, Unknown, is_unknown};
 use crate::conflict::Listings;
 use crate::diff::{file_change, for_each_entry_change_in};
 use crate::id::Id;
@@ -281,6 +281,7 @@ pub(crate) fn followed(
         (Some(from), Some(tip)) if !made.notes_spent => noted(repo, made, from, start.root, tip)?,
         _ => BTreeMap::new(),
     };
+    let unknown = made.unknown_in(start);
     let stored = Listings::stored(store, &made.listings);
     let mut at_start = Tree::new(&stored, start.root, EXACT);
     let mut on_side = Tree::new(&stored, side.root, EXACT);
@@ -295,7 +296,7 @@ pub(crate) fn followed(
         if on_side.entry(&to)?.is_some_and(|e| is_file(&e)) {
             out.replaced.insert(to.clone(), from.clone());
         }
-        if fits(&mut at_start, &mut on_side, &from, &to)? {
+        if fits(&mut at_start, &mut on_side, &unknown, &from, &to)? {
             out.went.insert(from, to);
         }
     }
@@ -310,7 +311,7 @@ pub(crate) fn followed(
     for n in by_contents {
         if !out.went.contains_key(&n.from)
             && !taken.contains(&n.to)
-            && fits(&mut at_start, &mut on_side, &n.from, &n.to)?
+            && fits(&mut at_start, &mut on_side, &unknown, &n.from, &n.to)?
             && on_side.entry(&n.from)?.is_none()
         {
             out.went.insert(n.from, n.to);
@@ -426,10 +427,17 @@ fn true_of(before: &mut Tree, after: &mut Tree, n: &MoveNote) -> Result<bool, St
 }
 
 /// Whether a move from `from` to `to` counts: the start holds a file at `from` and has room at
-/// `to`, and the side holds a file at `to`.
-fn fits(start: &mut Tree, side: &mut Tree, from: &str, to: &str) -> Result<bool, StoreError> {
+/// `to`, neither of them a place the start can't tell of, and the side holds a file at `to`.
+fn fits(
+    start: &mut Tree,
+    side: &mut Tree,
+    unknown: &Unknown,
+    from: &str,
+    to: &str,
+) -> Result<bool, StoreError> {
     let is_file = |e: Option<Entry>| e.is_some_and(|e| is_file(&e));
-    Ok(is_file(start.entry(from)?) && room_at(start, to)? && is_file(side.entry(to)?))
+    let known = !is_unknown(unknown, from) && !is_unknown(unknown, to);
+    Ok(known && is_file(start.entry(from)?) && room_at(start, to)? && is_file(side.entry(to)?))
 }
 
 pub(crate) fn is_file(e: &Entry) -> bool {
