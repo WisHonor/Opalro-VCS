@@ -49,16 +49,15 @@ impl Sides {
     /// where the start holds a file, `Nothing(…)` where it holds nothing, `Unknown`).
     #[must_use]
     pub fn labels(&self, here: Parted) -> Labels {
-        let named = |name: &str, save: &ChangeId| label(&[name, " (", &letters(save), ")"]);
         let parted = "where the lines parted";
         let base = match here {
-            Parted::One(save) => label(&[parted, " (", &letters(&save), ")"]),
-            Parted::Several => label(&[parted, " (several saves)"]),
+            Parted::One(save) => format!("{parted} ({})", letters(&save)),
+            Parted::Several => format!("{parted} (several saves)"),
             Parted::Nothing(Some(save)) => {
-                label(&[parted, " (", &letters(&save), "), which held nothing here"])
+                format!("{parted} ({}), which held nothing here", letters(&save))
             }
-            Parted::Nothing(None) => label(&[parted, ", which held nothing here"]),
-            Parted::Unknown => label(&[parted, ", which Opalro can't tell here"]),
+            Parted::Nothing(None) => format!("{parted}, which held nothing here"),
+            Parted::Unknown => format!("{parted}, which Opalro can't tell here"),
         };
         Labels {
             ours: named(&self.ours, &self.ours_save),
@@ -72,15 +71,24 @@ fn letters(save: &ChangeId) -> String {
     save.to_letters()[..8].to_owned()
 }
 
-/// The pieces escaped one by one, cut to `MAX_LABEL` bytes between characters.
-fn label(pieces: &[&str]) -> String {
-    let mut out: String = pieces.iter().map(|p| escape(p, false)).collect();
-    let mut end = out.len().min(MAX_LABEL);
-    while !out.is_char_boundary(end) {
-        end -= 1;
+/// `<name> (<8 letters>)` in at most `MAX_LABEL` bytes: a name too long for it is cut between
+/// its characters, never inside one's escape, and ends with `…`, so the save always shows.
+fn named(name: &str, save: &ChangeId) -> String {
+    let id = format!(" ({})", letters(save));
+    let room = MAX_LABEL.saturating_sub(id.len());
+    let whole = escape(name, false);
+    if whole.len() <= room {
+        return whole + &id;
     }
-    out.truncate(end);
-    out
+    let mut cut = String::new();
+    for c in name.chars() {
+        let piece = escape(c.encode_utf8(&mut [0; 4]), false);
+        if cut.len() + piece.len() + '…'.len_utf8() > room {
+            break;
+        }
+        cut.push_str(&piece);
+    }
+    cut + "…" + &id
 }
 
 /// 7, or one more than the longest run of `<`, `|`, `=` or `>` starting a line in any of
@@ -317,13 +325,32 @@ mod tests {
 
     #[test]
     fn labels_are_plain_one_line_and_at_most_200_bytes() {
-        let name = format!("a\u{1b}\n\u{202e}{}", "é".repeat(250));
-        let ours = sides(&name).labels(Parted::Several).ours;
-        // `a\x1b\x0a\u{202e}` takes 17 bytes, so 200 would fall inside an `é`.
-        assert_eq!(ours.len(), 199);
-        assert!(ours.starts_with("a\\x1b\\x0a\\u{202e}éé"));
-        assert!(ours.ends_with('é'));
-        assert!(!ours.chars().any(|c| c.is_control() || c == '\u{202e}'));
+        let label = |name: &str| sides(name).labels(Parted::Several).ours;
+        let id = " (zyzyzyzy)";
+        // 189 bytes of name and 11 of ID just fit.
+        let fits = "a".repeat(189);
+        assert_eq!(label(&fits), format!("{fits}{id}"));
+        assert_eq!(label(&fits).len(), 200);
+        // One byte more: cut, `…`, the ID whole.
+        assert_eq!(label(&"a".repeat(190)), format!("{}…{id}", "a".repeat(186)));
+        // 500 bytes of `é`: cut between characters.
+        let e = label(&"é".repeat(250));
+        assert_eq!(e, format!("{}…{id}", "é".repeat(93)));
+        // An escape that would pass the room is left out whole; one that fits is kept whole.
+        let past = label(&format!("{}\u{202e}tail", "a".repeat(183)));
+        assert_eq!(past, format!("{}…{id}", "a".repeat(183)));
+        let kept = label(&format!("{}\u{202e}{}", "a".repeat(170), "b".repeat(30)));
+        assert_eq!(
+            kept,
+            format!("{}\\u{{202e}}{}…{id}", "a".repeat(170), "b".repeat(8))
+        );
+        let plain = label(&format!("a\u{1b}\n\u{202e}{}", "é".repeat(250)));
+        assert!(plain.starts_with("a\\x1b\\x0a\\u{202e}éé"));
+        assert!(plain.ends_with(&format!("…{id}")));
+        for l in [&label(&fits), &e, &past, &kept, &plain] {
+            assert!(l.len() <= 200 && l.ends_with(id), "{l}");
+            assert!(!l.chars().any(|c| c.is_control() || c == '\u{202e}'));
+        }
     }
 
     #[test]
