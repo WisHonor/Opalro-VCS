@@ -118,12 +118,20 @@ fn goto_a_line_moves_the_folder_and_the_head() {
 
 #[test]
 fn a_goto_loads_the_file_cache_once() {
+    use crate::filecache::counted::{decodes, loads};
     let (dir, mut repo) = two_lines();
     repo.set_cache_key([7; 32]);
-    let before = crate::filecache::counted::loads();
+    // A status stores the cache, and one more decodes it once, for its own read only.
+    crate::status::status(&repo, false, None).unwrap();
+    let decoded = decodes(&repo.cache_dir());
+    crate::status::status(&repo, false, None).unwrap();
+    assert_eq!(decodes(&repo.cache_dir()) - decoded, 1);
+    let (loaded, decoded) = (loads(), decodes(&repo.cache_dir()));
     let target = Target::Line("main".into());
     let done = goto(&mut repo, &target, &who(), "goto", None, &mut |_| {}).unwrap();
-    assert_eq!(crate::filecache::counted::loads() - before, 1);
+    // The scan's load, and what it stored decoded again for the switch.
+    assert_eq!(loads() - loaded, 1);
+    assert_eq!(decodes(&repo.cache_dir()) - decoded, 2);
     assert_eq!(done.applied.written, 3);
     assert_eq!(files(dir.path()), holding(NEW));
 }

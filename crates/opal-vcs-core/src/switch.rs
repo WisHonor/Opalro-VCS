@@ -5,7 +5,6 @@ use std::path::Path;
 
 use crate::diary::{Action, DiaryEntry, FolderChange, MAX_SHELVES, Position, State, is_plain};
 use crate::drive::{self, Drive};
-use crate::filecache::FileCache;
 use crate::history::{ResolveError, tip_of};
 use crate::id::Id;
 use crate::journal::{Change, Journal};
@@ -665,15 +664,15 @@ fn go(
 }
 
 /// Plans switching the folder from the save `from` to `to`, as `goto` plans it: unsaved work in
-/// the way stops it with `Collisions`. Gives the file-state cache too, as a load would give it
-/// after the folder was read, if that is known: the switch is made with it if nothing reads the
-/// folder in between.
+/// the way stops it with `Collisions`. Gives the body of the file-state cache the read of the
+/// folder stored too, if that is known: the switch is made with it if nothing reads the folder
+/// in between.
 pub(crate) fn plan_switch(
     repo: &Repository,
     from: Id,
     to: Id,
     git_excludes: Option<&Path>,
-) -> Result<(Plan, Drive, Option<FileCache>), SwitchError> {
+) -> Result<(Plan, Drive, Option<Vec<u8>>), SwitchError> {
     let drive = drive::probe(repo.tmp_folder()).map_err(RepoError::from)?;
     let (plan, cache) = writeout::plan_keeping_cache(repo, from, to, drive, git_excludes)?;
     if !plan.collisions.is_empty() {
@@ -694,8 +693,8 @@ pub(crate) struct Planned<'a> {
     pub to: Id,
     pub plan: Plan,
     pub drive: Drive,
-    /// The file-state cache from `plan_switch`, if nothing read the folder since.
-    pub cache: Option<FileCache>,
+    /// The file-state cache's body from `plan_switch`, if nothing read the folder since.
+    pub cache: Option<Vec<u8>>,
 }
 
 /// Makes a planned switch as `goto` does: safety copies of unsaved work kept first, then the
@@ -812,8 +811,8 @@ pub(crate) struct Switch {
     pub drive: Drive,
     /// What is stored with its diary entry.
     pub packs: PackSet,
-    /// The file-state cache as a load would give it now, if known; else the switch loads it.
-    pub cache: Option<FileCache>,
+    /// The body `cache/files` holds now, if known; else the switch loads the file-state cache.
+    pub cache: Option<Vec<u8>>,
 }
 
 /// Makes a planned switch in this order: its packs and diary entry are stored, then

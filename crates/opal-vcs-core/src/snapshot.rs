@@ -1277,15 +1277,15 @@ fn save_goes_on(
 
 /// Writes `seen`, holding what this walk vouched for and learned of the files, as the file-state
 /// cache, if the drive's "now" was found before the walk; failing to is only a warning. Gives
-/// what a load would give right after, if that is known.
+/// the body the file holds then, if that is known (`FileCache::store_giving_body`).
 pub(crate) fn keep_file_cache(
     repo: &Repository,
     seen: FileCache,
     now: Option<i128>,
     warnings: &mut Vec<Warning>,
-) -> Option<FileCache> {
+) -> Option<Vec<u8>> {
     let now = now?;
-    match seen.store_and_reload(repo, now) {
+    match seen.store_giving_body(repo, now) {
         Ok(stored) => stored,
         Err(why) => {
             warnings.push(Warning::new(
@@ -2521,8 +2521,8 @@ pub(crate) struct FolderNow {
     /// The base save's conflicts kept as they were, in parts of it this computer can't hold, by
     /// path, with their records' IDs.
     pub(crate) kept_conflicts: Vec<(String, Id)>,
-    /// The file-state cache as a load would give it after this read stored it, if that is known.
-    pub(crate) cache: Option<FileCache>,
+    /// The body of the file-state cache this read stored, if that is known.
+    pub(crate) cache_body: Option<Vec<u8>>,
 }
 
 /// Reads the project folder as a save on top of the save whose top listing is `base` would, by
@@ -2586,7 +2586,7 @@ pub(crate) fn read_folder(
     };
     let built = build_reading(&mut reading, None, &mut handles, &folders, last, &noted)?;
     let kept_conflicts = kept_places(repo.store(), kept_conflicts)?;
-    let cache = keep_file_cache(repo, reading.cache, now, &mut warnings);
+    let cache_body = keep_file_cache(repo, reading.cache, now, &mut warnings);
     let mut not_written_here = built.kept;
     not_written_here.extend(gone_kept);
     not_written_here.sort_unstable();
@@ -2604,7 +2604,7 @@ pub(crate) fn read_folder(
         warnings,
         records,
         kept_conflicts,
-        cache,
+        cache_body,
     })
 }
 
