@@ -980,11 +980,15 @@ pub fn opal_with_open_files(config: &Path, dir: &Path, most: u32, args: &[&str])
     cmd
 }
 
-/// Runs `cmd` as the test user, with no fault point and its own settings folder `config`.
+/// Runs `cmd` as the test user, with no fault point, no progress line and its own settings folder
+/// `config`.
 fn as_test_user(cmd: &mut Command, config: &Path) {
     cmd.env("OPALRO_USER_NAME", "Test")
         .env("OPALRO_USER_EMAIL", "test@example.com")
         .env_remove("OPALRO_FAULT_AT")
+        // Progress waits ten minutes, so it never comes in first on a slow machine; a test about
+        // progress sets its own.
+        .env("OPALRO_PROGRESS_QUIET_MS", "600000")
         .env("OPALRO_CONFIG_DIR", config)
         // Git's own settings and ignore list are found from here (decision 047), and only here.
         .env("HOME", config)
