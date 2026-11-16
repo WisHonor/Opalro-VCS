@@ -12,6 +12,8 @@ The decisions themselves are records [174](../decisions/174-the-conflict-record.
 
 ## Please confirm
 
+**Reviewed with the owner on 2026-11-16 ([decision 189](../decisions/189-the-owners-review-of-v0.2.md)).** The owner took Claude's recommendation for every item: each is kept as decided, also where an item named another choice (items 5, 8, 14 and 18).
+
 1. **A combine that has conflicts goes through and keeps them** ([175](../decisions/175-what-a-combine-keeps-as-a-conflict.md)). In milestone 8 it stopped and changed nothing. Now the combined save holds a conflict at each place that clashes, every version is kept, and you fix them when you choose. `opalro combine --only-if-clean` is the old behaviour, for scripts.
 2. **Such a combine ends with 0, where Git's `merge` ends with 1** (175). Opalro has three exit codes (done, failed, a command line it couldn't use), and the combine is done. A script that must stop on conflicts uses `--only-if-clean`.
 3. **In the folder, a text file in conflict gets markers; anything else keeps your line's version** ([176](../decisions/176-a-conflict-in-the-folder.md)). Markers are the well-known ones, with the part both lines started from in the middle. A picture, a scene, a file too big to compare, or a file whose rule says so, stays as your line has it, whole, and the other versions stay inside `.opalro`. If you had removed the file, nothing appears in your folder.

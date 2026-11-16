@@ -6,6 +6,8 @@ The decisions themselves are records [184](../decisions/184-opalro-who-the-save-
 
 ## Please confirm
 
+**Reviewed with the owner on 2026-11-16 ([decision 189](../decisions/189-the-owners-review-of-v0.2.md)).** The owner took Claude's recommendation for every item: each is kept as decided. Five carry more: item 8 (all ten flushes stay, and v0.2 is published with `goto` over twice Git's time on Linux, said plainly), item 10 (the agreement's sentence now names 0.2), item 15 (the import records renames: first in the next version), item 16 (`who`'s rule stays; what Git's would save is measured in the next version) and item 17 (the empty folder stays in v0.2, and is changed in the next version together with `status` and empty folders).
+
 1. **`opalro who <file>` reads the file as it is in your folder** ([184](../decisions/184-opalro-who-the-save-behind-each-line.md)), as `git blame` does, and marks the lines you have not saved yet. `--save <save>` reads a saved version instead. The other choice was the saved version only, as Mercurial does.
 2. **A change of line endings alone does not count as changing a line** (184). A save that only turned `\r\n` into `\n` takes no line in `who`. Everything else counts, spaces too; Git counts line endings unless asked not to.
 3. **`who` follows a moved file only where a save recorded the move** (184), never by likeness. One thing it cannot follow: a file moved on one line and changed, under its old name, on a line that was later combined in; the lines of those changes are named as the combine's. Nothing a save stores says where a second parent had the file.
