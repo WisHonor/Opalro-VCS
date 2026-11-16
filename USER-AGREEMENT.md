@@ -48,7 +48,7 @@ Opalro is early software, so keep another copy of anything that matters to you. 
 If Opalro causes you a loss, what you can claim from us is limited, as far as the law allows.
 
 - We are not liable for lost or damaged data, lost profits or any indirect loss.
-- In all, we are liable for at most what you paid for Opalro (nothing: Opalro 0.1 is free).
+- In all, we are liable for at most what you paid for Opalro (nothing: Opalro 0.2 is free).
 - Nothing here limits what the law doesn't let an agreement limit, such as harm we cause on purpose or by gross negligence, injury, or the rights your own consumer law gives you.
 
 ## 8. Other people's code inside Opalro

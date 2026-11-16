@@ -12,6 +12,8 @@ The decisions themselves are records [157](../decisions/157-v0.2-in-four-milesto
 
 ## Please confirm
 
+**Reviewed with the owner on 2026-11-16 ([decision 189](../decisions/189-the-owners-review-of-v0.2.md)).** Item 1 was confirmed in person. For all the others the owner took Claude's recommendation: each is kept as decided. Three carry more: item 9 (short names stay as they are in v0.2; first in the next version, text counts as the start of a change ID only from four letters on), item 11 (the limit and the speed check stay as they are) and item 12 (the two findings are not carried into v0.1).
+
 1. **v0.2 is four milestones, built on a branch of its own** ([157](../decisions/157-v0.2-in-four-milestones.md)): lines and tags, then combining where nothing conflicts, then conflicts, then `who` and the release. `main` isn't touched until you say so. Left out of v0.2: moving saves between lines (Git's rebase and cherry-pick), guessing that a changed file was also moved, merge programs, and a combined save where moving the line forward would do.
 2. **`opalro line new <name>` moves you onto the new line** ([158](../decisions/158-making-renaming-and-deleting-lines.md)). Git's `branch <name>` stays where it is; that is the classic way to save on the wrong branch, so Opalro doesn't copy it, and doesn't run `branch <name>` as a shortcut either.
 3. **`opalro line delete` asks only when nothing else holds the line's saves** (158, [161](../decisions/161-what-building-milestone-7-refined.md)). "Holds" means another line, a tag or a server line has the line's newest save in its history. Where you stand doesn't count, and shelves don't. Without a terminal it stops and names `--yes`. Undo brings the line back for the 30 days of the undo window.

@@ -12,6 +12,8 @@ The decisions themselves are records [164](../decisions/164-where-two-lines-part
 
 ## Please confirm
 
+**Reviewed with the owner on 2026-11-16 ([decision 189](../decisions/189-the-owners-review-of-v0.2.md)).** The owner took Claude's recommendation for every item: each is kept as decided. Item 13: guessing moves stays deferred. Item 16: the limit and the speed check stay as they are, as milestone 7's item 11.
+
 1. **`opalro combine <target>` makes the combined save at once** ([165](../decisions/165-combine-the-command.md)), with a message Opalro writes unless you give one. There is no "combine in progress" state between two commands, as Mercurial and Plastic have: after the command the combine is made, or nothing happened. `opalro undo` takes it back.
 2. **When your line hasn't moved since the other left it, the line just moves forward** (165): no combined save is made (Git's default; there is no `--no-ff` yet).
 3. **Two lines that share no save can't be combined** ([164](../decisions/164-where-two-lines-parted.md)), and there is no flag to force it.
