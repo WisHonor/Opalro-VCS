@@ -401,7 +401,12 @@ fn resolve_makes_a_new_save_when_the_combined_save_is_shown_elsewhere() {
                         BTreeMap::from([("main".to_owned(), combined)]),
                     )]),
                 };
-                let (tags, _) = sample_records();
+                // A tag at a save that doesn't hold it: every tag is asked about too.
+                let (mut tags, _) = sample_records();
+                let side = fx.repo.current().unwrap().1.state.lines["side"];
+                for tag in tags.tags.values_mut() {
+                    tag.save = side;
+                }
                 commit_records(&mut fx.repo, &tags, &servers);
             }
         }
@@ -415,6 +420,101 @@ fn resolve_makes_a_new_save_when_the_combined_save_is_shown_elsewhere() {
         assert_eq!(fx.tip(), id);
         fx.assert_folder_is_goto_of(id);
     }
+}
+
+#[test]
+fn a_fix_replaces_the_combined_save_when_nothing_else_holds_it() {
+    let (mut fx, combined) = conflicted();
+    fx.write("a.txt", A_FIXED);
+    let (id, save, replaced, _, _, _) = recorded(fx.resolve(None, None).unwrap());
+    assert_eq!(replaced, Some(combined));
+    assert_eq!(save.change_id, fx.save_of(combined).change_id);
+    assert_eq!(fx.tip(), id);
+}
+
+/// Commits the line `name` at a new save combining `parents`, holding `like`'s files.
+fn plant_combined_line(fx: &mut Fx, name: &str, parents: &[Id], like: Id) -> Id {
+    let lock = fx.repo.lock_for_change("save", &mut |_| {}).unwrap();
+    let (head, entry) = fx.repo.current().unwrap();
+    let mut save = fx.save_of(like);
+    save.parents = parents.to_vec();
+    save.change_id = crate::id::ChangeId::random().unwrap();
+    let mut packs = fx.repo.new_packs().unwrap();
+    let id = packs.add_record(ObjectKind::Save, &save.encode()).unwrap();
+    let mut state = entry.state.clone();
+    state.lines.insert(name.to_owned(), id);
+    let diary = crate::diary::DiaryEntry {
+        parent: Some(head),
+        action: crate::diary::Action::Command,
+        command: "combine".into(),
+        who: ada(),
+        opal_version: "0.2.0".into(),
+        state,
+        folder_change: None,
+    };
+    fx.repo.commit(&lock, packs, &diary).unwrap();
+    id
+}
+
+#[test]
+fn a_fix_is_a_save_of_its_own_when_another_line_combined_the_combined_save_in() {
+    let (mut fx, combined) = conflicted();
+    let side = fx.repo.current().unwrap().1.state.lines["side"];
+    plant_combined_line(&mut fx, "other", &[side, combined], side);
+    fx.write("a.txt", A_FIXED);
+    let (id, save, replaced, _, _, _) = recorded(fx.resolve(None, None).unwrap());
+    assert_eq!(replaced, None);
+    assert_eq!(save.parents, [combined]);
+    assert_eq!(save.message, "Fixed conflicts in a.txt");
+    assert_eq!(fx.tip(), id);
+}
+
+#[test]
+fn each_step_that_makes_a_save_leaves_the_note_of_it() {
+    let noted = |fx: &Fx| {
+        let note = crate::lastmade::LastMade::load(&fx.repo).unwrap();
+        (note.save, note.entry)
+    };
+    // A combine that makes a save.
+    let mut fx = Fx::new();
+    fx.repo.set_cache_key([7; 32]);
+    fx.write("a.txt", b"a\n");
+    fx.save("Start");
+    fx.line_new("side");
+    fx.write("b.txt", b"b\n");
+    fx.save("Side");
+    fx.goto(Target::Line("main".into()));
+    fx.write("c.txt", b"c\n");
+    fx.save("Main");
+    let combined = fx.combine("side");
+    assert_eq!(noted(&fx), (combined, fx.head()));
+    // One that only moves the line forward leaves none.
+    fx.goto(Target::Line("side".into()));
+    let made = noted(&fx);
+    let done = combine::combine(
+        &mut fx.repo,
+        &Target::Line("main".into()),
+        &Named {
+            raw: "main".into(),
+            shown: "main".into(),
+        },
+        None,
+        &ada(),
+        None,
+        Keep::Conflicts,
+        &mut |_| {},
+    )
+    .unwrap();
+    assert!(matches!(done.result, Combined::Forward), "{done:?}");
+    assert_eq!(noted(&fx), made);
+    // A resolve that records into the combined save, and one that keeps a side.
+    let (mut fx, _) = conflicted();
+    fx.repo.set_cache_key([7; 32]);
+    fx.write("a.txt", A_FIXED);
+    let (id, ..) = recorded(fx.resolve(Some(&["a.txt"]), None).unwrap());
+    assert_eq!(noted(&fx), (id, fx.head()));
+    let (id, ..) = recorded(fx.resolve(Some(&["pic.png"]), Some(Side::Theirs)).unwrap());
+    assert_eq!(noted(&fx), (id, fx.head()));
 }
 
 #[test]

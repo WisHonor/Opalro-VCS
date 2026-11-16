@@ -231,7 +231,7 @@ pub fn delete_line(
         }
         let tags = repo.tag_list(&entry.state)?;
         let servers = repo.server_lines(&entry.state)?;
-        let holders = holders(&entry.state, name, &tags, &servers);
+        let holders = others(&entry.state, name, &tags, &servers);
         let saves: Vec<Id> = holders.iter().map(|(_, id)| *id).collect();
         let only_here = match only_in(repo, save, &saves) {
             Ok(n) => n,
@@ -259,17 +259,18 @@ pub fn delete_line(
     })
 }
 
-/// What holds the saves of line `deleting`, each with its save: every other line, every tag and
-/// every server line. Where the project stands holds nothing: it moves on with the next goto.
-fn holders<'a>(
+/// What holds the saves of line `line` besides it, each with its save: every other line, every
+/// tag and every server line. Where the project stands holds nothing: it moves on with the next
+/// goto.
+pub(crate) fn others<'a>(
     state: &'a State,
-    deleting: &str,
+    line: &str,
     tags: &'a TagList,
     servers: &'a ServerLines,
 ) -> Vec<(Holder<'a>, Id)> {
     let lines = (state.lines.iter())
-        .filter(|(line, _)| *line != deleting)
-        .map(|(line, id)| (Holder::Line(line), *id));
+        .filter(|(other, _)| *other != line)
+        .map(|(other, id)| (Holder::Line(other), *id));
     let tags = tags.tags.iter().map(|(n, tag)| (Holder::Tag(n), tag.save));
     let servers = servers.servers.iter().flat_map(|(server, lines)| {
         lines
@@ -282,7 +283,7 @@ fn holders<'a>(
 /// The first of `holders`, or else line `deleting` at `tip`, whose history through every parent
 /// holds a save that can't be read, as damage naming it. Looked for only once the walk has
 /// failed; each save is read at most once.
-fn unreadable_history(
+pub(crate) fn unreadable_history(
     repo: &Repository,
     deleting: &str,
     tip: Id,
@@ -327,7 +328,7 @@ fn unreadable_history(
 }
 
 /// What holds a line's saves, as [`unreadable_history`]'s damage names it.
-enum Holder<'a> {
+pub(crate) enum Holder<'a> {
     Line(&'a str),
     Tag(&'a str),
     /// A line and its server.

@@ -17,6 +17,7 @@ use crate::fsio;
 use crate::history::tip_of;
 use crate::id::Id;
 use crate::kept::overlay_whole;
+use crate::lastmade::LastMade;
 use crate::listing::EntryKind;
 use crate::names::Given;
 use crate::pack::PackSet;
@@ -340,15 +341,12 @@ fn resolve_locked(
         return Ok(ResolveOutcome::Nothing { left, left_count });
     }
     let parent = status.save;
-    let mut cache = ChangeIds::load(repo);
     let mut shown_by = Vec::new();
     let amend = parent.parents.len() > 1 && {
-        let by = shown_elsewhere(repo, &mut cache, &entry.state, &line, parent_id, &parent);
-        // Kept however it ends: reading the other lines is what costs.
-        cache.store(repo, &entry.state);
-        shown_by = by?;
+        shown_by = shown_elsewhere(repo, &entry.state, &line, parent_id)?;
         shown_by.is_empty()
     };
+    let mut cache = ChangeIds::load(repo);
     let message = match places.as_slice() {
         _ if amend => parent.message.clone(),
         [one] => format!("Fixed conflicts in {one}"),
@@ -410,6 +408,10 @@ fn resolve_locked(
             let (applied, safety_copies, _) =
                 make_switch(repo, lock, planned, req.who, req.command, earlier)?;
             made.learn(repo, &mut cache, &state);
+            // The switch moved the handle's head to the entry it wrote.
+            if let Ok((entry, _)) = repo.current() {
+                LastMade::store(repo, save_id, entry);
+            }
             warnings.splice(0..0, status.warnings);
             (save_id, save, short, applied, safety_copies, warnings)
         }

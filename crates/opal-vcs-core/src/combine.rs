@@ -24,6 +24,7 @@ use crate::diary::{Position, State};
 use crate::history::tip_of;
 use crate::id::{ChangeId, Id};
 use crate::kept::{EXACT, Put, overlay_with};
+use crate::lastmade::LastMade;
 use crate::lines::Target;
 use crate::listing::{Entry, EntryKind, Listing, SaveLimits};
 use crate::moves::{
@@ -1154,6 +1155,10 @@ fn combine_locked(
         warnings.push(Warning::new(warning::TOO_MANY_MOVE_NOTES, message));
     }
     let mut done = to.switch(repo, lock, earlier, asked, made.save, warnings)?;
+    // The switch moved the handle's head to the entry it wrote.
+    if let Ok((entry, _)) = repo.current() {
+        LastMade::store(repo, made.save, entry);
+    }
     // The rules file the switch left in the folder is the one the next combine reads.
     done.0.warnings.extend(repo.read_rules().warnings());
     let result = Combined::Made {

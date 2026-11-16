@@ -1328,6 +1328,7 @@ mod tests {
         assert!(crowded_but_few.get() > 0, "no history had many candidates");
     }
 
+    /// Also counts what `holder` reads against what `only_in` reads for the same question.
     #[test]
     fn holder_agrees_with_a_search_through_every_parent() {
         use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
@@ -1406,9 +1407,21 @@ mod tests {
             let (_dir, mut repo) = project();
             let ids = plant(&mut repo, &saves);
             let other_ids: Vec<Id> = others.iter().map(|&o| ids[o]).collect();
-            match holder(&repo, ids[save], &other_ids).unwrap() {
+            let before = repo.store().saves_read();
+            let found = holder(&repo, ids[save], &other_ids).unwrap();
+            let read = repo.store().saves_read() - before;
+            match found {
                 Some(i) => prop_assert!(holds(others[i]), "{i} does not hold the save"),
                 None => prop_assert_eq!(kind, 3),
+            }
+            // It reads what `only_in` reads for the same question, and no more once it finds one.
+            let before = repo.store().saves_read();
+            only_in(&repo, ids[save], &other_ids).unwrap();
+            let by_only_in = repo.store().saves_read() - before;
+            if found.is_some() {
+                prop_assert!(read <= by_only_in, "{read} > {by_only_in}");
+            } else {
+                prop_assert_eq!(read, by_only_in);
             }
             Ok(())
         });

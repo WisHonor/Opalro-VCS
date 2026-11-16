@@ -30,7 +30,6 @@ pub mod listing;
 pub mod merge;
 pub(crate) mod moves;
 pub mod names;
-pub mod otherlines;
 pub mod pack;
 pub mod presets;
 pub mod repo;

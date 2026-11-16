@@ -235,6 +235,63 @@ fn amend_of_a_save_a_server_line_or_tag_names_is_refused() {
 }
 
 #[test]
+fn an_amend_is_refused_when_another_line_combined_this_one_in() {
+    let env = project(&[("a.txt", "a\n")]);
+    ok(&env, &["line", "new", "feature"]);
+    write(&env, "f.txt", "f\n");
+    ok(&env, &["save", "F"]);
+    ok(&env, &["goto", "main"]);
+    write(&env, "a.txt", "m\n");
+    ok(&env, &["save", "M"]);
+    let m = main_tip(&env);
+    ok(&env, &["goto", "feature"]);
+    ok(&env, &["combine", "main"]);
+    // Main's newest save is the combine's second parent.
+    let repo = Repository::open(env.root()).unwrap();
+    let feature = repo.current().unwrap().1.state.lines["feature"];
+    assert_eq!(save_of(&env, feature).parents[1], m);
+    ok(&env, &["goto", "main"]);
+    write(&env, "a.txt", "M\n");
+    let err = refused(&env, &["save", "--amend", "M2"]);
+    assert!(err.contains(": line feature shows it too,"), "{err}");
+    assert!(
+        err.contains("Save your changes as a new save instead"),
+        "{err}"
+    );
+}
+
+#[test]
+fn an_amend_is_refused_when_a_tag_sits_past_it_on_a_deleted_line() {
+    let env = project(&[("a.txt", "a\n")]);
+    write(&env, "b.txt", "b\n");
+    ok(&env, &["save", "--line", "gone", "B"]);
+    write(&env, "c.txt", "c\n");
+    ok(&env, &["save", "C"]);
+    ok(&env, &["tag", "v1.0"]);
+    ok(&env, &["goto", "main"]);
+    ok(&env, &["line", "delete", "gone"]);
+    write(&env, "a.txt", "A\n");
+    let err = refused(&env, &["save", "--amend", "A"]);
+    assert!(err.contains(": tag v1.0 shows it too,"), "{err}");
+}
+
+#[test]
+fn an_amend_is_refused_when_a_server_line_reaches_it() {
+    let env = Env::new();
+    env.commit("a.txt", "a\n", "First");
+    env.commit("a.txt", "b\n", "Second");
+    env.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    env.git(&["reset", "-q", "--hard", "HEAD~1"]);
+    env.import();
+    write(&env, "a.txt", "A\n");
+    let err = refused(&env, &["save", "--amend", "A"]);
+    assert!(
+        err.contains(": server line main@origin shows it too,"),
+        "{err}"
+    );
+}
+
+#[test]
 fn amend_refused_for_tags_shows_an_odd_tags_name_between_quotes() {
     let env = project(&[("a.txt", "a\n")]);
     let names = ["say \"hi\" now".to_owned(), "v\u{7}".to_owned()];

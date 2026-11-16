@@ -63,7 +63,6 @@ impl LastMade {
 
     /// The note in `repo`, or `None` if the handle has no key, or the note can't be read, isn't
     /// sealed with that key or doesn't decode.
-    #[cfg_attr(not(test), expect(dead_code, reason = "nothing reads the note yet"))]
     pub(crate) fn load(repo: &Repository) -> Option<LastMade> {
         let key = repo.cache_key()?;
         let shown = repo.cache_dir().join(FILE);
@@ -75,7 +74,6 @@ impl LastMade {
 
     /// Writes the note, sealed with the handle's key. A note that can't be written is just not
     /// there next time, so a failure is ignored.
-    #[cfg_attr(not(test), expect(dead_code, reason = "nothing writes the note yet"))]
     pub(crate) fn store(repo: &Repository, save: Id, entry: Id) {
         let Some(key) = repo.cache_key() else {
             return;

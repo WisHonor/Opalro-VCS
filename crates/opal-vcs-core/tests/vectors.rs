@@ -796,65 +796,6 @@ fn change_ids_match_their_vector() {
     assert_eq!(ids.get("side").unwrap(), [save(0x55, 0x22)]);
 }
 
-/// A run from 11…11 (change ID 22…22) to 33…33 (44…44) that stops at 55…55, and a run of 66…66
-/// (77…77), which has no first parent, as storage-format.md §10 lays them out.
-fn other_lines_body() -> String {
-    let id = |byte: &str, n: usize| byte.repeat(n);
-    format!(
-        "{}010202{}{}{}{}01{}01{}{}00",
-        hex(b"OPALLINE"),
-        id("11", 32),
-        id("22", 16),
-        id("33", 32),
-        id("44", 16),
-        id("55", 32),
-        id("66", 32),
-        id("77", 16)
-    )
-}
-
-#[test]
-#[ignore = "prints the vector; run by hand to regenerate tests/vectors/other_lines.json"]
-fn print_other_lines_vector() {
-    let key = [0x42; 32];
-    let body = other_lines_body();
-    println!(
-        "[\n  {{\"name\": \"two-runs\", \"key\": \"{}\", \"body\": \"{body}\", \"sealed\": \"{}\"}}\n]",
-        hex(&key),
-        hex(&opal_core::keyed::seal(&key, &unhex(&body)))
-    );
-}
-
-#[test]
-fn other_lines_match_their_vector() {
-    use opal_core::keyed::{open_sealed, seal};
-    use opal_core::otherlines::OtherLines;
-    let path = format!(
-        "{}/tests/vectors/other_lines.json",
-        env!("CARGO_MANIFEST_DIR")
-    );
-    let vectors: Vec<SealedVector> =
-        serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
-    assert_eq!(vectors.len(), 1);
-    let v = &vectors[0];
-    assert_eq!(v.body, other_lines_body());
-    let key: [u8; 32] = unhex(&v.key).try_into().unwrap();
-    assert_eq!(key, [0x42; 32]);
-    let (body, sealed) = (unhex(&v.body), unhex(&v.sealed));
-    let lines = OtherLines::decode(&body).unwrap();
-    assert_eq!(lines.encode(), body);
-    let save = |s: u8, c: u8| (Id([s; 32]), ChangeId([c; 16]));
-    let run = lines.run(&Id([0x11; 32])).unwrap();
-    assert_eq!(run.saves, [save(0x11, 0x22), save(0x33, 0x44)]);
-    assert_eq!(run.next, Some(Id([0x55; 32])));
-    let run = lines.run(&Id([0x66; 32])).unwrap();
-    assert_eq!(run.saves, [save(0x66, 0x77)]);
-    assert_eq!(run.next, None);
-    assert_eq!(seal(&key, &body), sealed, "{}", v.name);
-    assert_eq!(open_sealed(&key, &sealed), Some(&body[..]));
-    assert_eq!(open_sealed(&[0; 32], &sealed), None);
-}
-
 /// Save 11…11, made last, and diary entry 22…22, which recorded it, as storage-format.md §10
 /// lays them out.
 fn last_made_body() -> String {

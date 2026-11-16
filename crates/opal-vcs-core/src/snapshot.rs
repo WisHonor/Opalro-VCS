@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use opal_platform::dir::{Dir, EntryMeta, EntryType};
 
+use crate::ancestry;
 use crate::changeids::ChangeIds;
 use crate::conflict::standing::as_it_stands;
 use crate::conflict::{self, Record, Recording, Settled, Summary, markers};
@@ -23,12 +24,12 @@ use crate::fsio;
 use crate::history;
 use crate::id::{ChangeId, ContentHasher, Id, hash_content};
 use crate::ingest::{self, IngestError, Ready};
-use crate::lines::{NameError, check_new_name};
+use crate::lastmade::LastMade;
+use crate::lines::{self, Holder, NameError, check_new_name};
 use crate::link;
 use crate::listing::{Entry, EntryKind, Listing, SaveLimits};
 use crate::moves;
 use crate::names::{Given, PortabilityProblem, folder_problems};
-use crate::otherlines::OtherLines;
 use crate::pack::{ObjectKind, PackError, PackSet};
 use crate::repo::{RepoError, Repository};
 use crate::rules::Rules;
@@ -546,20 +547,13 @@ pub(crate) fn save_recording(
     }
     let (line, parent_id) = save_goes_on(repo, &entry.state, req.new_line)?;
     let parent = repo.store().save(&parent_id, repo.signatures_allowed())?;
-    // An amend needs the change-ID cache before the walk; a save, only once it has its save.
-    let mut early_cache = None;
     if req.amend
         && let Some(line) = &line
     {
-        let mut cache = ChangeIds::load(repo);
-        let by = shown_elsewhere(repo, &mut cache, &entry.state, line, parent_id, &parent);
-        // Kept however the amend ends: reading the other lines is what costs.
-        cache.store(repo, &entry.state);
-        let by = by?;
+        let by = shown_elsewhere(repo, &entry.state, line, parent_id)?;
         if !by.is_empty() {
             return Err(SaveError::AmendShared { by });
         }
-        early_cache = Some(cache);
     }
     let mut walked = read_and_build(
         repo,
@@ -595,7 +589,7 @@ pub(crate) fn save_recording(
         return Err(SaveError::NeedsLineName);
     };
     let (move_notes, counted) = walked.moves(repo);
-    let mut cache = early_cache.unwrap_or_else(|| ChangeIds::load(repo));
+    let mut cache = ChangeIds::load(repo);
     let (save_id, save, short_change_id) = compose(
         repo,
         line,
@@ -770,7 +764,7 @@ pub(crate) struct Made<'a> {
 
 impl Made<'_> {
     /// Commits it as one diary step after `head` (whose state is `before`), with no change to the
-    /// folder, and has the line's saves in `cache` learn it.
+    /// folder, has the line's saves in `cache` learn it, and leaves the note of it.
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn commit(
         &self,
@@ -792,8 +786,9 @@ impl Made<'_> {
             state: self.state(before),
             folder_change: None,
         };
-        repo.commit(lock, packs, &diary)?;
+        let made = repo.commit(lock, packs, &diary)?;
         self.learn(repo, cache, &diary.state);
+        LastMade::store(repo, self.save_id, made);
         Ok(())
     }
 
@@ -1066,138 +1061,93 @@ pub(crate) fn compose(
     Ok((save_id, save, short_change_id))
 }
 
-/// Who else shows `id`, the newest save of `line`, as `AmendShared` names them: a line that holds
-/// it or reaches its change ID along first parents, a server line or a tag that names it.
+/// Who else holds `id`, the newest save of `line`: each line, tag or server line that names it
+/// or has it in its history through any parent, as `AmendShared` names them.
 pub(crate) fn shown_elsewhere(
     repo: &Repository,
-    cache: &mut ChangeIds,
     state: &State,
     line: &str,
     id: Id,
-    save: &Save,
 ) -> Result<Vec<String>, SaveError> {
-    let mut by: Vec<String> = lines_reaching(repo, cache, state, line, id, &save.change_id)?
-        .into_iter()
-        .map(|name| format!("line {}", escape(name, false)))
-        .collect();
-    for (server, lines) in &repo.server_lines(state)?.servers {
-        for (name, &tip) in lines {
-            if tip == id {
-                let (name, server) = (escape(name, false), escape(server, false));
-                by.push(format!("server line {name}@{server}"));
+    let tags = repo.tag_list(state)?;
+    let servers = repo.server_lines(state)?;
+    let others = lines::others(state, line, &tags, &servers);
+    let mut asked: Vec<usize> = match moved_since_made(repo, state, line, id) {
+        Some(moved) => (0..others.len()).filter(|&i| moved(&others[i])).collect(),
+        None => (0..others.len()).collect(),
+    };
+    let mut found = Vec::new();
+    while !asked.is_empty() {
+        let saves: Vec<Id> = asked.iter().map(|&i| others[i].1).collect();
+        let held = match ancestry::holder(repo, id, &saves) {
+            Ok(Some(at)) => saves[at],
+            Ok(None) => break,
+            Err(e) => {
+                let named = lines::unreadable_history(repo, line, id, &others);
+                return Err(named.unwrap_or(e).into());
             }
-        }
+        };
+        // Whatever is at the save found holds it too.
+        let (with, without): (Vec<usize>, _) =
+            asked.into_iter().partition(|&i| others[i].1 == held);
+        found.extend(with);
+        asked = without;
     }
-    for (name, tag) in &repo.tag_list(state)?.tags {
-        if tag.save == id {
-            by.push(format!("tag {}", crate::tags::shown_name(name)));
-        }
-    }
-    Ok(by)
+    // Lines by name, then server lines, then tags, each in the order `others` gives them.
+    let kind = |holder: &Holder<'_>| match holder {
+        Holder::Line(_) => 0,
+        Holder::Server(..) => 1,
+        Holder::Tag(_) => 2,
+    };
+    found.sort_by_key(|&i| (kind(&others[i].0), i));
+    Ok(found
+        .into_iter()
+        .map(|i| match others[i].0 {
+            Holder::Line(name) => format!("line {}", escape(name, false)),
+            Holder::Server(name, server) => format!(
+                "server line {}@{}",
+                escape(name, false),
+                escape(server, false)
+            ),
+            Holder::Tag(name) => format!("tag {}", crate::tags::shown_name(name)),
+        })
+        .collect())
 }
 
-/// The lines of `state` other than `line`, in order of name, that hold `id`, the newest save of
-/// `line`, or reach a save with `change_id` along first parents. Only `line` gets a list in
-/// `cache`: each other line is walked until it meets that list or a save an earlier walk passed,
-/// so lines that share a history cost it once. What the walks read is kept in `cache/other-lines`,
-/// and the next amend goes on from where they stopped.
-fn lines_reaching<'s>(
+/// With a usable note of `id`'s making, whether a line, tag or server line has moved since: it
+/// is new, or the step that made `id` had it at another save. `None` when there is no such note:
+/// it is missing, for another save, or its step can't be read or doesn't have `line` at `id`.
+fn moved_since_made(
     repo: &Repository,
-    cache: &mut ChangeIds,
-    state: &'s State,
+    now: &State,
     line: &str,
     id: Id,
-    change_id: &ChangeId,
-) -> Result<Vec<&'s str>, StoreError> {
-    let mut others = state
-        .lines
-        .iter()
-        .filter(|(name, _)| *name != line)
-        .peekable();
-    if others.peek().is_none() {
-        return Ok(vec![]);
+) -> Option<impl Fn(&(Holder<'_>, Id)) -> bool> {
+    let note = LastMade::load(repo).filter(|note| note.save == id)?;
+    let then = repo.entry(&note.entry).ok()?.state;
+    if then.lines.get(line) != Some(&id) {
+        return None;
     }
-    // Where each save of `line` is on its list, and the last place `change_id` is. A list that
-    // can't be read just isn't used: the walks read what they need and say what fails.
-    let (places, last) = match cache.chain(repo, Some(line), id) {
-        Ok(saves) => (
-            saves
-                .iter()
-                .enumerate()
-                .map(|(at, (save, _))| (*save, at))
-                .collect(),
-            saves.iter().rposition(|(_, c)| c == change_id),
-        ),
-        Err(_) => (HashMap::new(), None),
+    // A list that can't be read leaves the note unusable, as its entry would.
+    let tags = if now.tags == then.tags {
+        None
+    } else {
+        Some(repo.tag_list(&then).ok()?)
     };
-    // From `start` back along first parents: whether the line reaches the change ID, the saves
-    // read, with their change IDs, and the save it stopped at unread, if any.
-    let walk = |start: Option<Id>, known: &HashMap<Id, bool>| {
-        let mut next = start;
-        let mut passed = Vec::new();
-        let reaches = loop {
-            let Some(at) = next else { break false };
-            // From here on this line is `line`'s list, so it reaches the change ID if the list
-            // has it here or further back.
-            if let Some(&p) = places.get(&at) {
-                break last.is_some_and(|last| last >= p);
-            }
-            if let Some(&answer) = known.get(&at) {
-                break answer;
-            }
-            let save = repo.store().save(&at, repo.signatures_allowed())?;
-            passed.push((at, save.change_id));
-            next = save.parents.first().copied();
-            if save.change_id == *change_id {
-                break true;
-            }
-        };
-        Ok::<_, StoreError>((reaches, passed, next))
+    let servers = if now.server_lines == then.server_lines {
+        None
+    } else {
+        Some(repo.server_lines(&then).ok()?)
     };
-    let mut known: HashMap<Id, bool> = HashMap::new();
-    let mut runs: Option<OtherLines> = None;
-    let mut found = Vec::new();
-    for (name, &tip) in others {
-        let listed = cache
-            .get(name)
-            .filter(|saves| saves.first().is_some_and(|(first, _)| *first == tip));
-        let reaches = if tip == id {
-            true
-        } else if let Some(saves) = listed {
-            saves.iter().any(|(_, c)| c == change_id)
-        } else {
-            let runs = runs.get_or_insert_with(|| OtherLines::load(repo));
-            // What an earlier amend read of this line: if it doesn't hold the change ID, the
-            // walk goes on from where it stopped.
-            let (start, from_run) = match runs.run(&tip) {
-                Some(run) if run.saves.iter().any(|(_, c)| c == change_id) => {
-                    found.push(name.as_str());
-                    continue;
-                }
-                Some(run) => (run.next, true),
-                None => (Some(tip), false),
-            };
-            let (reaches, passed, next) = match walk(start, &known) {
-                // A run that goes on to no save is a wrong cache, not a damaged store: the line
-                // is walked again from its newest save, and the run replaced.
-                Err(_) if from_run => {
-                    runs.forget(&tip);
-                    walk(Some(tip), &known)?
-                }
-                walked => walked?,
-            };
-            runs.add(tip, &passed, next);
-            known.extend(passed.into_iter().map(|(at, _)| (at, reaches)));
-            reaches
-        };
-        if reaches {
-            found.push(name.as_str());
-        }
-    }
-    if let Some(runs) = &mut runs {
-        runs.store(repo, state);
-    }
-    Ok(found)
+    Some(move |(holder, save): &(Holder<'_>, Id)| match *holder {
+        Holder::Line(name) => then.lines.get(name) != Some(save),
+        Holder::Tag(name) => tags
+            .as_ref()
+            .is_some_and(|t| t.tags.get(name).map(|t| &t.save) != Some(save)),
+        Holder::Server(name, server) => servers
+            .as_ref()
+            .is_some_and(|s| s.servers.get(server).and_then(|lines| lines.get(name)) != Some(save)),
+    })
 }
 
 /// The base save's entry `e` as the folder holds it, if that is a file.
@@ -3813,29 +3763,6 @@ mod tests {
         save_folder(repo, &req, &mut |_| {}, &mut |_| true)
     }
 
-    /// Commits the line `name` at a new save on `parent` that holds the same files.
-    fn plant_line(repo: &mut Repository, name: &str, parent: Id) {
-        let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
-        let (head, entry) = repo.current().unwrap();
-        let mut save = repo.store().save(&parent, false).unwrap();
-        save.parents = vec![parent];
-        save.change_id = ChangeId::random().unwrap();
-        let mut packs = repo.new_packs().unwrap();
-        let id = packs.add_record(ObjectKind::Save, &save.encode()).unwrap();
-        let mut state = entry.state.clone();
-        state.lines.insert(name.to_owned(), id);
-        let diary = DiaryEntry {
-            parent: Some(head),
-            action: Action::Command,
-            command: "save".into(),
-            who: who(),
-            opal_version: "0.1.0".into(),
-            state,
-            folder_change: None,
-        };
-        repo.commit(&lock, packs, &diary).unwrap();
-    }
-
     #[test]
     fn a_save_without_a_message_is_refused_unless_it_amends() {
         let (dir, mut repo) = project();
@@ -4144,37 +4071,290 @@ mod tests {
         assert_eq!(repo.head().unwrap(), head);
     }
 
-    #[test]
-    fn an_amend_that_goes_no_further_keeps_its_line_s_list_and_no_other() {
-        const KEY: [u8; 32] = [7; 32];
-        let (dir, mut repo) = project();
-        repo.set_cache_key(KEY);
-        let first = repo.current().unwrap().1.state.lines["main"];
-        write(dir.path(), "a.txt", b"a");
-        let SaveOutcome::Saved { save_id, .. } = save_now(&mut repo).unwrap() else {
-            panic!("nothing was saved");
+    /// Points each of `lines` at its save, in one step, without touching the folder.
+    fn set_lines(repo: &mut Repository, lines: &[(String, Id)]) {
+        let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
+        let (head, entry) = repo.current().unwrap();
+        let mut state = entry.state.clone();
+        for (name, id) in lines {
+            state.lines.insert(name.clone(), *id);
+        }
+        let diary = DiaryEntry {
+            parent: Some(head),
+            action: Action::Command,
+            command: "save".into(),
+            who: who(),
+            opal_version: "0.1.0".into(),
+            state,
+            folder_change: None,
         };
-        let cached = |repo: &Repository, line: &str| ChangeIds::load(repo).get(line).is_some();
-        // A line from the first save, which doesn't hold this one: nothing to amend.
-        plant_line(&mut repo, "b", first);
-        // Gone before each amend, so a list found after it is one the amend kept.
-        let file = dir.path().join(".opalro/cache/change-ids");
-        fs::remove_file(&file).unwrap();
-        let same = save_as(&mut repo, None, true);
-        assert!(
-            matches!(same, Ok(SaveOutcome::NothingChanged { .. })),
-            "{same:?}"
-        );
-        assert!(cached(&repo, "main"));
-        assert!(!cached(&repo, "b"));
-        // A line from this save: refused.
-        plant_line(&mut repo, "c", save_id);
-        fs::remove_file(&file).unwrap();
-        let refused = save_as(&mut repo, None, true);
-        let by_c = matches!(&refused, Err(SaveError::AmendShared { by }) if by == &["line c"]);
-        assert!(by_c, "{refused:?}");
-        assert!(cached(&repo, "main"));
-        assert!(!cached(&repo, "c"));
+        repo.commit(&lock, repo.new_packs().unwrap(), &diary)
+            .unwrap();
+    }
+
+    /// Plants, for each `(name, on, n)`, `n` saves of their own on `on` holding its files, the
+    /// last as the line `name`, all in one step. Gives each line's saves, oldest first.
+    fn plant_lines(repo: &mut Repository, lines: &[(String, Id, usize)]) -> Vec<Vec<Id>> {
+        let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
+        let (head, entry) = repo.current().unwrap();
+        let mut packs = repo.new_packs().unwrap();
+        let mut state = entry.state.clone();
+        let mut planted = Vec::new();
+        for (name, on, n) in lines {
+            let mut save = repo.store().save(on, false).unwrap();
+            let mut saves = Vec::new();
+            let mut top = *on;
+            for _ in 0..*n {
+                save.parents = vec![top];
+                save.change_id = ChangeId::random().unwrap();
+                top = packs.add_record(ObjectKind::Save, &save.encode()).unwrap();
+                saves.push(top);
+            }
+            state.lines.insert(name.clone(), top);
+            planted.push(saves);
+        }
+        let diary = DiaryEntry {
+            parent: Some(head),
+            action: Action::Command,
+            command: "save".into(),
+            who: who(),
+            opal_version: "0.1.0".into(),
+            state,
+            folder_change: None,
+        };
+        repo.commit(&lock, packs, &diary).unwrap();
+        planted
+    }
+
+    /// `n` lines of 20 saves of their own on `on`.
+    fn old_lines(n: usize, on: Id) -> Vec<(String, Id, usize)> {
+        (0..n).map(|k| (format!("line-{k:03}"), on, 20)).collect()
+    }
+
+    /// Amends `main` with `a.txt` changed, and gives what came of it and how many saves it read.
+    fn amend_counted(dir: &Path, repo: &mut Repository) -> (Result<SaveOutcome, SaveError>, usize) {
+        let n = repo.store().saves_read();
+        write(dir, "a.txt", format!("amended {n}").as_bytes());
+        let done = save_as(repo, None, true);
+        (done, repo.store().saves_read() - n)
+    }
+
+    /// The saves an amend reads right after a save, in a project with `old` lines of 20 saves
+    /// that parted from main before it.
+    fn amend_reads_after_a_save(old: usize) -> usize {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"a");
+        let first = saved_id(save_now(&mut repo));
+        plant_lines(&mut repo, &old_lines(old, first));
+        write(dir.path(), "a.txt", b"b");
+        saved_id(save_now(&mut repo));
+        let (done, read) = amend_counted(dir.path(), &mut repo);
+        assert!(matches!(done, Ok(SaveOutcome::Saved { .. })), "{done:?}");
+        read
+    }
+
+    fn saved_id(done: Result<SaveOutcome, SaveError>) -> Id {
+        match done {
+            Ok(SaveOutcome::Saved { save_id, .. }) => save_id,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_amend_right_after_a_save_reads_no_save_of_another_line() {
+        // As many saves read as in the same project without the other lines.
+        assert_eq!(amend_reads_after_a_save(300), amend_reads_after_a_save(0));
+    }
+
+    /// The saves an amend of main reads when `side` (five saves of its own off main) gained
+    /// `moved` saves since main's newest save was made, in a project with `old` more lines, and
+    /// main's saves, all of which the walk may meet.
+    fn amend_reads_after_another_line_moved(old: usize, moved: usize) -> (usize, usize) {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"a");
+        let first = saved_id(save_now(&mut repo));
+        let mut lines = old_lines(old, first);
+        lines.push(("side".into(), first, 5));
+        let side = plant_lines(&mut repo, &lines).pop().unwrap();
+        write(dir.path(), "a.txt", b"b");
+        let tip = saved_id(save_now(&mut repo));
+        if moved > 0 {
+            plant_lines(&mut repo, &[("side".into(), side[4], moved)]);
+        }
+        let main_saves = std::iter::successors(Some(tip), |id| {
+            repo.store()
+                .save(id, false)
+                .unwrap()
+                .parents
+                .first()
+                .copied()
+        })
+        .count();
+        let (done, read) = amend_counted(dir.path(), &mut repo);
+        assert!(matches!(done, Ok(SaveOutcome::Saved { .. })), "{done:?}");
+        (read, main_saves)
+    }
+
+    #[test]
+    fn after_a_save_on_one_other_line_only_that_line_is_asked_about() {
+        let (moved, main_saves) = amend_reads_after_another_line_moved(0, 3);
+        let (still, _) = amend_reads_after_another_line_moved(0, 0);
+        // No save of a third line is read.
+        assert_eq!(amend_reads_after_another_line_moved(300, 3).0, moved);
+        // The side line was asked about: its own eight saves, and main's back to where it parted.
+        assert!(moved > still, "{moved} {still}");
+        assert!(moved - still <= 8 + main_saves, "{moved} {still}");
+    }
+
+    /// The saves an amend reads with the cache folder emptied before it, in a project with `old`
+    /// lines of 20 saves that parted from main before its newest save.
+    fn amend_reads_without_a_note(old: usize) -> (usize, Result<SaveOutcome, SaveError>) {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"a");
+        let first = saved_id(save_now(&mut repo));
+        plant_lines(&mut repo, &old_lines(old, first));
+        write(dir.path(), "a.txt", b"b");
+        saved_id(save_now(&mut repo));
+        let cache = dir.path().join(".opalro/cache");
+        for file in fs::read_dir(&cache).unwrap() {
+            fs::remove_file(file.unwrap().path()).unwrap();
+        }
+        let (done, read) = amend_counted(dir.path(), &mut repo);
+        (read, done)
+    }
+
+    #[test]
+    fn without_a_note_every_other_line_is_asked_about_once() {
+        let (alone, done) = amend_reads_without_a_note(0);
+        assert!(matches!(done, Ok(SaveOutcome::Saved { .. })), "{done:?}");
+        let (among, done) = amend_reads_without_a_note(300);
+        assert!(matches!(done, Ok(SaveOutcome::Saved { .. })), "{done:?}");
+        // Every save of every other line, each once, and main's three at most.
+        let others = 300 * 20;
+        assert!(among - alone >= others, "{among} {alone}");
+        assert!(among - alone <= others + 3, "{among} {alone}");
+    }
+
+    #[test]
+    fn a_note_that_can_t_be_trusted_is_not_used() {
+        let (dir, mut repo) = project();
+        let start = repo.current().unwrap().1.state.lines["main"];
+        write(dir.path(), "a.txt", b"a");
+        let tip = saved_id(save_now(&mut repo));
+        let made = repo.head().unwrap();
+        // A line on the save, the step after the one that made it.
+        plant_lines(&mut repo, &[("held".into(), tip, 1)]);
+        let with_held = repo.head().unwrap();
+        // Main away from its save and back, so a step has `held` but main elsewhere.
+        set_lines(&mut repo, &[("main".into(), start)]);
+        let main_away = repo.head().unwrap();
+        set_lines(&mut repo, &[("main".into(), tip)]);
+        let file = dir.path().join(".opalro/cache/last-made");
+        let refused = |dir: &Path, repo: &mut Repository| {
+            let (done, _) = amend_counted(dir, repo);
+            let by_held =
+                matches!(&done, Err(SaveError::AmendShared { by }) if by == &["line held"]);
+            assert!(by_held, "{done:?}");
+        };
+        // Each lie, if believed, would leave `held` unasked.
+        LastMade::store(&repo, start, with_held);
+        refused(dir.path(), &mut repo);
+        LastMade::store(&repo, tip, Id([0x5a; 32]));
+        refused(dir.path(), &mut repo);
+        let note = LastMade {
+            save: tip,
+            entry: with_held,
+        };
+        fs::write(&file, crate::keyed::seal(&[9; 32], &note.encode())).unwrap();
+        refused(dir.path(), &mut repo);
+        LastMade::store(&repo, tip, main_away);
+        refused(dir.path(), &mut repo);
+        // The note this computer left when it made the save is used, and `held` is new since.
+        LastMade::store(&repo, tip, made);
+        refused(dir.path(), &mut repo);
+        // A lie under the right seal is believed: the seal is what it is trusted for.
+        LastMade::store(&repo, tip, with_held);
+        let (done, _) = amend_counted(dir.path(), &mut repo);
+        assert!(matches!(done, Ok(SaveOutcome::Saved { .. })), "{done:?}");
+    }
+
+    /// One undo or redo step.
+    fn step(repo: &mut Repository, back: bool) {
+        let who = who();
+        let req = crate::undo::StepRequest {
+            n: 1,
+            shelve: false,
+            who: &who,
+            git_excludes: None,
+        };
+        if back {
+            crate::undo::undo(repo, &req, &mut |_| {}).unwrap();
+        } else {
+            crate::undo::redo(repo, &req, &mut |_| {}).unwrap();
+        }
+    }
+
+    #[test]
+    fn after_undo_of_an_amend_a_line_started_on_the_save_holds_it() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"a");
+        let tip = saved_id(save_now(&mut repo));
+        let (done, _) = amend_counted(dir.path(), &mut repo);
+        assert!(matches!(done, Ok(SaveOutcome::Saved { .. })), "{done:?}");
+        step(&mut repo, true);
+        assert_eq!(repo.current().unwrap().1.state.lines["main"], tip);
+        set_lines(&mut repo, &[("side".into(), tip)]);
+        let (done, _) = amend_counted(dir.path(), &mut repo);
+        let by_side = matches!(&done, Err(SaveError::AmendShared { by }) if by == &["line side"]);
+        assert!(by_side, "{done:?}");
+    }
+
+    #[test]
+    fn after_redo_a_line_started_on_the_amended_save_holds_it() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"a");
+        saved_id(save_now(&mut repo));
+        let (done, _) = amend_counted(dir.path(), &mut repo);
+        let amended = saved_id(done);
+        set_lines(&mut repo, &[("side".into(), amended)]);
+        step(&mut repo, true);
+        assert!(!repo.current().unwrap().1.state.lines.contains_key("side"));
+        step(&mut repo, false);
+        let (done, _) = amend_counted(dir.path(), &mut repo);
+        let by_side = matches!(&done, Err(SaveError::AmendShared { by }) if by == &["line side"]);
+        assert!(by_side, "{done:?}");
+    }
+
+    #[test]
+    fn an_amend_goes_through_beside_an_older_copy_of_the_same_change() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"a");
+        let older = saved_id(save_now(&mut repo));
+        let (done, _) = amend_counted(dir.path(), &mut repo);
+        let amended = saved_id(done);
+        // A line started on the replaced save, which has the same change ID.
+        let old = plant_lines(&mut repo, &[("old".into(), older, 1)]).remove(0)[0];
+        let (done, _) = amend_counted(dir.path(), &mut repo);
+        let newest = saved_id(done);
+        // Both saves of the change are still there to see.
+        let lines = repo.current().unwrap().1.state.lines;
+        assert_eq!((lines["old"], lines["main"]), (old, newest));
+        let change = |id: &Id| repo.store().save(id, false).unwrap().change_id;
+        assert_eq!(change(&older), change(&amended));
+        assert_eq!(change(&newest), change(&amended));
+    }
+
+    #[test]
+    fn a_save_and_an_amend_each_leave_the_note_of_what_they_made() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"a");
+        let tip = saved_id(save_now(&mut repo));
+        let note = LastMade::load(&repo).unwrap();
+        assert_eq!((note.save, note.entry), (tip, repo.head().unwrap()));
+        let (done, _) = amend_counted(dir.path(), &mut repo);
+        let amended = saved_id(done);
+        let note = LastMade::load(&repo).unwrap();
+        assert_eq!((note.save, note.entry), (amended, repo.head().unwrap()));
     }
 
     #[test]

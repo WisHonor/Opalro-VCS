@@ -2079,19 +2079,26 @@ fn amend(repo: &mut Repository, m: &mut Model, new_message: bool) {
     }
 }
 
-/// Whether a tag is at `save`, or a line other than `line` holds it, or a save of its change,
-/// along first parents.
+/// Whether a tag or a line other than `line` has `save` itself somewhere behind it: starting from
+/// each, every parent is followed, first or not, until the save turns up or nothing is left.
+/// Another save of the same change doesn't count.
 fn shown_elsewhere(m: &Model, line: &str, save: usize) -> bool {
-    let (change, id) = (m.saves[save].change, m.saves[save].id);
-    m.state.tags.values().any(|&t| m.saves[t].id == id)
-        || m.state
-            .lines
-            .iter()
-            .filter(|(name, _)| *name != line)
-            .any(|(_, &tip)| {
-                std::iter::successors(Some(tip), |&s| m.saves[s].parent)
-                    .any(|s| m.saves[s].change == change)
-            })
+    let target = m.saves[save].id;
+    let other_lines = m.state.lines.iter().filter(|(name, _)| *name != line);
+    let mut frontier: Vec<usize> = (m.state.tags.values().copied())
+        .chain(other_lines.map(|(_, &tip)| tip))
+        .collect();
+    let mut visited = vec![false; m.saves.len()];
+    while let Some(s) = frontier.pop() {
+        if m.saves[s].id == target {
+            return true;
+        }
+        if !std::mem::replace(&mut visited[s], true) {
+            frontier.extend(m.saves[s].parent);
+            frontier.extend(m.saves[s].others.iter().copied());
+        }
+    }
+    false
 }
 
 /// The name `pick` chooses among `names`, or `other` in the slot past them.

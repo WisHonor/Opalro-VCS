@@ -130,13 +130,6 @@ doc = false
 bench = false
 
 [[bin]]
-name = "other_lines"
-path = "fuzz_targets/other_lines.rs"
-test = false
-doc = false
-bench = false
-
-[[bin]]
 name = "last_made"
 path = "fuzz_targets/last_made.rs"
 test = false
