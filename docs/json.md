@@ -619,6 +619,24 @@ A step that stops it fails it with exit code 1, and its document is the error do
 
 Folders are not listed; the files in them are. Each change of `show` also has `in_conflict` (boolean): whether the save holds a conflict at the place, `true` for `"in_conflict"` and `"still_in_conflict"`, `false` for every other, and always `false` in a project whose `.opalro/format` doesn't list `conflicts`. In a project that keeps conflicts, a change that is `"in_conflict"`, `"still_in_conflict"` or `"conflict_fixed"` is the place alone: a folder that became a conflict's place, or a conflict's place that became a folder, is that one change, with nothing listed below it, and with paths given, `changes --save` lists it when a path given is at it or below it. These three never carry hunks or line counts: in `changes --save` their `content` is `"text"` with `hunks` empty, and says nothing about what the versions are, since no version is read for them.
 
+### `opalro who --json`
+
+`opalro who <file>` reads the file as it is in your folder, and `opalro who <file> --save <save>` as that save has it, `<save>` read as `opalro show` reads its argument. The lines' text isn't repeated: the document names the save behind each line, in runs.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `opalro_json` | number | `1` |
+| `path` | string | The file's path from the project folder, with `/` between names, as the save spells it; as typed when no save has the file. |
+| `from` | string | `"folder"`: the file as it is in your folder; `"save"`: as the save `--save` named has it. |
+| `save` | save | The save `--save` named, or the one the project is at. |
+| `lines` | number | How many lines the file has; `0` for an empty file. |
+| `runs` | list | Every line once, in order, in runs of lines that follow each other and are from the same save, each `{"first": …, "lines": …, "save": …, "was": …}`: the run's first line, counted from 1; how many lines it holds; the fingerprint of the save they are from (64 hex digits), `null` for lines not saved yet; and the path the file had at that save when it was another (the save is from before a recorded move), else `null`. |
+| `saves` | list of save | Each save `runs` names, once, in the order of its first run. |
+| `coarse` | boolean | `true` when a comparison ran past its 2 seconds and was made coarser, so a line may be named for a newer save than the one that first had it. Nothing else says so: no warning is added for it. |
+| `warnings` | list | See §4. |
+
+A refusal (no file there, a folder, not text, too big, a path outside the project) is a failed command's document (§5), exit code 1.
+
 ## 4. Warnings
 
 `warnings` is in every document, the one for a failed command included, and is `[]` when there is nothing to say. A warning is something that went wrong without stopping the command. When a command finishes, people see each one on stderr as `warning: <message>`. A command that fails lists the warnings it had found before it failed in its document, and people are shown only the error, except for the warnings of a stopped switch the command finished first (`switch_finished`, `changed_since_plan`, `placeholders_written`, `not_written_here`), `head_not_flushed`, of a step whose head had moved, and `switch_dropped`, of a stopped switch an `undo --to` dropped before it failed: each tells of what happened all the same, so they come before the error. When stdout can't take what a command prints, stderr gets it instead, in the order §5 gives.

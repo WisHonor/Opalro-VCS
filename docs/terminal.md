@@ -57,6 +57,7 @@ Opalro writes the terminal's own colours (SGR codes), never RGB, and ends each s
 | `←` | `<-` | the suggested choice in a question |
 | `✓` `✗` | `+` `x` | `opalro verify`'s checks, and nowhere else |
 | `─` | `-` | the separator between files in `opalro changes` |
+| `│` | `\|` | between a line's number and the line in `opalro who` |
 | `…` | `...` | something cut short; work in progress |
 | `█` `░` | `#` `.` | the cells of a progress bar |
 
@@ -134,7 +135,7 @@ Every stop is an `error:` whose `hint:` names the flag.
 
 ## 11. Help
 
-- `opalro` alone, `opalro help` and `opalro --help` print one screen: a sentence about Opalro, the usage line, and the commands in three groups, one line each: every day (`status`, `save`, `changes`, `history`, `goto`, `undo`); lines, shelves and details (`line`, `tag`, `combine`, `resolve`, `shelf`, `discard`, `show`); the project (`start`, `setup`, `import`, `tidy`, `verify`). `redo` and `unshelf` are named beside `undo` and `shelf`, as `(and: redo)`. The last line says `Help on one command: opalro help <command>    Version: opalro --version`. Each command's name is padded to 10.
+- `opalro` alone, `opalro help` and `opalro --help` print one screen: a sentence about Opalro, the usage line, and the commands in three groups, one line each: every day (`status`, `save`, `changes`, `history`, `goto`, `undo`); lines, shelves and details (`line`, `tag`, `combine`, `resolve`, `shelf`, `discard`, `show`, `who`); the project (`start`, `setup`, `import`, `tidy`, `verify`). `redo` and `unshelf` are named beside `undo` and `shelf`, as `(and: redo)`. The last line says `Help on one command: opalro help <command>    Version: opalro --version`. Each command's name is padded to 10.
 - `opalro help` and `opalro --help` end with exit code 0. `opalro` alone prints the same screen, also on stdout, and ends with 2, as before milestone 6: a command line with no command is one Opalro couldn't use.
 - `opalro help <command>` and `opalro <command> --help` print the same page: `opalro <command>: ` and the command's one-line description, then `Examples` (each a command line, then what it does, the lines padded to the longest), `Usage`, `Forms` (when the command has forms, as `opalro line new` is one of `opalro line`'s), `Arguments` (when the command takes any) and `Options`, each a title on a line of its own, its lines under it flush left, one line each. A command with forms lists them under `Forms`, each with its usage naming its own options (`opalro line delete [--yes] <NAME>`), then its one-line description, padded as the examples are; each of a form's own options is explained on a line under it, indented. `Options` holds only what the command itself takes. The usage, the forms, the arguments and the options are read from the command line's own definitions, so only options the command or form really takes are listed. Every example is a command line Opalro takes.
 - Git's words appear nowhere in help. A command line Opalro can't use (an unknown command or option) gets the command-line reader's own message on stderr and exit code 2, as before.
@@ -374,6 +375,46 @@ then, on a terminal, `Next: see its lines with: opalro changes --save <id>` when
 ```
 
 - **Colour:** IDs magenta and bold, the line and tag names blue, the fingerprints blue, the rows as in `opalro status` (`in conflict` and `still in conflict` yellow, `conflict fixed` green), the times in brackets dim.
+
+### `opalro who`
+
+`opalro who <file>` names, beside each line of a file as it is in your folder, the save that line is from ([decision 184](decisions/184-opalro-who-the-save-behind-each-line.md)); `opalro who <file> --save <save>` reads the file as that save has it instead, `<save>` read as `opalro show` reads its argument, and refused alike. `<file>` is one path, named from the folder you are in as `opalro changes` takes one, never a pattern: a `*` in it is a character of the name.
+
+```text
+Each line of moves.txt and the save it is from:
+
+oumq  Ana Lima    2023-11-17  1 │ # moves
+poxq  Ana Lima    2023-11-14  2 │ jump:
+nylq  Ben Okafor  2023-11-15  3 │ 	height 3
+poxq  Ana Lima    2023-11-14  4 │ 	sound hop
+poxq  Ana Lima    2023-11-14  5 │ end
+not saved yet                 6 │ 	coyote 0.1
+nylq  Ben Okafor  2023-11-15  7 │ fall:
+
+1 line isn't saved yet.
+```
+
+| State | Outcome line | Then |
+|---|---|---|
+| The folder's file | `Each line of <path> and the save it is from:` | an empty line, the rows; then, if some lines are unsaved, an empty line and `N lines aren't saved yet.` (`1 line isn't saved yet.`) |
+| `--save` | `Each line of <path> as save <id> has it, and the save it is from:` | an empty line, the rows |
+| No save has the file | `<path> isn't saved yet: none of its N lines is from a save.` (`its 1 line isn't from a save`) | nothing more |
+| An empty file | `<path> is empty.` | nothing more |
+| A comparison ran out of time | (after the rows) `warning: Comparing some versions took too long, so a line may be named for a newer save than the one that first had it.` | |
+| Nothing there | `error: <path> isn't a file in your folder.` | `hint: To read it as a save has it: opalro who <file> --save <save>` |
+| `--save`, nothing there | `error: Save <id> has no file at <path>.` | |
+| A folder, a link, a project link | `error: <path> is a folder, and opalro who reads one file.` (`is a link`, `is a project link`) | |
+| Not text | `error: <path> isn't text, so it has no lines to name a save for.` | |
+| Too big | `error: <path> is larger than 64 MiB, the most Opalro compares line by line.` (`has more than 1,000,000 lines, …`) | |
+
+- **A row:** the save's short ID, its author's name, the day the author wrote it (`YYYY-MM-DD`, in the save's own time zone), the line's number, `│`, the line. The ID is the short change ID `opalro show` prints for that save, so it can be typed back into `opalro show`. The ID and name columns are as wide as their widest value among the rows, and the number as wide as the last line's number, right-aligned; columns are two spaces apart, and the `│` has a space on each side (none after it when the line is empty). Rows of one save that follow each other repeat its three columns, dim after the first on a terminal, so the output can be searched and cut. A line not saved yet has `not saved yet` across the three columns, padded to their width.
+- **The line** is shown without its line ending, escaped as a file's lines are in `opalro changes`; a tab stays a tab. It is never cut: a long line runs on. On a terminal an author's name longer than 20 characters is cut at its end with the cut mark (§7); off a terminal nothing is cut and nothing is dimmed.
+- **`<path>`** is the path as the save spells it (as typed when no save has the file), and the counts have a comma between thousands. `<id>` in the outcome line is the save's short change ID; in the error, the first 12 hex digits of its fingerprint.
+- **No save has the file** is said when no line of it is from a save; **a comparison that ran out of time** is a `warning:` (`diff_timed_out`) on stderr after the answer, once for the whole command, and `--json` says it only in `coarse`.
+- **The refusals** end with exit code 1 and print nothing on stdout. In the folder anything at the path that isn't a regular file (a folder, a link) is `isn't a file in your folder`: the folder is read for a file only, and the words for a folder, a link and a project link (and `is a place in conflict`) are those of a save's entry, with `--save`. A path outside the project, or one Opalro can't use, is `opalro changes`' refusal, word for word (`error: <path> is outside the project.`, with `hint: Name files and folders inside the project, from the folder you are in.`). A command line Opalro can't use (no path, two paths, an option `who` doesn't take) gets the command-line reader's message and exit code 2.
+- **It reads, never writes:** nothing under `.opalro` and nothing in the folder changes, and it takes no step `opalro undo` could take back. It opens the project as `opalro show` does.
+- **Git's words:** `blame` and `annotate` run `who` with what follows them, as `log` runs `history`; Git's options after them are handed on, and `who` refuses those it doesn't take as it refuses any unknown option. Their one-time hints are `in Opalro, blame is who: opalro who <file>` and `in Opalro, annotate is who: opalro who <file>`.
+- **Colour:** the ID magenta and bold on the first row of a save, the line's number and the `│` dim, and the three columns of a row that repeats the save above it dim. The name, the day, `not saved yet` and the line have none.
 
 ### `opalro goto`
 

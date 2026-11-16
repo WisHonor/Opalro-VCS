@@ -755,15 +755,8 @@ pub fn write_lines(out: &mut dyn Write, c: &FileChange, lines: &Lines) -> io::Re
                 Tag::Removed => ('-', Some(Role::Removed)),
                 Tag::Added => ('+', Some(Role::Added)),
             };
-            let body = line
-                .strip_suffix(b"\r\n")
-                .or_else(|| line.strip_suffix(b"\n"));
-            // Tabs are kept: they can't drive a terminal, and code is full of them.
-            let shown: Vec<String> = String::from_utf8_lossy(body.unwrap_or(line))
-                .split('\t')
-                .map(|piece| escape(piece, false))
-                .collect();
-            let mut shown = format!("{mark}{}", shown.join("\t"));
+            let ended = line.ends_with(b"\n");
+            let mut shown = format!("{mark}{}", file_line(line));
             // Of a pair that differs only in its ending, the line that ends in CRLF says so.
             if eol && line.ends_with(b"\r\n") {
                 shown.push_str(" (CRLF)");
@@ -772,12 +765,26 @@ pub fn write_lines(out: &mut dyn Write, c: &FileChange, lines: &Lines) -> io::Re
                 Some(role) => writeln!(out, "{}", screen.paint(role, &shown))?,
                 None => writeln!(out, "{shown}")?,
             }
-            if body.is_none() {
+            if !ended {
                 writeln!(out, "\\ No newline at end of file")?;
             }
         }
     }
     Ok(())
+}
+
+/// A line of a file as people are shown it: without its line ending, escaped, its tabs kept,
+/// since they can't drive a terminal and code is full of them.
+pub fn file_line(line: &[u8]) -> String {
+    let body = line
+        .strip_suffix(b"\r\n")
+        .or_else(|| line.strip_suffix(b"\n"))
+        .unwrap_or(line);
+    let pieces: Vec<String> = String::from_utf8_lossy(body)
+        .split('\t')
+        .map(|piece| escape(piece, false))
+        .collect();
+    pieces.join("\t")
 }
 
 /// What parts two files in `opalro changes`: on a terminal a dim rule across it, up to 100 columns;
@@ -1162,7 +1169,8 @@ pub fn relative_time(time_ms: i64, tz_offset_min: i16, now_ms: i64) -> String {
     }
 }
 
-fn date(time_ms: i64, tz_offset_min: i16) -> String {
+/// The day of `time_ms`, in the save's own zone: `2026-11-08`.
+pub fn date(time_ms: i64, tz_offset_min: i16) -> String {
     zoned(time_ms, tz_offset_min, "%Y-%m-%d")
 }
 

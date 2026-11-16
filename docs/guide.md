@@ -387,6 +387,7 @@ resolve   Record fixed conflicts
 shelf     Set your unsaved changes aside   (and: unshelf)
 discard   Throw away your unsaved changes; undo brings them back
 show      Show everything about one save
+who       Show the save behind each line of a file
 
 The project
 start     Make this folder an Opalro project
@@ -574,6 +575,38 @@ Saves back from save kxqmzrtwvnlp "Climb walls", newest first:
 ```
 
 Listed from anywhere but your own line, the change IDs are 12 letters long, so each of them can be typed back into `opalro show` or `opalro goto` from where you are.
+
+### `opalro who`
+
+Show the save behind each line of a file: who wrote the line, and when.
+
+```sh
+opalro who todo.txt
+```
+
+In a game project, for example:
+
+```text
+Each line of moves.txt and the save it is from:
+
+oumq  Ana Lima    2023-11-17  1 │ # moves
+poxq  Ana Lima    2023-11-14  2 │ jump:
+nylq  Ben Okafor  2023-11-15  3 │ 	height 3
+poxq  Ana Lima    2023-11-14  4 │ 	sound hop
+poxq  Ana Lima    2023-11-14  5 │ end
+not saved yet                 6 │ 	coyote 0.1
+nylq  Ben Okafor  2023-11-15  7 │ fall:
+
+1 line isn't saved yet.
+```
+
+Each row is the save's change ID (type it into `opalro show` to see the whole save), who made it, the day, the line's number, then the line. Rows of one save that follow each other repeat it, dimmed on a terminal. Opalro reads the file as it is in your folder, so the numbers are the ones your editor shows, and a line you haven't saved yet says so. `--save` reads the file as a save has it instead, the save named as `opalro goto` takes one:
+
+```sh
+opalro who todo.txt --save main
+```
+
+Through a combined save, each line is named for the save on the line it came from; what the combine wrote itself, such as your fix of a conflict, is the combined save's. A file a save moved is followed back to where it was, when the save recorded the move. A file that isn't text, or is over 64 MiB or 1,000,000 lines, is refused, as `opalro changes` shows no lines for it.
 
 ### `opalro goto`
 
@@ -1353,6 +1386,7 @@ hint: in Opalro, commit is save; it takes new files too: opalro save "message"
 | `git diff` | `opalro changes` | runs |
 | `git log` | `opalro history` | runs |
 | `git show` | `opalro show` | the same word |
+| `git blame <file>`, `git annotate <file>` | `opalro who <file>` | runs |
 | `git checkout <target>`, `git switch <target>` | `opalro goto <target>` | runs |
 | `git stash`, `git stash push` | `opalro shelf` | runs |
 | `git stash pop` | `opalro unshelf` | runs; `stash pop 2` runs `unshelf 2` |
@@ -1377,7 +1411,6 @@ hint: in Opalro, commit is save; it takes new files too: opalro save "message"
 | `git checkout --ours <file>`, `git restore --ours <file>` | `opalro resolve <file> --keep mine` | explained |
 | `git checkout --theirs <file>`, `git restore --theirs <file>` | `opalro resolve <file> --keep theirs` | explained |
 | `git mergetool` | your own editor; `opalro resolve <file> --copy theirs --to <somewhere>` copies a version out to look at | explained |
-| `git blame` | not yet; until then `opalro history` | explained |
 | `git rebase`, `cherry-pick` | not yet: moving saves between lines comes after v0.2; until then `opalro save --amend` or `opalro undo` | explained |
 | `git clone`, `fetch`, `pull`, `push`, `remote` | coming in v0.3 | explained |
 | `git clean` | none: Opalro never deletes files it doesn't keep | explained |
@@ -1559,7 +1592,8 @@ The `--json` reference, published on https://opalro.com, describes every documen
 ## 13. What v0.1 doesn't do yet
 
 - **No server, no sharing.** v0.1 is one person on one computer. Opalro can't yet copy a project from a server, or send and get changes (syncing is planned for v0.3).
-- **Conflicts, as far as they go.** A combine keeps its conflicts and `opalro resolve` records your fixes ([`opalro combine`](#opalro-combine)), but Opalro can't yet: show who changed each line of a file; mark in `opalro history` a save that holds conflicts (`opalro status` and `opalro show` say so); combine two lines that both changed a place one of them holds in conflict (fix it on that line first); merge line by line a file that the saves the two lines started from disagree about (you get both lines' versions whole); start a merge program (copy a version out with `opalro resolve <file> --copy theirs --to <somewhere>` and open it in yours); or take one file out of any save.
+- **Conflicts, as far as they go.** A combine keeps its conflicts and `opalro resolve` records your fixes ([`opalro combine`](#opalro-combine)), but Opalro can't yet: mark in `opalro history` a save that holds conflicts (`opalro status` and `opalro show` say so); combine two lines that both changed a place one of them holds in conflict (fix it on that line first); merge line by line a file that the saves the two lines started from disagree about (you get both lines' versions whole); start a merge program (copy a version out with `opalro resolve <file> --copy theirs --to <somewhere>` and open it in yours); or take one file out of any save.
+- **`opalro who` follows a moved file only where a save recorded the move,** on the line it was moved on: lines changed under the file's old name on another line, then combined in, are named as the combined save's.
 - **No locking.** Rules can mark files lockable, but nothing locks them until syncing arrives (v0.3).
 - **No repair.** `opalro verify` finds damage but can't fix it.
 - **No export to Git yet,** and an import happens once: bringing in Git's newer commits later comes after v0.1.

@@ -1,0 +1,15 @@
+---
+source: crates/opal-vcs/tests/who.rs
+expression: shown
+---
+Each line of moves.txt and the save it is from:
+
+oumq  Ana Lima    2023-11-17  1 | # moves
+poxq  Ana Lima    2023-11-14  2 | jump:
+nylq  Ben Okafor  2023-11-15  3 | 	height 3
+poxq  Ana Lima    2023-11-14  4 | 	sound hop
+poxq  Ana Lima    2023-11-14  5 | end
+not saved yet                 6 | 	coyote 0.1
+nylq  Ben Okafor  2023-11-15  7 | fall:
+
+1 line isn't saved yet.

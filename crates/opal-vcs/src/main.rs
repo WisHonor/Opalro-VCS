@@ -16,6 +16,7 @@ mod show_output;
 mod style;
 mod tag_output;
 mod undo_output;
+mod who_output;
 
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -59,6 +60,7 @@ use opal_core::tidy;
 use opal_core::undo::{self, StepInfo, StepRequest};
 use opal_core::verify;
 use opal_core::warning::{self, Warning};
+use opal_core::who::{self as whose, Asked, WhoRequest};
 use opal_core::writeout::unfinished_warning;
 use output::{Failure, OPALRO_JSON};
 use serde_json::json;
@@ -130,6 +132,15 @@ enum Command {
     Show {
         /// The save, by line name, line@server, tag, change ID or fingerprint; the one you're at
         /// if left out.
+        save: Option<String>,
+    },
+    /// Show the save behind each line of a file.
+    Who {
+        /// The file.
+        path: PathBuf,
+        /// Read the file as this save has it: by line name, line@server, tag, change ID or
+        /// fingerprint.
+        #[arg(long, value_name = "SAVE")]
         save: Option<String>,
     },
     /// List the lines, marking the one you're on, then the server lines; or make, rename or
@@ -1826,6 +1837,43 @@ fn show(json: bool, text: Option<&str>, opened: &mut Option<Repository>) -> Resu
     Ok(())
 }
 
+fn who_command(
+    json: bool,
+    given: &Path,
+    save: Option<&str>,
+    opened: &mut Option<Repository>,
+) -> Result<(), Failure> {
+    let here = resolved(&std::env::current_dir()?);
+    let repo: &Repository = opened.insert(with_users_key(Repository::discover(&here)?));
+    let path = project_path(repo.root(), &here, given, repo.drive()?)?;
+    let asked = match save {
+        Some(t) => Asked::Save(resolve(repo, t)?),
+        None => Asked::Folder,
+    };
+    let request = WhoRequest { path: &path, asked };
+    let found = whose::who(repo, &request).map_err(|e| who_output::failure(e, given))?;
+    let mut warnings: Vec<Warning> = unfinished_warning(repo).into_iter().collect();
+    let mut saves = HashMap::new();
+    for id in std::iter::once(found.at).chain(who_output::named_in(&found)) {
+        if saves.contains_key(&id) {
+            continue;
+        }
+        let save = repo.store().save(&id, repo.signatures_allowed())?;
+        let short = short_or_whole(repo, &id, &save.change_id, &mut warnings);
+        saves.insert(id, who_output::Named { save, short });
+    }
+    let from_save = save.is_some();
+    warnings.extend(repo.store().warnings());
+    if json {
+        let document = who_output::document(&found, from_save, &saves, &warnings);
+        return output::print_quietly(&format!("{document}\n"), &warnings);
+    }
+    if found.coarse {
+        warnings.push(who_output::coarse_warning());
+    }
+    output::print_quietly(&who_output::shown(&found, from_save, &saves), &warnings)
+}
+
 fn line_command(json: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
     let repo: &Repository = opened.insert(with_users_key(Repository::discover(
         &std::env::current_dir()?,
@@ -3442,6 +3490,7 @@ fn main() -> ExitCode {
         }
         Command::History { from } => history(cli.json, from.as_deref(), &mut opened),
         Command::Show { save } => show(cli.json, save.as_deref(), &mut opened),
+        Command::Who { path, save } => who_command(cli.json, &path, save.as_deref(), &mut opened),
         Command::Goto { target } => goto_command(cli.json, &target, &mut opened),
         Command::Combine {
             target,

@@ -1,0 +1,138 @@
+---
+source: crates/opal-vcs/tests/who.rs
+expression: "support::masked(doc.clone())"
+---
+{
+  "coarse": false,
+  "from": "folder",
+  "lines": 7,
+  "opalro_json": 1,
+  "path": "moves.txt",
+  "runs": [
+    {
+      "first": 1,
+      "lines": 1,
+      "save": "[redacted]",
+      "was": null
+    },
+    {
+      "first": 2,
+      "lines": 1,
+      "save": "[redacted]",
+      "was": null
+    },
+    {
+      "first": 3,
+      "lines": 1,
+      "save": "[redacted]",
+      "was": null
+    },
+    {
+      "first": 4,
+      "lines": 2,
+      "save": "[redacted]",
+      "was": null
+    },
+    {
+      "first": 6,
+      "lines": 1,
+      "save": null,
+      "was": null
+    },
+    {
+      "first": 7,
+      "lines": 1,
+      "save": "[redacted]",
+      "was": null
+    }
+  ],
+  "save": {
+    "author": {
+      "email": "ana@example.com",
+      "name": "Ana Lima",
+      "time_ms": "[redacted]",
+      "tz_offset_min": "[redacted]"
+    },
+    "change_id": "[redacted]",
+    "change_id_short": "[redacted]",
+    "id": "[redacted]",
+    "line": null,
+    "message": "Heading",
+    "parents": [
+      "[redacted]"
+    ],
+    "saver": {
+      "email": "ana@example.com",
+      "name": "Ana Lima",
+      "time_ms": "[redacted]",
+      "tz_offset_min": "[redacted]"
+    }
+  },
+  "saves": [
+    {
+      "author": {
+        "email": "ana@example.com",
+        "name": "Ana Lima",
+        "time_ms": "[redacted]",
+        "tz_offset_min": "[redacted]"
+      },
+      "change_id": "[redacted]",
+      "change_id_short": "[redacted]",
+      "id": "[redacted]",
+      "line": null,
+      "message": "Heading",
+      "parents": [
+        "[redacted]"
+      ],
+      "saver": {
+        "email": "ana@example.com",
+        "name": "Ana Lima",
+        "time_ms": "[redacted]",
+        "tz_offset_min": "[redacted]"
+      }
+    },
+    {
+      "author": {
+        "email": "ana@example.com",
+        "name": "Ana Lima",
+        "time_ms": "[redacted]",
+        "tz_offset_min": "[redacted]"
+      },
+      "change_id": "[redacted]",
+      "change_id_short": "[redacted]",
+      "id": "[redacted]",
+      "line": null,
+      "message": "First",
+      "parents": [],
+      "saver": {
+        "email": "ana@example.com",
+        "name": "Ana Lima",
+        "time_ms": "[redacted]",
+        "tz_offset_min": "[redacted]"
+      }
+    },
+    {
+      "author": {
+        "email": "ben@example.com",
+        "name": "Ben Okafor",
+        "time_ms": "[redacted]",
+        "tz_offset_min": "[redacted]"
+      },
+      "change_id": "[redacted]",
+      "change_id_short": "[redacted]",
+      "id": "[redacted]",
+      "line": null,
+      "message": "Higher",
+      "parents": [
+        "[redacted]"
+      ],
+      "saver": {
+        "email": "ben@example.com",
+        "name": "Ben Okafor",
+        "time_ms": "[redacted]",
+        "tz_offset_min": "[redacted]"
+      }
+    }
+  ],
+  "warnings": []
+}

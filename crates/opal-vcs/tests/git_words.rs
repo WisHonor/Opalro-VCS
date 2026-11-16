@@ -279,7 +279,6 @@ fn each_explained_word_explains() {
         "reset",
         "rebase",
         "cherry-pick",
-        "blame",
         "clone",
         "fetch",
         "pull",
@@ -479,12 +478,20 @@ fn merge_of_two_lines_is_explained_and_changes_nothing() {
 }
 
 #[test]
-fn blame_is_still_explained() {
+fn blame_and_annotate_run_who() {
     let env = project();
-    let said = explained(&env, &["blame", "a.txt"]);
-    assert!(said.contains("who changed each line"), "{said}");
-    assert!(said.contains("opalro history"), "{said}");
-    assert!(!said.contains("v0."), "{said}");
+    let who = run(&env, &["who", "a.txt", "--json"]);
+    assert_eq!(who.status.code(), Some(0), "{}", text(&who.stderr));
+    for word in ["blame", "annotate"] {
+        let typed = run(&env, &[word, "a.txt", "--json"]);
+        assert_eq!(typed.status.code(), Some(0), "{word}");
+        assert_eq!(text(&typed.stdout), text(&who.stdout), "{word}");
+        // Git's options are handed on, and refused as `who` refuses any it doesn't take.
+        let git = run(&env, &[word, "-L", "1,2", "a.txt"]);
+        let opalro = run(&env, &["who", "-L", "1,2", "a.txt"]);
+        assert_eq!(git.status.code(), Some(2), "{word}");
+        assert_eq!(text(&git.stderr), text(&opalro.stderr), "{word}");
+    }
 }
 
 /// The project's lines, and the one it is on.
@@ -852,7 +859,7 @@ fn the_diary_names_opals_command() {
 #[test]
 fn help_never_names_a_git_word() {
     // `tag` is left out: it is Opalro's own word for the tags an import brings.
-    const GIT: [&str; 26] = [
+    const GIT: [&str; 27] = [
         "init",
         "commit",
         "diff",
@@ -872,6 +879,7 @@ fn help_never_names_a_git_word() {
         "rebase",
         "cherry-pick",
         "blame",
+        "annotate",
         "clone",
         "fetch",
         "pull",
@@ -887,8 +895,8 @@ fn help_never_names_a_git_word() {
         text(&run(&env, &[]).stdout),
     ];
     for command in [
-        "start", "setup", "import", "save", "status", "changes", "history", "show", "line", "goto",
-        "combine", "discard", "undo", "redo", "shelf", "unshelf", "tidy", "verify",
+        "start", "setup", "import", "save", "status", "changes", "history", "show", "who", "line",
+        "goto", "combine", "discard", "undo", "redo", "shelf", "unshelf", "tidy", "verify",
     ] {
         helps.push(ok(&env, &[command, "--help"]));
         helps.push(ok(&env, &["help", command]));
