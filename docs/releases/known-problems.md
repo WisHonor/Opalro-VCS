@@ -26,7 +26,7 @@ On five files of Git's own history, `opalro who` took 3 to 5 times `git blame`'s
 
 **What to do:** for a file renamed in Git, `git blame` still works in the Git repository you imported from: the import never changes it.
 
-## Opalro stops in a project whose `.opalro/tmp` can't be written
+## A command that is given a path stops in a project whose `.opalro/tmp` can't be written
 
 A command that needs to know how the drive compares names (every command given a path, among others) makes an empty file in `.opalro/tmp` for a moment, and removes it again. `opalro who` is one of them, though it changes nothing in the project. Where that file can't be made (a project on a drive you may only read, say), the command stops with `error: Opalro couldn't make a file in` the project's `.opalro/tmp` folder and the system's reason.
 
