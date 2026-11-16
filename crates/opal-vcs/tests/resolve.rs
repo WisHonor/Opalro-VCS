@@ -956,3 +956,33 @@ fn copy_before_where_opalro_cant_tell_what_was_there_says_it_has_no_version() {
     );
     assert!(!Path::new(to).exists());
 }
+
+/// A place in conflict below a folder the person deleted, kept on the side that holds nothing
+/// there: `resolve` takes only that place, so the folder stays deleted, as their other unsaved
+/// work stays unsaved, and `undo` gives back exactly what was there.
+#[test]
+#[ignore = "resolve --keep makes again a deleted folder above a place it keeps as nothing"]
+fn keeping_nothing_below_a_deleted_folder_leaves_the_folder_deleted() {
+    let env = project();
+    std::fs::create_dir_all(env.root().join("d")).unwrap();
+    env.overwrite("d/a.txt", "1\n2\n3\n");
+    run(&env, &["save", "D"], 0);
+    run(&env, &["line", "new", "side"], 0);
+    env.overwrite("d/a.txt", "1\nside\n3\n");
+    run(&env, &["save", "On side"], 0);
+    run(&env, &["goto", "main"], 0);
+    std::fs::remove_dir_all(env.root().join("d")).unwrap();
+    run(&env, &["save", "Gone on main"], 0);
+    // Changed on side, removed on main: it stands as nothing, in a folder that is empty.
+    run(&env, &["combine", "side"], 0);
+    assert!(env.root().join("d").is_dir());
+    std::fs::remove_dir(env.root().join("d")).unwrap();
+    let before = support::entries(env.root());
+    run(&env, &["resolve", "d/a.txt", "--keep", "mine"], 0);
+    assert!(
+        !env.root().join("d").exists(),
+        "resolve made again the folder d, which only holds the place it was asked about"
+    );
+    run(&env, &["undo"], 0);
+    assert_eq!(support::entries(env.root()), before);
+}
