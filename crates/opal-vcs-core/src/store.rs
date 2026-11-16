@@ -157,6 +157,16 @@ pub(crate) mod counted {
         static LISTINGS: Cell<usize> = const { Cell::new(0) };
         static CONFLICTS: Cell<usize> = const { Cell::new(0) };
         static UNPACKED: Cell<usize> = const { Cell::new(0) };
+        static CONTENTS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(super) fn content() {
+        CONTENTS.set(CONTENTS.get() + 1);
+    }
+
+    /// The files this thread's stores were asked for the contents of.
+    pub(crate) fn contents() -> usize {
+        CONTENTS.get()
     }
 
     pub(super) fn listing() {
@@ -726,6 +736,8 @@ impl Store {
     /// Streams a file into `out`, from its content stored whole or from its chunk list; treat the
     /// output as untrusted until this returns `Ok`.
     pub fn copy_content(&self, id: &Id, out: &mut dyn Write) -> Result<(), StoreError> {
+        #[cfg(test)]
+        counted::content();
         self.copy(id, Wanted::File, out)
     }
 

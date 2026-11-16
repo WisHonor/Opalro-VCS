@@ -46,11 +46,11 @@ fn warning_kinds(doc: &serde_json::Value) -> Vec<&str> {
 }
 
 #[test]
-fn version_is_0_1_0() {
+fn the_version_printed_is_the_package_version() {
     let env = Env::new();
     let out = env.opalro().arg("--version").output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    assert_eq!(text(&out.stdout), "opalro 0.1.0\n");
+    assert_eq!(text(&out.stdout), "opalro 0.2.0\n");
 }
 
 #[test]
@@ -2600,6 +2600,31 @@ fn paths_are_relative_to_the_current_folder() {
     assert_eq!(saved(&["save", "F"]), serde_json::json!([]));
 }
 
+#[test]
+fn a_save_of_the_last_place_in_a_deleted_folder_takes_the_folder_with_it() {
+    let env = Env::new();
+    env.opalro()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
+    support::write(&env, "d/e/b", "b");
+    env.opalro().args(["save", "First"]).assert().success();
+    std::fs::remove_dir_all(env.root().join("d")).unwrap();
+    env.opalro()
+        .args(["save", "Only", "d/e"])
+        .assert()
+        .success();
+    // No empty `d` that the person never had: nothing of it is in the save, nothing shows as
+    // changed, a later save has nothing to save, and the folder is what a goto there gives.
+    let paths = support::saved_paths(&env, main_tip(&env));
+    let in_d = |p: &&String| *p == "d" || p.starts_with("d/");
+    assert_eq!(paths.keys().find(in_d), None, "{paths:?}");
+    assert_eq!(support::changed(&env), Vec::<String>::new());
+    let out = stdout_of(&env, &["save", "Again"]);
+    assert!(out.starts_with("Nothing to save: "), "{out}");
+    support::assert_folder_is_goto_of(&env, main_tip(&env));
+}
+
 /// `opalro <args>` in `env`'s folder with its stdout a pipe whose reader has gone before the command
 /// starts: how it ended, and what it said on stderr.
 fn with_reader_gone(env: &support::Env, args: &[&str]) -> (Option<i32>, String) {
@@ -2890,7 +2915,7 @@ fn a_command_that_did_its_work_but_couldnt_print_says_so() {
 }
 
 /// Every command, and the options each takes besides `--json` and `--help`.
-const COMMANDS: [(&str, &[&str]); 20] = [
+const COMMANDS: [(&str, &[&str]); 21] = [
     ("status", &["--full"]),
     ("save", &["--accept-crlf", "--line", "--yes", "--amend"]),
     ("changes", &["--save"]),
@@ -2909,6 +2934,7 @@ const COMMANDS: [(&str, &[&str]); 20] = [
     ("unshelf", &[]),
     ("discard", &[]),
     ("show", &[]),
+    ("who", &["--save"]),
     ("start", &["--preset"]),
     ("setup", &["--preset", "--upgrade", "--yes"]),
     ("import", &[]),
@@ -3018,6 +3044,7 @@ fn the_overview_lists_every_command_once_and_no_git_word() {
         "rebase",
         "cherry-pick",
         "blame",
+        "annotate",
         "clone",
         "fetch",
         "pull",

@@ -24,8 +24,9 @@ pub enum Typed {
 }
 
 /// The words that run an Opalro command, which are the only ones `git-words` may list.
-const SHORTCUTS: [&str; 11] = [
-    "init", "commit", "diff", "log", "checkout", "switch", "stash", "branch", "merge", "fsck", "gc",
+const SHORTCUTS: [&str; 13] = [
+    "init", "commit", "diff", "log", "checkout", "switch", "stash", "branch", "merge", "fsck",
+    "gc", "blame", "annotate",
 ];
 
 /// `save`'s options that take a value, which travels with them when `commit` is translated.
@@ -53,8 +54,6 @@ const NEW_LINE: &str = "`opalro line new <name>` makes a new line where you are 
 const STASH: &str = "`opalro shelf` sets your unsaved changes aside, new files too.\n\
                      `opalro unshelf` brings the newest back, `opalro unshelf <number>` another.\n\
                      `opalro shelf --list` lists them by that number, which stays with its shelf.";
-const LATER: &str = "Opalro can't show who changed each line of a file yet.\n\
-                     Until then, `opalro history` lists the saves on your line.";
 const MERGE_ABORT: &str = "`opalro undo` takes back the last step;\n\
                            right after a combine, that is the combine, conflicts and all.";
 const MERGE_CONTINUE: &str = "`opalro combine` is done as soon as it runs.\n\
@@ -158,7 +157,8 @@ pub fn translate(mut args: Vec<OsString>) -> Typed {
         "merge" if given().filter(|a| !is_option(a)).count() > 1 => Typed::Explain(MERGE_MANY),
         // Any other option goes to `combine` as typed, which refuses what it doesn't know.
         "merge" => run("merge", &["combine"], rest),
-        "blame" => Typed::Explain(LATER),
+        "blame" => run("blame", &["who"], rest),
+        "annotate" => run("annotate", &["who"], rest),
         "rebase" | "cherry-pick" => Typed::Explain(MOVE_SAVES),
         "clone" | "fetch" | "pull" | "push" | "remote" => Typed::Explain(SYNC),
         "revert" => Typed::Explain(REVERT),
@@ -313,6 +313,8 @@ pub fn hint(word: &str) -> Option<&'static str> {
         }
         "fsck" => "in Opalro, fsck is verify: opalro verify",
         "gc" => "in Opalro, gc is tidy: opalro tidy",
+        "blame" => "in Opalro, blame is who: opalro who <file>",
+        "annotate" => "in Opalro, annotate is who: opalro who <file>",
         _ => return None,
     })
 }
@@ -464,7 +466,7 @@ mod tests {
         }
     }
 
-    const EXPLANATIONS: [&str; 20] = [
+    const EXPLANATIONS: [&str; 19] = [
         ADD,
         RM_MV,
         RESET,
@@ -472,7 +474,6 @@ mod tests {
         COMMIT,
         NEW_LINE,
         STASH,
-        LATER,
         MERGE_ABORT,
         MERGE_CONTINUE,
         OURS,
@@ -533,6 +534,10 @@ mod tests {
             ("merge", "merge", "combine"),
             ("fsck", "fsck", "verify"),
             ("gc", "gc", "tidy"),
+            ("blame a.txt", "blame", "who a.txt"),
+            ("annotate --json a.txt", "annotate", "who --json a.txt"),
+            // Git's options go to `who` as typed, which refuses them.
+            ("blame -L 1,2 a.txt", "blame", "who -L 1,2 a.txt"),
         ] {
             assert_eq!(runs(typed), (word.to_owned(), opalro.to_owned()), "{typed}");
         }
@@ -667,7 +672,6 @@ mod tests {
         ] {
             assert_eq!(explained(typed), STASH, "{typed}");
         }
-        assert_eq!(explained("blame"), LATER);
         assert_eq!(explained("merge --abort"), MERGE_ABORT);
         assert_eq!(explained("merge --continue"), MERGE_CONTINUE);
         assert_eq!(explained("mergetool a.txt"), MERGETOOL);

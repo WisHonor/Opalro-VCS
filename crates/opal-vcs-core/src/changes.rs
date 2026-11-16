@@ -5,6 +5,7 @@ use std::io::{self, Read, Write};
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use opal_platform::dir::{EntryType, is_link_refusal};
 use similar::algorithms::{Capture, Replace, myers};
 use similar::{DiffOp, DiffTag, group_diff_ops};
 
@@ -214,6 +215,8 @@ pub fn unsaved_changes<E: From<SaveError> + From<StoreError>>(
     let save = store.save(&tip, repo.signatures_allowed())?;
     let mut now = read_folder(repo, save.root, false, git_excludes, None)
         .map_err(|e| e.in_save(tip, true))?;
+    // No switch follows, so the cache's body isn't needed.
+    now.cache_body = None;
     for w in std::mem::take(&mut now.warnings)
         .into_iter()
         .chain(writeout::unfinished_warning(repo))
@@ -484,20 +487,74 @@ fn on_disk(disk: &mut Folders, c: &PathChange) -> Result<Side, SaveError> {
     if c.new_size.unwrap_or(0) > MAX_LINES_SIZE {
         return Ok(Side::TooBig);
     }
-    let (up, name) = c.path.rsplit_once('/').unwrap_or(("", &c.path));
-    disk.enter(up).map_err(|e| unreadable(&c.path, e))?;
-    let dir = disk.here();
     if c.kind == EntryKind::Symlink {
-        return Ok(Side::Bytes(link_target(dir, name, &c.path)?.into_bytes()));
+        let (up, name) = c.path.rsplit_once('/').unwrap_or(("", &c.path));
+        disk.enter(up).map_err(|e| unreadable(&c.path, e))?;
+        return Ok(Side::Bytes(
+            link_target(disk.here(), name, &c.path)?.into_bytes(),
+        ));
     }
-    let file = dir
-        .open_file(OsStr::new(name))
-        .map_err(|e| unreadable(&c.path, e))?;
+    // The walk saw a file here, so one gone since is unreadable, not "no file".
+    match read_file(disk, &c.path) {
+        Ok(side) => Ok(side),
+        Err(Unread::NoFile(e) | Unread::Failed(e)) => Err(e),
+    }
+}
+
+/// The folder's file at `path`, never through a link: its bytes, `TooBig` past
+/// `MAX_LINES_SIZE`, or `None` when no regular file is there.
+pub(crate) fn in_folder(disk: &mut Folders, path: &str) -> Result<Option<Side>, SaveError> {
+    match read_file(disk, path) {
+        Ok(side) => Ok(Some(side)),
+        Err(Unread::NoFile(_)) => Ok(None),
+        Err(Unread::Failed(e)) => Err(e),
+    }
+}
+
+/// Why a file of the folder wasn't read: no regular file there, or one that couldn't be read.
+enum Unread {
+    NoFile(SaveError),
+    Failed(SaveError),
+}
+
+fn read_file(disk: &mut Folders, path: &str) -> Result<Side, Unread> {
+    let (up, name) = path.rsplit_once('/').unwrap_or(("", path));
+    let failed = |e| Unread::Failed(unreadable(path, e));
+    if let Err(e) = disk.enter(up) {
+        // A folder on the way that is missing, a file, or a link.
+        let gone = matches!(
+            e.kind(),
+            io::ErrorKind::NotFound | io::ErrorKind::NotADirectory | io::ErrorKind::InvalidFilename
+        ) || is_link_refusal(&e);
+        return Err(if gone {
+            Unread::NoFile(unreadable(path, e))
+        } else {
+            failed(e)
+        });
+    }
+    let dir = disk.here();
+    let name = OsStr::new(name);
+    // Opening never follows a link; what failed to open is looked at for what it is.
+    let file = dir.open_file(name).map_err(|e| {
+        // A name the system can't hold at all is no file there either.
+        let no_file = matches!(
+            e.kind(),
+            io::ErrorKind::NotFound | io::ErrorKind::InvalidFilename
+        ) || match dir.metadata(name) {
+            Ok(now) => now.kind != EntryType::File,
+            Err(now) => now.kind() == io::ErrorKind::NotFound,
+        };
+        if no_file {
+            Unread::NoFile(unreadable(path, e))
+        } else {
+            failed(e)
+        }
+    })?;
     // It may have grown since the walk.
     let mut bytes = Vec::new();
     file.take(MAX_LINES_SIZE.saturating_add(1))
         .read_to_end(&mut bytes)
-        .map_err(|e| unreadable(&c.path, e))?;
+        .map_err(failed)?;
     if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_LINES_SIZE {
         return Ok(Side::TooBig);
     }
@@ -509,6 +566,30 @@ fn unreadable(path: &str, source: io::Error) -> SaveError {
         path: path.to_owned(),
         source,
     }
+}
+
+/// Why a text can't be compared line by line, the first reason first: too big, not text, too
+/// many lines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum NotLines {
+    TooBig,
+    Binary,
+    TooManyLines,
+}
+
+/// Whether `bytes` can be compared line by line, and if not, why.
+pub(crate) fn comparable(bytes: &[u8]) -> Result<(), NotLines> {
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_LINES_SIZE {
+        return Err(NotLines::TooBig);
+    }
+    if is_binary(bytes) {
+        return Err(NotLines::Binary);
+    }
+    // Counted before anything is held per line.
+    if line_count(bytes) > MAX_LINES {
+        return Err(NotLines::TooManyLines);
+    }
+    Ok(())
 }
 
 pub(crate) fn is_binary(bytes: &[u8]) -> bool {
@@ -908,5 +989,63 @@ mod tests {
         );
         assert_eq!(seen.len(), 3);
         assert_eq!((listings, records), (plain, 0));
+    }
+
+    fn read_in(root: &std::path::Path, path: &str) -> Option<Side> {
+        let mut disk = Folders::open(root).unwrap();
+        in_folder(&mut disk, path).unwrap()
+    }
+
+    #[test]
+    fn a_file_of_the_folder_is_read_by_itself() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("d/e")).unwrap();
+        std::fs::write(dir.path().join("d/e/f.txt"), b"one\ntwo\n").unwrap();
+        std::fs::write(dir.path().join("top"), b"").unwrap();
+        assert!(matches!(
+            read_in(dir.path(), "d/e/f.txt"),
+            Some(Side::Bytes(b)) if b == b"one\ntwo\n"
+        ));
+        assert!(matches!(read_in(dir.path(), "top"), Some(Side::Bytes(b)) if b.is_empty()));
+        // Nothing there, a folder, and a path through a file or a missing folder: no file.
+        for path in [
+            "d/e/gone.txt",
+            "d/e",
+            "d",
+            "top/x",
+            "missing/f.txt",
+            "d/missing/f",
+        ] {
+            assert!(read_in(dir.path(), path).is_none(), "{path}");
+        }
+    }
+
+    #[test]
+    fn a_file_past_the_limit_is_too_big() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = std::fs::File::create(dir.path().join("big")).unwrap();
+        file.set_len(MAX_LINES_SIZE + 1).unwrap();
+        drop(file);
+        assert!(matches!(read_in(dir.path(), "big"), Some(Side::TooBig)));
+    }
+
+    #[test]
+    fn a_link_in_the_folder_is_never_followed() {
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("f.txt"), b"outside").unwrap();
+        // A folder link on the way: a junction on Windows, which this account can make.
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("away")).unwrap();
+        #[cfg(windows)]
+        crate::test_support::junction(&dir.path().join("away"), outside.path());
+        assert!(read_in(dir.path(), "away/f.txt").is_none());
+        assert!(read_in(dir.path(), "away").is_none());
+        // A link at the last name.
+        let link = dir.path().join("link.txt");
+        if !crate::test_support::symlink(&outside.path().join("f.txt"), &link) {
+            return; // this account can't make links: CI runs it
+        }
+        assert!(read_in(dir.path(), "link.txt").is_none());
     }
 }

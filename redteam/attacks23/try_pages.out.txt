@@ -1,0 +1,176 @@
+$ opalro start --preset code
+Started an Opalro project in /tmp/tmp.cUvWquT4Mj/p
+
+Using Code settings:
+
+    * Files of 1 MiB or more are stored in chunks, so a changed part is stored once
+    * .env files are left out
+    * A save that adds over 100 MB or 10,000 new files asks first
+
+    The rules are in opalro.toml and .opalroignore. See them any time with: opalro setup
+
+Your first save is kmnp on line main.
+[exit 0]
+$ opalro save First list
+Saved rwuy "First list" on main  (3 files)
+[exit 0]
+$ opalro line new menu
+Started line menu at save rwuy "First list".
+
+    You're on it: your next save goes on menu.
+[exit 0]
+$ opalro save Bread
+Saved xwvu "Bread" on menu  (1 file)
+[exit 0]
+$ opalro goto main
+Switched to line main at save rwuy "First list".
+
+    1 file written.
+[exit 0]
+$ opalro save Eggs
+Saved pwwn "Eggs" on main  (1 file)
+[exit 0]
+$ opalro combine menu
+Combined menu into main: save nnuw "Combine menu into main", with 1 place in conflict:
+  todo.txt: changed on both lines, in the same place; marked in the file (1 place)
+
+    1 file written.
+[exit 0]
+$ opalro status
+On line main at save nnuw "Combine menu into main"  (just now)
+
+In conflict (1 place):
+
+    todo.txt  1 marked place left to fix
+[exit 0]
+<<<<<<< main (pwwnmztl)
+buy milk and eggs
+||||||| where the lines parted (rwuytqsw)
+buy milk
+=======
+buy milk and bread
+>>>>>>> menu (xwvuzlkm)
+$ opalro resolve
+Recorded 1 fix in save nnuw "Combine menu into main" on main.
+
+    The combined save now holds it; its ID stays the same.
+[exit 0]
+$ opalro status
+On line main at save nnuw "Combine menu into main"  (just now)
+Nothing changed since then.
+[exit 0]
+$ opalro history
+Saves on line main, newest first:
+
+> nnuw  just now  Ada  Combine menu into main  [main]  [combined d690939ec3d7]
+  pwwn  just now  Ada  Eggs
+  rwuy  just now  Ada  First list
+  kmnp  just now  Ada  Start project
+[exit 0]
+$ opalro who todo.txt
+Each line of todo.txt and the save it is from:
+
+nnuw  Ada  2026-11-16  1 | buy milk, eggs and bread
+[exit 0]
+$ opalro tag v1.0 Tried v0.2
+Tagged save nnuw "Combine menu into main" as v1.0.
+[exit 0]
+$ opalro tag
+1 tag:
+
+  v1.0  6580a9d1335d  "Tried v0.2"
+[exit 0]
+$ opalro line new side
+Started line side at save nnuw "Combine menu into main".
+
+    You're on it: your next save goes on side.
+[exit 0]
+$ opalro goto main
+Switched to line main at save nnuw "Combine menu into main".
+
+    No file needed changing.
+[exit 0]
+$ opalro save --amend
+error: Opalro can't amend this save: line side and tag v1.0 show it too, and two saves you can see would then share one change ID.
+
+hint: Nothing was saved. Save your changes as a new save instead: opalro save "describe your change"
+[exit 1]
+$ opalro save One more
+Saved vsyp "One more" on main  (1 file)
+[exit 0]
+$ opalro undo
+Undid save vsyp "One more": main is back at nnuw; its changes show as unsaved.
+[exit 0]
+$ opalro undo
+Undid goto: back on side at nnuw.
+[exit 0]
+$ opalro undo
+Undid line new: line side is gone, back on main at nnuw.
+[exit 0]
+$ opalro undo
+Undid tag: the tags changed back.
+[exit 0]
+$ opalro undo
+Undid resolve: main is back at nnuw.
+[exit 0]
+$ opalro undo
+error: Your unsaved changes, or files Opalro ignores, are where the undo would write, so that step changed nothing:
+  todo.txt
+
+hint: Run opalro undo --shelve to set your changes there aside on a new shelf, as part of the same step. Saving, shelving or discarding them first won't help: each is a step of its own, which the next undo would take back. Files Opalro ignores, and unsaved links that could come back only as plain files, aren't set aside: move them somewhere else first.
+[exit 1]
+$ opalro undo --shelve
+Shelved your unsaved changes in the way on shelf 1.
+Undid combine: main is back at pwwn, 1 file written.
+[exit 0]
+$ opalro history
+Saves on line main, newest first:
+
+> pwwn  just now  Ada  Eggs  [main]
+  rwuy  just now  Ada  First list
+  kmnp  just now  Ada  Start project
+[exit 0]
+$ opalro line
+Lines in p:
+
+> main
+  menu
+[exit 0]
+$ opalro status
+On line main at save pwwn "Eggs"  (just now)
+
+Changed since then (1 file):
+
+    added  notes.txt  10 B
+[exit 0]
+$ opalro redo
+Redid combine: main is at nnuw again, 1 file written.
+[exit 0]
+$ opalro status
+On line main at save nnuw "Combine menu into main"  (just now)
+
+In conflict (1 place):
+
+    todo.txt  1 marked place left to fix
+
+Changed since then (1 file):
+
+    added  notes.txt  10 B
+[exit 0]
+$ opalro unshelf
+Unshelved shelf 1 "Set aside by undo": 1 file written.
+
+    Your other unsaved changes in 1 file stayed as they are.
+[exit 0]
+$ opalro status
+On line main at save nnuw "Combine menu into main"  (just now)
+
+In conflict (1 place):
+
+    todo.txt  fixed, not yet recorded
+
+Changed since then (1 file):
+
+    added  notes.txt  10 B
+[exit 0]
+buy milk, eggs and bread

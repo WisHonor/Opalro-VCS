@@ -139,6 +139,7 @@ pub fn shelf(
             plan,
             drive,
             packs: repo.new_packs()?,
+            cache: None,
         };
         let applied = switch::switch(repo, lock, to_make, who, "shelf", earlier)?;
         Ok(Shelved::Made(ShelfOutcome {
@@ -224,6 +225,7 @@ pub fn unshelf(
             plan,
             drive,
             packs,
+            cache: None,
         };
         let applied = switch::switch(repo, lock, to_make, who, "unshelf", earlier)?;
         Ok(UnshelfOutcome {

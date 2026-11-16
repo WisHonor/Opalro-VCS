@@ -5,7 +5,7 @@
 - **Agenda topic:** none (milestone 7 planning)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 012](012-lines.md) (combining starts from the common starting point); [decision 158](158-making-renaming-and-deleting-lines.md) (`line delete` asks when nothing else holds the line's saves)
-- **Refined by:** [decision 161](161-what-building-milestone-7-refined.md) (the answer as soon as the save is reached; saves dated alike; what the walk costs); [decision 164](164-where-two-lines-parted.md) (the same kind of walk finds the common starting points); [decision 171](171-red-team-m8-rulings.md) (a walk reads a save's parents and date and checks its notes without building them)
+- **Refined by:** [decision 161](161-what-building-milestone-7-refined.md) (the answer as soon as the save is reached; saves dated alike; what the walk costs); [decision 164](164-where-two-lines-parted.md) (the same kind of walk finds the common starting points); [decision 171](171-red-team-m8-rulings.md) (a walk reads a save's parents and date and checks its notes without building them); [decision 185](185-save-amend-and-a-save-something-else-holds.md) (one more question: which of these saves holds this one)
 
 ## Context
 

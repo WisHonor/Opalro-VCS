@@ -330,6 +330,56 @@ pub fn saved_files(env: &Env, save: Id) -> Files {
     found
 }
 
+/// Every path of the save `save` with its kind and what it holds: a folder as `'d'`, a conflict
+/// as `'c'` with its record's ID, anything else as `'f'` with its object's ID.
+pub fn saved_paths(env: &Env, save: Id) -> BTreeMap<String, (char, Id)> {
+    let repo = Repository::open(env.root()).unwrap();
+    let store = repo.store();
+    let mut found = BTreeMap::new();
+    let mut folders = vec![(store.save(&save, false).unwrap().root, String::new())];
+    while let Some((id, rel)) = folders.pop() {
+        for e in store.listing(&id).unwrap().entries() {
+            let path = if rel.is_empty() {
+                e.name.clone()
+            } else {
+                format!("{rel}/{}", e.name)
+            };
+            let kind = match e.kind {
+                EntryKind::Folder => {
+                    folders.push((e.id, path.clone()));
+                    'd'
+                }
+                EntryKind::Conflict => 'c',
+                _ => 'f',
+            };
+            let id = if kind == 'd' { Id([0; 32]) } else { e.id };
+            found.insert(path, (kind, id));
+        }
+    }
+    found
+}
+
+/// The paths where two maps differ.
+fn differ<V: PartialEq>(a: &BTreeMap<String, V>, b: &BTreeMap<String, V>) -> Vec<String> {
+    let mut paths: Vec<String> = a.keys().chain(b.keys()).cloned().collect();
+    paths.sort();
+    paths.dedup();
+    paths.retain(|p| a.get(p) != b.get(p));
+    paths
+}
+
+/// Checks that the newest step's recorded folder change, its two saves, differs exactly where
+/// the folder went from `before` (as `entries` read it) to what it holds now; no change recorded
+/// where the folder didn't change.
+pub fn assert_step_records(env: &Env, before: &Entries) {
+    let changed = differ(before, &entries(env.root()));
+    let recorded = match head(env).1.folder_change {
+        Some(c) => differ(&saved_paths(env, c.from), &saved_paths(env, c.to)),
+        None => Vec::new(),
+    };
+    assert_eq!(recorded, changed, "the step records");
+}
+
 // Big files, written and read a block at a time.
 
 /// Writes `size` bytes at `path` that look random, so they don't compress, made from `seed`; their

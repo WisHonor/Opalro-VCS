@@ -307,6 +307,7 @@ fn write_step(
         plan: step,
         drive,
         packs,
+        cache: None,
     };
     let applied = switch::switch(repo, lock, to_make, who, "setup", earlier)?;
     let written = plan

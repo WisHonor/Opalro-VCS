@@ -6,6 +6,7 @@
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 119](119-packaging-v0.1.md) (the release workflow and what each archive holds)
 - **Superseded in part by:** [decision 150](150-the-name-is-opalro.md) (the names: Bolt is now Opalro, and `bolt` is now `opalro`)
+- **Refined by:** [decision 187](187-v0.2s-package.md) (v0.2's package: the workflow run from the branch `v0.2`, up to the draft)
 
 ## Context
 

@@ -93,57 +93,68 @@ pub(crate) fn plant_with(
 ) -> Listing {
     let mut top = None;
     plant_root(repo, |packs| {
-        let mut folders = BTreeMap::from([(String::new(), Vec::new())]);
-        for (path, record) in conflicts {
-            let id = packs
-                .add_record(ObjectKind::Conflict, &record.encode())
-                .expect("store a record");
-            let (up, name) = path.rsplit_once('/').unwrap_or(("", path));
-            folders.entry(up.to_owned()).or_default().push(Entry {
-                name: name.to_owned(),
-                kind: EntryKind::Conflict,
-                id,
-                size: 0,
-            });
-        }
-        for &(path, kind, bytes) in entries {
-            let (id, size) = if kind == EntryKind::ProjectLink {
-                (add_link(packs, bytes), 0)
-            } else {
-                let id = packs.add_content(bytes).expect("store an entry");
-                (id, bytes.len() as u64)
-            };
-            let (up, name) = path.rsplit_once('/').unwrap_or(("", path));
-            folders.entry(up.to_owned()).or_default().push(Entry {
-                name: name.to_owned(),
-                kind,
-                id,
-                size,
-            });
-        }
-        // Longest path first, so a folder's listing is stored before the folder that holds it.
-        loop {
-            let path = folders
-                .keys()
-                .max_by_key(|p| p.len())
-                .cloned()
-                .expect("a folder");
-            let entries = folders.remove(&path).expect("its entries");
-            let (id, listing) = add_listing(packs, entries);
-            if path.is_empty() {
-                top = Some(listing);
-                return id;
-            }
-            let (up, name) = path.rsplit_once('/').unwrap_or(("", &path));
-            folders.entry(up.to_owned()).or_default().push(Entry {
-                name: name.to_owned(),
-                kind: EntryKind::Folder,
-                id,
-                size: 0,
-            });
-        }
+        let (id, listing) = add_tree(packs, entries, conflicts);
+        top = Some(listing);
+        id
     });
     top.expect("the top listing")
+}
+
+/// Stores `entries` and `conflicts` as `plant_with` takes them, with the folders above them;
+/// returns the top listing and its ID.
+pub(crate) fn add_tree(
+    packs: &mut PackSet,
+    entries: &[(&str, EntryKind, &[u8])],
+    conflicts: &[(&str, crate::conflict::Record)],
+) -> (Id, Listing) {
+    let mut folders = BTreeMap::from([(String::new(), Vec::new())]);
+    for (path, record) in conflicts {
+        let id = packs
+            .add_record(ObjectKind::Conflict, &record.encode())
+            .expect("store a record");
+        let (up, name) = path.rsplit_once('/').unwrap_or(("", path));
+        folders.entry(up.to_owned()).or_default().push(Entry {
+            name: name.to_owned(),
+            kind: EntryKind::Conflict,
+            id,
+            size: 0,
+        });
+    }
+    for &(path, kind, bytes) in entries {
+        let (id, size) = if kind == EntryKind::ProjectLink {
+            (add_link(packs, bytes), 0)
+        } else {
+            let id = packs.add_content(bytes).expect("store an entry");
+            (id, bytes.len() as u64)
+        };
+        let (up, name) = path.rsplit_once('/').unwrap_or(("", path));
+        folders.entry(up.to_owned()).or_default().push(Entry {
+            name: name.to_owned(),
+            kind,
+            id,
+            size,
+        });
+    }
+    // Longest path first, so a folder's listing is stored before the folder that holds it.
+    loop {
+        let path = folders
+            .keys()
+            .max_by_key(|p| p.len())
+            .cloned()
+            .expect("a folder");
+        let entries = folders.remove(&path).expect("its entries");
+        let (id, listing) = add_listing(packs, entries);
+        if path.is_empty() {
+            return (id, listing);
+        }
+        let (up, name) = path.rsplit_once('/').unwrap_or(("", &path));
+        folders.entry(up.to_owned()).or_default().push(Entry {
+            name: name.to_owned(),
+            kind: EntryKind::Folder,
+            id,
+            size: 0,
+        });
+    }
 }
 
 /// Stores a Git submodule's link to `commit`, as an import makes it (storage-format.md §7).

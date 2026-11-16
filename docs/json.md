@@ -168,7 +168,7 @@ Saving gives one of two documents, told apart by `result`.
 
 **A save that adds unusually much** stops too, saving nothing, when it would add more than 100,000,000 bytes or more than 10,000 files that the save it builds on doesn't hold ([decision 056](decisions/056-question-before-large-saves.md)). Only new files count, by the sizes the folder reports: a file the last save already holds, changed or not, doesn't, nor does one renamed only in letter case on a drive that ignores case, and a partial save counts only what it would save. In a terminal Opalro asks first; with `--json` it never asks. The `error.message` gives the bytes and files it would add and the three top-level folders holding the most of those bytes (`the top folder` for files directly in the project folder), and the `error.hint` names `--yes`, which saves without asking. At a save, not on a line, `--line` is needed first: a save without it fails for that before the size is looked at.
 
-**An amend that stops** fails (§5), saving nothing, before the folder is read, in two cases. At a save rather than on a line, the `error.hint` says to go to a line first. When another line, a server line or a tag names the save, or another line's history holds it along first parents, two saves you can see would then share one change ID: the `error.message` names the first 5 of them (`line b`, `server line main@origin`, `tag v1`) and counts the rest, and the `error.hint` says to save a new change instead. `--line` with `--amend` is a usage error (exit code 2): an amend never makes a line.
+**An amend that stops** fails (§5), saving nothing, before the folder is read, in two cases. At a save rather than on a line, the `error.hint` says to go to a line first. When another line, a server line or a tag names the save or has it in its history, through any parent, two saves you can see would then share one change ID: the `error.message` names the first 5 of them (`line b`, `server line main@origin`, `tag v1`) and counts the rest, and the `error.hint` says to save a new change instead. `--line` with `--amend` is a usage error (exit code 2): an amend never makes a line.
 
 ### `opalro status --json`
 
@@ -618,6 +618,24 @@ A step that stops it fails it with exit code 1, and its document is the error do
 | `old_size`, `new_size` | number or `null` | Size in bytes before and after. **`null` means the path wasn't there on that side:** `old_size` for an added file, `new_size` for a removed one. A project link or a conflict has size `0`. |
 
 Folders are not listed; the files in them are. Each change of `show` also has `in_conflict` (boolean): whether the save holds a conflict at the place, `true` for `"in_conflict"` and `"still_in_conflict"`, `false` for every other, and always `false` in a project whose `.opalro/format` doesn't list `conflicts`. In a project that keeps conflicts, a change that is `"in_conflict"`, `"still_in_conflict"` or `"conflict_fixed"` is the place alone: a folder that became a conflict's place, or a conflict's place that became a folder, is that one change, with nothing listed below it, and with paths given, `changes --save` lists it when a path given is at it or below it. These three never carry hunks or line counts: in `changes --save` their `content` is `"text"` with `hunks` empty, and says nothing about what the versions are, since no version is read for them.
+
+### `opalro who --json`
+
+`opalro who <file>` reads the file as it is in your folder, and `opalro who <file> --save <save>` as that save has it, `<save>` read as `opalro show` reads its argument. The lines' text isn't repeated: the document names the save behind each line, in runs.
+
+| Field | Type | Meaning |
+|---|---|---|
+| `opalro_json` | number | `1` |
+| `path` | string | The file's path from the project folder, with `/` between names, as the save spells it; as typed when no save has the file. |
+| `from` | string | `"folder"`: the file as it is in your folder; `"save"`: as the save `--save` named has it. |
+| `save` | save | The save `--save` named, or the one the project is at. |
+| `lines` | number | How many lines the file has; `0` for an empty file. |
+| `runs` | list | Every line once, in order, in runs of lines that follow each other and are from the same save, each `{"first": …, "lines": …, "save": …, "was": …}`: the run's first line, counted from 1; how many lines it holds; the fingerprint of the save they are from (64 hex digits), `null` for lines not saved yet; and the path the file had at that save when it was another (the save is from before a recorded move), else `null`. |
+| `saves` | list of save | Each save `runs` names, once, in the order of its first run. |
+| `coarse` | boolean | `true` when a comparison ran past its 2 seconds and was made coarser, so a line may be named for a newer save than the one that first had it. Nothing else says so: no warning is added for it. |
+| `warnings` | list | See §4. |
+
+A refusal (no file there, a folder, not text, too big, a path outside the project) is a failed command's document (§5), exit code 1.
 
 ## 4. Warnings
 

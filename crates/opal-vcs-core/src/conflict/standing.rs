@@ -19,9 +19,13 @@ pub(crate) fn as_it_stands<'e>(
     e: &'e Entry,
     records: &HashMap<Id, Summary>,
 ) -> Option<Cow<'e, Entry>> {
-    let record = match records.get(&e.id) {
-        Some(record) if e.kind == EntryKind::Conflict => record,
-        _ => return Some(Cow::Borrowed(e)),
+    // The kind first: most entries aren't conflicts, and their IDs needn't be hashed.
+    let record = match e.kind {
+        EntryKind::Conflict => records.get(&e.id),
+        _ => None,
+    };
+    let Some(record) = record else {
+        return Some(Cow::Borrowed(e));
     };
     record.stands_as.map(|t| {
         Cow::Owned(Entry {
@@ -217,6 +221,39 @@ mod tests {
             repo.store().listing(&root).unwrap().get("c").unwrap().kind,
             EntryKind::Conflict
         );
+    }
+
+    #[test]
+    fn an_entry_that_is_not_a_conflict_stands_as_stored_even_under_a_record_s_id() {
+        // A hostile listing can name a record's ID under another kind.
+        let id = file_of(b"record").id;
+        let records = HashMap::from([(id, Summary::of(&mine_theirs(Some(file_of(b"mine")))))]);
+        let entry = |kind| Entry {
+            name: "c".to_owned(),
+            kind,
+            id,
+            size: 6,
+        };
+        let others = [
+            EntryKind::File,
+            EntryKind::Executable,
+            EntryKind::Symlink,
+            EntryKind::Folder,
+            EntryKind::ProjectLink,
+        ];
+        for kind in others {
+            let stored = entry(kind);
+            let stood = as_it_stands(&stored, &records);
+            assert!(
+                matches!(stood, Some(Cow::Borrowed(e)) if *e == stored),
+                "{kind:?}"
+            );
+        }
+        // The record is there to be found: under its own kind, the entry stands as it says.
+        let mine = file_of(b"mine");
+        let conflict = entry(EntryKind::Conflict);
+        let stood = as_it_stands(&conflict, &records).unwrap();
+        assert_eq!((stood.kind, stood.id), (EntryKind::File, mine.id));
     }
 
     #[test]

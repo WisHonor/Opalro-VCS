@@ -17,6 +17,7 @@ use crate::fsio;
 use crate::history::tip_of;
 use crate::id::Id;
 use crate::kept::overlay_whole;
+use crate::lastmade::LastMade;
 use crate::listing::EntryKind;
 use crate::names::Given;
 use crate::pack::PackSet;
@@ -32,7 +33,7 @@ use crate::store::{Store, StoreError};
 use crate::switch::{Earlier, Planned, SwitchError, locked, make_switch};
 use crate::text::{escape, thousands};
 use crate::warning::Warning;
-use crate::writeout::{self, Applied, fold_path};
+use crate::writeout::{self, Applied, Tree, fold_path};
 
 /// How many places still in conflict an outcome names; it counts the rest.
 pub const LISTED: usize = 100;
@@ -340,15 +341,12 @@ fn resolve_locked(
         return Ok(ResolveOutcome::Nothing { left, left_count });
     }
     let parent = status.save;
-    let mut cache = ChangeIds::load(repo);
     let mut shown_by = Vec::new();
     let amend = parent.parents.len() > 1 && {
-        let by = shown_elsewhere(repo, &mut cache, &entry.state, &line, parent_id, &parent);
-        // Kept however it ends: reading the other lines is what costs.
-        cache.store(repo, &entry.state);
-        shown_by = by?;
+        shown_by = shown_elsewhere(repo, &entry.state, &line, parent_id)?;
         shown_by.is_empty()
     };
+    let mut cache = ChangeIds::load(repo);
     let message = match places.as_slice() {
         _ if amend => parent.message.clone(),
         [one] => format!("Fixed conflicts in {one}"),
@@ -406,10 +404,15 @@ fn resolve_locked(
                 to: save_id,
                 plan,
                 drive,
+                cache: None,
             };
             let (applied, safety_copies, _) =
                 make_switch(repo, lock, planned, req.who, req.command, earlier)?;
             made.learn(repo, &mut cache, &state);
+            // The switch moved the handle's head to the entry it wrote.
+            if let Ok((entry, after)) = repo.current() {
+                LastMade::store(repo, &after.state, save_id, entry);
+            }
             warnings.splice(0..0, status.warnings);
             (save_id, save, short, applied, safety_copies, warnings)
         }
@@ -807,35 +810,8 @@ fn conflict_on(
 ) -> Result<Option<(String, Id)>, ResolveError> {
     let unstored = HashMap::new();
     let listings = Listings::stored(store, &unstored);
-    let names: Vec<&str> = path.split('/').filter(|n| !n.is_empty()).collect();
-    let (mut at, mut place) = (root, String::new());
-    for (i, name) in names.iter().enumerate() {
-        let listing = listings.read(&at)?;
-        let found = listing.get(name).or_else(|| {
-            let want = drive.compared(name);
-            let mut alike = listing
-                .entries()
-                .iter()
-                .filter(|e| drive.compared(&e.name) == want);
-            match (alike.next(), alike.next()) {
-                (Some(e), None) => Some(e),
-                _ => None,
-            }
-        });
-        let Some(e) = found else {
-            return Ok(None);
-        };
-        if !place.is_empty() {
-            place.push('/');
-        }
-        place.push_str(&e.name);
-        match e.kind {
-            EntryKind::Conflict if i + 1 == names.len() => return Ok(Some((place, e.id))),
-            EntryKind::Folder if i + 1 < names.len() => at = e.id,
-            _ => return Ok(None),
-        }
-    }
-    Ok(None)
+    let found = Tree::new(&listings, root, drive).entry_as_typed(path, drive)?;
+    Ok(found.and_then(|(place, e)| (e.kind == EntryKind::Conflict).then_some((place, e.id))))
 }
 
 /// The folder `to` is in, opened once, and the name to make there, refused when that folder is

@@ -40,6 +40,7 @@ pub const GROUPS: [(&str, &[Row]); 3] = [
                 None,
             ),
             ("show", "Show everything about one save", None),
+            ("who", "Show the save behind each line of a file", None),
         ],
     ),
     (
@@ -219,6 +220,16 @@ pub fn examples(command: &str) -> &'static [(&'static str, &'static str)] {
         "show" => &[
             ("opalro show", "Show the save you're at"),
             ("opalro show kxqmz", "Show a save, by its change ID"),
+        ],
+        "who" => &[
+            (
+                "opalro who Assets/Scripts/Player.cs",
+                "Show the save behind each line of a file",
+            ),
+            (
+                "opalro who Assets/Scripts/Player.cs --save v1.0",
+                "The same, as tag v1.0's save has the file",
+            ),
         ],
         "start" => &[
             (

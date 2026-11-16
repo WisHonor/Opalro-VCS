@@ -9,7 +9,7 @@ mod support;
 use support::{Env, text};
 
 /// The symbols Opalro draws on a terminal that shows them.
-const SYMBOLS: [char; 10] = ['•', '▸', '→', '←', '✓', '✗', '─', '…', '█', '░'];
+const SYMBOLS: [char; 11] = ['•', '▸', '→', '←', '✓', '✗', '─', '│', '…', '█', '░'];
 
 /// `opalro` in `dir` where everything asks for colour and symbols, but no terminal.
 fn opal_in_a_log(env: &Env, dir: &Path) -> assert_cmd::Command {
@@ -157,6 +157,7 @@ fn without_a_terminal_opals_own_words_are_plain() {
     for args in [
         &["history"][..],
         &["show"],
+        &["who", "a.txt"],
         &["line"],
         &["changes", "main"],
         &["goto", "main"],
@@ -1876,6 +1877,12 @@ fn project_text_is_escaped_with_colour_on() {
         let said = text(&out.stdout) + &text(&out.stderr);
         support::assert_escaped(&said, "goto");
         assert!(said.contains(words), "{said}");
+    }
+
+    // Back on main, the hostile file's line is from the hostile author's save.
+    let said = same_with_colour_on(&env, &["who", name], 0);
+    for part in [shown_name, author, " \\x1b[2Jline\n"] {
+        assert!(said.contains(part), "{part}: {said}");
     }
 
     // A damaged copy of the file: verify names where the save needs it.

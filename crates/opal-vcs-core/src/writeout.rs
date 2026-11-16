@@ -15,7 +15,7 @@ use opal_platform::dir::{Dir, EntryMeta, EntryType, is_link_refusal};
 use crate::conflict::Listings;
 use crate::diary::DiaryEntry;
 use crate::diff::{for_each_change_with, for_each_entry_change_with};
-use crate::drive::{self, Drive};
+use crate::drive::Drive;
 use crate::filecache::FileCache;
 use crate::fsio::{self, BETWEEN_TRIES, Done, TRIES};
 use crate::history::{current_save, tip_of};
@@ -94,6 +94,20 @@ pub fn plan(
     git_excludes: Option<&Path>,
 ) -> Result<Plan, SaveError> {
     planned(repo, from, to, only, remove_new, drive, git_excludes)
+        .map(|(plan, _)| plan)
+        .map_err(|e| told_whose(repo, e, from, to))
+}
+
+/// `plan`, with the body of the file-state cache the read of the folder stored, if that is known,
+/// to hand on to `carry_out_with` when nothing reads the folder again before it.
+pub(crate) fn plan_keeping_cache(
+    repo: &Repository,
+    from: Id,
+    to: Id,
+    drive: Drive,
+    git_excludes: Option<&Path>,
+) -> Result<(Plan, Option<Vec<u8>>), SaveError> {
+    planned(repo, from, to, None, false, drive, git_excludes)
         .map_err(|e| told_whose(repo, e, from, to))
 }
 
@@ -137,7 +151,7 @@ fn planned(
     remove_new: bool,
     drive: Drive,
     git_excludes: Option<&Path>,
-) -> Result<Plan, SaveError> {
+) -> Result<(Plan, Option<Vec<u8>>), SaveError> {
     let store = repo.store();
     let from_root = store.save(&from, repo.signatures_allowed())?.root;
     let to_root = store.save(&to, repo.signatures_allowed())?.root;
@@ -263,6 +277,9 @@ fn planned(
         .map(|p| (*p).to_owned())
         .collect();
     plan.actions.sort_by(|a, b| a.path.cmp(&b.path));
+    if let Some(only) = &only {
+        made_on_the_way(&mut plan.actions, only);
+    }
     if drive.ignores_case || drive.composes_unicode {
         take_over_renamed(&mut plan.actions, drive);
     }
@@ -334,7 +351,7 @@ fn planned(
     plan.collisions.dedup();
     plan.not_written = refused.into_iter().collect();
     plan.holds_conflicts = there.met_conflict();
-    Ok(plan)
+    Ok((plan, now.cache_body))
 }
 
 /// The paths of the entries of the save `save` that `drive` takes to be `path`: none, the one,
@@ -638,14 +655,26 @@ fn link_in(dir: &Dir, name: &str, path: &str, e: Expected) -> Result<Option<Stri
 /// that drive's business, and a journal finished on another drive is judged by that one.
 pub fn apply(
     repo: &Repository,
+    lock: &ChangeLock,
+    journal: &Journal,
+    drive: Drive,
+) -> Result<Applied, RepoError> {
+    apply_with(repo, lock, journal, drive, None)
+}
+
+/// `apply`, with `cache_body` as the body of the file-state cache if given: what a load would
+/// give, unless another program wrote the cache since.
+fn apply_with(
+    repo: &Repository,
     _lock: &ChangeLock,
     journal: &Journal,
     drive: Drive,
+    cache_body: Option<Vec<u8>>,
 ) -> Result<Applied, RepoError> {
     let mut run = Run {
         repo,
         folders: Folders::open(repo.root())?,
-        cache: FileCache::load(repo),
+        cache: FileCache::load_or_stored(repo, cache_body),
         target_entry: journal.target,
         stored: HashMap::new(),
         target_root: None,
@@ -732,7 +761,19 @@ pub fn carry_out(
     journal: &Journal,
     drive: Drive,
 ) -> Result<Applied, RepoError> {
-    let done = apply(repo, lock, journal, drive)?;
+    carry_out_with(repo, lock, journal, drive, None)
+}
+
+/// `carry_out`, with `cache_body` as the body of the file-state cache if given: what a load
+/// would give, unless another program wrote the cache since.
+pub(crate) fn carry_out_with(
+    repo: &mut Repository,
+    lock: &ChangeLock,
+    journal: &Journal,
+    drive: Drive,
+    cache_body: Option<Vec<u8>>,
+) -> Result<Applied, RepoError> {
+    let done = apply_with(repo, lock, journal, drive, cache_body)?;
     if done.in_use.is_empty() {
         repo.move_head_to(lock, journal.target)?;
         match Journal::remove(repo, lock) {
@@ -784,7 +825,7 @@ pub fn finish_interrupted(
         return Ok(Some(Applied::default()));
     }
     usable(repo, journal.target, journal.from, head)?;
-    let drive = drive::probe(repo.tmp_folder())?;
+    let drive = repo.drive()?;
     let mut done = carry_out(repo, lock, &journal, drive)?;
     if !done.in_use.is_empty() {
         return Err(RepoError::SwitchInUse {
@@ -1511,8 +1552,40 @@ fn parent(path: &str) -> &str {
     split(path).0
 }
 
+/// The entry of `listing` a typed name means: the one spelled so, or else the only one `drive`
+/// takes as the same name.
+fn named_as_typed<'l>(listing: &'l Listing, name: &str, drive: Drive) -> Option<&'l Entry> {
+    listing.get(name).or_else(|| {
+        let want = drive.compared(name);
+        let mut alike = listing
+            .entries()
+            .iter()
+            .filter(|e| drive.compared(&e.name) == want);
+        match (alike.next(), alike.next()) {
+            (Some(e), None) => Some(e),
+            _ => None,
+        }
+    })
+}
+
+/// Drops from `actions`, sorted by path, each folder made only because a path of `only` lies
+/// below it, where nothing is written into it or below it: such a folder stays as the person has
+/// it.
+fn made_on_the_way(actions: &mut Vec<Action>, only: &Scope) {
+    let mut kept = BTreeSet::new();
+    // Deepest first: what is below a path comes after it in path order.
+    for a in actions.iter().rev() {
+        let on_the_way = a.change == Change::MakeFolder && !only.holds(&a.path);
+        if !on_the_way || any_below(&a.path, &kept) {
+            kept.insert(a.path.clone());
+        }
+    }
+    actions.retain(|a| kept.contains(&a.path));
+}
+
 /// Whether the entry at `path` belongs to a switch limited to `only`: it is at or below one of
-/// them, or is a folder that must be made on the way to one.
+/// them, or is a folder on the way to one, planned for now; `made_on_the_way` keeps it only if
+/// something is written below it.
 fn in_scope(path: &str, only: Option<&Scope>, t: Option<&Entry>) -> bool {
     let folder = t.is_some_and(|e| e.kind == EntryKind::Folder);
     only.is_none_or(|only| only.holds(path) || (folder && only.reaches_below(path)))
@@ -2022,6 +2095,33 @@ impl<'a> Tree<'a> {
     pub(crate) fn entry(&mut self, path: &str) -> Result<Option<Entry>, StoreError> {
         let (up, name) = split(path);
         Ok(self.folder(up)?.and_then(|f| f.listing.get(name)).cloned())
+    }
+
+    /// The entry at a path as it was typed, each name matched exactly or, failing that, as
+    /// `drive` takes names when exactly one entry matches; with the path as stored.
+    pub(crate) fn entry_as_typed(
+        &mut self,
+        typed: &str,
+        drive: Drive,
+    ) -> Result<Option<(String, Entry)>, StoreError> {
+        let mut place = String::new();
+        let mut found = None;
+        for name in typed.split('/').filter(|n| !n.is_empty()) {
+            // `folder` has nothing below an entry that isn't a folder.
+            let Some(e) = self
+                .folder(&place)?
+                .and_then(|f| named_as_typed(&f.listing, name, drive))
+                .cloned()
+            else {
+                return Ok(None);
+            };
+            if !place.is_empty() {
+                place.push('/');
+            }
+            place.push_str(&e.name);
+            found = Some(e);
+        }
+        Ok(found.map(|e| (place, e)))
     }
 
     fn read(&self, id: Option<Id>) -> Result<Option<Folder>, StoreError> {

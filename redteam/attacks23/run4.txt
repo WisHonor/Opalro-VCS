@@ -1,0 +1,197 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.39s
+     Running tests/rt24_explore.rs (target/debug/deps/rt24_explore-f63da37da39bacd2)
+
+running 2 tests
+test rt24_conflict_under_moved_folder ... mover side: combine Some(0)
+Combined side into main: save uvvx "Combine side into main", with 1 place in conflict:
+  d/x.txt: changed on main, removed on side; your version is in the folder
+
+    2 files written, 1 removed.
+status:
+On line main at save uvvx "Combine side into main"  (just now)
+
+In conflict (1 place):
+
+    d/x.txt  your version, still to decide
+folder ["d", "d/x.txt", "e", "e/x.txt", "e/y.txt"]
+resolve --keep mine: Some(0) Recorded 1 fix in save uvvx "Combine side into main" on main.
+
+    The combined save now holds it; its ID stays the same.
+    Took yours for 1 place.
+status:
+On line main at save uvvx "Combine side into main"  (just now)
+Nothing changed since then.
+folder ["d", "d/x.txt", "e", "e/x.txt", "e/y.txt"]
+who d/x.txt: Some(0)
+Each line of d/x.txt and the save it is from:
+
+lunz  Test  2026-11-16  1 | one
+xpvu  Test  2026-11-16  2 | main
+lunz  Test  2026-11-16  3 | three
+
+who e/x.txt: Some(0)
+Each line of e/x.txt and the save it is from:
+
+zuml  Test  2026-11-16  1 | one
+zuml  Test  2026-11-16  2 | side
+zuml  Test  2026-11-16  3 | three
+
+mover side: combine Some(0)
+Combined side into main: save vumt "Combine side into main", with 1 place in conflict:
+  d/x.txt: changed on main, removed on side; your version is in the folder
+
+    2 files written, 1 removed.
+status:
+On line main at save vumt "Combine side into main"  (just now)
+
+In conflict (1 place):
+
+    d/x.txt  your version, still to decide
+folder ["d", "d/x.txt", "e", "e/x.txt", "e/y.txt"]
+resolve --keep theirs: Some(0) Recorded 1 fix in save vumt "Combine side into main" on main.
+
+    The combined save now holds it; its ID stays the same.
+    Took theirs for 1 place.
+status:
+On line main at save vumt "Combine side into main"  (just now)
+Nothing changed since then.
+folder ["d", "e", "e/x.txt", "e/y.txt"]
+who e/x.txt: Some(0)
+Each line of e/x.txt and the save it is from:
+
+nxmx  Test  2026-11-16  1 | one
+nxmx  Test  2026-11-16  2 | side
+nxmx  Test  2026-11-16  3 | three
+
+mover main: combine Some(0)
+Combined side into main: save vurz "Combine side into main", with 1 place in conflict:
+  d/x.txt: changed on side, removed on main; nothing is in your folder
+
+    No file needed changing.
+status:
+On line main at save vurz "Combine side into main"  (just now)
+
+In conflict (1 place):
+
+    d/x.txt  not in your folder, still to decide
+folder ["d", "e", "e/x.txt", "e/y.txt"]
+resolve --keep mine: Some(0) Recorded 1 fix in save vurz "Combine side into main" on main.
+
+    The combined save now holds it; its ID stays the same.
+    Took yours for 1 place.
+status:
+On line main at save vurz "Combine side into main"  (just now)
+Nothing changed since then.
+folder ["d", "e", "e/x.txt", "e/y.txt"]
+who e/x.txt: Some(0)
+Each line of e/x.txt and the save it is from:
+
+zltx  Test  2026-11-16  1 | one
+zltx  Test  2026-11-16  2 | main
+zltx  Test  2026-11-16  3 | three
+
+mover main: combine Some(0)
+Combined side into main: save txkv "Combine side into main", with 1 place in conflict:
+  d/x.txt: changed on side, removed on main; nothing is in your folder
+
+    No file needed changing.
+status:
+On line main at save txkv "Combine side into main"  (just now)
+
+In conflict (1 place):
+
+    d/x.txt  not in your folder, still to decide
+folder ["d", "e", "e/x.txt", "e/y.txt"]
+resolve --keep theirs: Some(0) Recorded 1 fix in save txkv "Combine side into main" on main.
+
+    The combined save now holds it; its ID stays the same.
+    Took theirs for 1 place.
+status:
+On line main at save txkv "Combine side into main"  (just now)
+Nothing changed since then.
+folder ["d", "d/x.txt", "e", "e/x.txt", "e/y.txt"]
+who d/x.txt: Some(0)
+Each line of d/x.txt and the save it is from:
+
+ovms  Test  2026-11-16  1 | one
+nwtr  Test  2026-11-16  2 | side
+ovms  Test  2026-11-16  3 | three
+
+who e/x.txt: Some(0)
+Each line of e/x.txt and the save it is from:
+
+swvm  Test  2026-11-16  1 | one
+swvm  Test  2026-11-16  2 | main
+swvm  Test  2026-11-16  3 | three
+
+ok
+test rt24_three_starts ... round 0: Some(0) Combined side into main: save umro "Combine side into main", with 1 place in conflict:
+  g.txt: changed on both lines, and Opalro can't tell what it held where they parted; marked in the file (1 place)
+
+    2 files written.
+ f.txt "one0\nb\nbee0\nd\nsix0\nf\n"
+round 1: Some(0) Combined side into main: save qllp "Combine side into main".
+
+    1 file written.
+ f.txt "one1\nb\nbee1\nd\nsix1\nf\n"
+round 2: Some(0) Combined side into main: save oysr "Combine side into main".
+
+    1 file written.
+ f.txt "one2\nb\nbee2\nd\nsix2\nf\n"
+round 3: Some(0) Combined side into main: save mqun "Combine side into main", with 1 place in conflict:
+  g.txt: changed on both lines, and Opalro can't tell what it held where they parted; marked in the file (1 place)
+
+    2 files written.
+ f.txt "one3\nb\nbee3\nd\nsix3\nf\n"
+round 4: Some(0) Combined side into main: save oxqn "Combine side into main".
+
+    1 file written.
+ f.txt "one4\nb\nbee4\nd\nsix4\nf\n"
+round 5: Some(0) Combined side into main: save sprl "Combine side into main".
+
+    1 file written.
+ f.txt "one5\nb\nbee5\nd\nsix5\nf\n"
+round 6: Some(0) Combined side into main: save ulvm "Combine side into main", with 1 place in conflict:
+  g.txt: changed on both lines, and Opalro can't tell what it held where they parted; marked in the file (1 place)
+
+    2 files written.
+ f.txt "one6\nb\nbee6\nd\nsix6\nf\n"
+round 7: Some(0) Combined side into main: save mswv "Combine side into main".
+
+    1 file written.
+ f.txt "one7\nb\nbee7\nd\nsix7\nf\n"
+round 8: Some(0) Combined side into main: save vrmp "Combine side into main".
+
+    1 file written.
+ f.txt "one8\nb\nbee8\nd\nsix8\nf\n"
+round 9: Some(0) Combined side into main: save vzqq "Combine side into main", with 1 place in conflict:
+  g.txt: changed on both lines, and Opalro can't tell what it held where they parted; marked in the file (1 place)
+
+    2 files written.
+ f.txt "one9\nb\nbee9\nd\nsix9\nf\n"
+round 10: Some(0) Combined side into main: save xukn "Combine side into main".
+
+    1 file written.
+ f.txt "one10\nb\nbee10\nd\nsix10\nf\n"
+round 11: Some(0) Combined side into main: save nrno "Combine side into main".
+
+    1 file written.
+ f.txt "one11\nb\nbee11\nd\nsix11\nf\n"
+{
+    "Some(0) Combined side into main: save mqun ": 1,
+    "Some(0) Combined side into main: save mswv ": 1,
+    "Some(0) Combined side into main: save nrno ": 1,
+    "Some(0) Combined side into main: save oxqn ": 1,
+    "Some(0) Combined side into main: save oysr ": 1,
+    "Some(0) Combined side into main: save qllp ": 1,
+    "Some(0) Combined side into main: save sprl ": 1,
+    "Some(0) Combined side into main: save ulvm ": 1,
+    "Some(0) Combined side into main: save umro ": 1,
+    "Some(0) Combined side into main: save vrmp ": 1,
+    "Some(0) Combined side into main: save vzqq ": 1,
+    "Some(0) Combined side into main: save xukn ": 1,
+}
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 5 filtered out; finished in 73.08s
+

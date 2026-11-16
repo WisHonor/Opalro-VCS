@@ -243,6 +243,15 @@ enum Act {
         picture: bool,
         then: u8,
     },
+    /// Makes a save on this line (with `conflicted`, a combined save holding conflicts), starts
+    /// another line where that save's first parent is with a save of its own, takes this line in
+    /// there, comes back, and amends (or fixes and resolves): the save is held only through a
+    /// combine.
+    HeldByCombine {
+        pick: usize,
+        conflicted: bool,
+        byte: u8,
+    },
 }
 
 /// What one line of a `Fork` does to its file, each kind of clash a combine meets drawn on
@@ -445,6 +454,12 @@ fn act(everywhere_alike: bool) -> impl Strategy<Value = Act> {
         3 => any::<bool>().prop_map(|tidy| Act::UndoRedo { tidy }),
         8 => (any::<usize>(), prop::bool::weighted(0.35), any::<u8>())
             .prop_map(|(pick, picture, then)| Act::Conflicted { pick, picture, then }),
+        3 => (any::<usize>(), any::<bool>(), any::<u8>())
+            .prop_map(|(pick, conflicted, byte)| Act::HeldByCombine {
+                pick,
+                conflicted,
+                byte
+            }),
     ]
 }
 
@@ -1466,6 +1481,14 @@ fn apply(repo: &mut Repository, m: &mut Model, root: &Path, a: &Act) -> Option<S
             then_with_conflicts(repo, m, root, pick, then);
             None
         }
+        Act::HeldByCombine {
+            pick,
+            conflicted,
+            byte,
+        } => {
+            held_by_combine(repo, m, root, pick, conflicted, byte);
+            None
+        }
         Act::UndoRedo { tidy } => {
             let back = Act::Undo { n: 1, shelve: true };
             apply(repo, m, root, &back);
@@ -1486,6 +1509,7 @@ fn apply(repo: &mut Repository, m: &mut Model, root: &Path, a: &Act) -> Option<S
             | Act::CleanForward { .. }
             | Act::UndoRedo { .. }
             | Act::Conflicted { .. }
+            | Act::HeldByCombine { .. }
             | Act::Fork { back: true, .. }
             | Act::Discard(_)
             | Act::Undo { .. }
@@ -1554,6 +1578,80 @@ fn in_conflict(repo: &mut Repository, m: &mut Model, root: &Path, pick: usize, p
     edit_both(m);
     save(repo, m, None);
     combine_into(repo, m, &Aim::Save(first), None, Keep::Conflicts);
+}
+
+/// What `HeldByCombine` does: a save on the line the project is on (a combined save holding
+/// conflicts when `conflicted`), another line started where that save's first parent is with a
+/// save of its own, this line taken in there, then back here to amend, or to fix the places and
+/// resolve. Each kind is counted only where the model's rule says the save is held through every
+/// parent but not along first parents, and the step went as that rule says.
+fn held_by_combine(
+    repo: &mut Repository,
+    m: &mut Model,
+    root: &Path,
+    pick: usize,
+    conflicted: bool,
+    byte: u8,
+) {
+    if conflicted {
+        in_conflict(repo, m, root, pick, false);
+    } else {
+        write(m, root, "d/e/b", byte, 5, When::Now);
+        save(repo, m, None);
+    }
+    let (Some(line), tip) = (m.state.line.clone(), m.state.on) else {
+        return;
+    };
+    if conflicted && (m.saves[tip].others.is_empty() || m.kept().is_empty()) {
+        return;
+    }
+    let Some(parent) = m.saves[tip].parent else {
+        return;
+    };
+    let saves = (0..m.saves.len()).filter(|&i| !m.saves[i].shelf);
+    let pick_parent = saves.into_iter().position(|s| s == parent).unwrap();
+    let goto = Act::Goto {
+        pick: pick_parent,
+        by_line: false,
+        unsaved: Unsaved::Discard,
+    };
+    apply(repo, m, root, &goto);
+    if m.state.on != parent || m.state.line.is_some() {
+        return;
+    }
+    // A change of its own, away from what this line changed, so the combine below makes a save.
+    write(m, root, "e/a", byte.wrapping_add(1), 5, When::Now);
+    save(repo, m, None);
+    combine_into(repo, m, &Aim::Line(line.clone()), None, Keep::Conflicts);
+    if !m.saves[m.state.on].others.contains(&tip) {
+        return;
+    }
+    let back = Act::Goto {
+        pick: m.state.lines.keys().position(|l| *l == line).unwrap(),
+        by_line: true,
+        unsaved: Unsaved::Discard,
+    };
+    apply(repo, m, root, &back);
+    if m.state.on != tip {
+        return;
+    }
+    let held = shown_elsewhere(m, &line, tip, true) && !shown_elsewhere(m, &line, tip, false);
+    if conflicted {
+        for k in 0..m.kept().len() {
+            fix_file(m, root, k * 6 + 1);
+        }
+        resolve_at(repo, m, None, ResolveHow::All, true);
+        let own = m.state.on != tip && m.saves[m.state.on].parent == Some(tip);
+        if held && own {
+            met("resolve on a save of its own: held only through a combine");
+        }
+    } else {
+        write(m, root, "d/e/b", byte.wrapping_add(2), 5, When::Now);
+        amend(repo, m, true);
+        if held && m.state.lines.get(&line) == Some(&tip) {
+            met("an amend refused: held only through a combine");
+        }
+    }
 }
 
 /// What `Conflicted` does with the places in conflict it made, as `then` picks.
@@ -1922,7 +2020,8 @@ fn count_settled(before: &BTreeMap<String, Kept>, after: &Tree) {
 }
 
 /// `save <path>`: the place at or below `path` settled as a full save settles it, everything
-/// else as the save the project is on holds it.
+/// else as the save the project is on holds it, except that a folder gone from the working
+/// folder goes from the save too once the save takes away the last of what it held.
 fn save_only(repo: &mut Repository, m: &mut Model, path: &str) {
     let who = who();
     let only = [Given::Path(path.to_owned())];
@@ -1944,6 +2043,19 @@ fn save_only(repo: &mut Repository, m: &mut Model, path: &str) {
     let tip = m.saves[m.state.on].stored.clone();
     let mut stored = tip.clone();
     stored.take(path, &settled(&m.folder, &tip));
+    let holds_below = |t: &Tree, up: &str| {
+        let mut all = t.files.keys().chain(&t.folders).chain(t.kept.keys());
+        all.any(|p| p != up && within(p, up))
+    };
+    let mut up = path;
+    while let Some((above, _)) = up.rsplit_once('/') {
+        let gone = !m.folder.folders.contains(above);
+        if gone && holds_below(&tip, above) && !holds_below(&stored, above) {
+            met("save <path> took the last of a folder gone from the folder");
+            stored.remove(above);
+        }
+        up = above;
+    }
     let named = |p: &String| within(p, path);
     match done.unwrap() {
         SaveOutcome::Saved {
@@ -2030,7 +2142,7 @@ fn amend(repo: &mut Repository, m: &mut Model, new_message: bool) {
         settle(repo, m, Vec::new());
         return;
     };
-    if shown_elsewhere(m, &line, old) {
+    if shown_elsewhere(m, &line, old, true) {
         assert!(
             matches!(done, Err(SaveError::AmendShared { .. })),
             "{done:?}"
@@ -2079,19 +2191,29 @@ fn amend(repo: &mut Repository, m: &mut Model, new_message: bool) {
     }
 }
 
-/// Whether a tag is at `save`, or a line other than `line` holds it, or a save of its change,
-/// along first parents.
-fn shown_elsewhere(m: &Model, line: &str, save: usize) -> bool {
-    let (change, id) = (m.saves[save].change, m.saves[save].id);
-    m.state.tags.values().any(|&t| m.saves[t].id == id)
-        || m.state
-            .lines
-            .iter()
-            .filter(|(name, _)| *name != line)
-            .any(|(_, &tip)| {
-                std::iter::successors(Some(tip), |&s| m.saves[s].parent)
-                    .any(|s| m.saves[s].change == change)
-            })
+/// Whether a tag or a line other than `line` has `save` itself somewhere behind it: starting from
+/// each, every parent is followed, first or not, until the save turns up or nothing is left.
+/// Another save of the same change doesn't count. Without `every_parent`, only first parents
+/// are followed, which tells apart a save held only through a combine.
+fn shown_elsewhere(m: &Model, line: &str, save: usize, every_parent: bool) -> bool {
+    let target = m.saves[save].id;
+    let other_lines = m.state.lines.iter().filter(|(name, _)| *name != line);
+    let mut frontier: Vec<usize> = (m.state.tags.values().copied())
+        .chain(other_lines.map(|(_, &tip)| tip))
+        .collect();
+    let mut visited = vec![false; m.saves.len()];
+    while let Some(s) = frontier.pop() {
+        if m.saves[s].id == target {
+            return true;
+        }
+        if !std::mem::replace(&mut visited[s], true) {
+            frontier.extend(m.saves[s].parent);
+            if every_parent {
+                frontier.extend(m.saves[s].others.iter().copied());
+            }
+        }
+    }
+    false
 }
 
 /// The name `pick` chooses among `names`, or `other` in the slot past them.
@@ -4421,7 +4543,7 @@ fn resolve_at(
     };
     assert_eq!((&recorded, got_left), (&places, left_count));
     // Into the combined save where nothing else shows it, else a save of its own on top.
-    let amend = !m.saves[on].others.is_empty() && !shown_elsewhere(m, &line, on);
+    let amend = !m.saves[on].others.is_empty() && !shown_elsewhere(m, &line, on, true);
     assert_eq!(
         replaced,
         amend.then_some(m.saves[on].id),
@@ -5004,7 +5126,7 @@ fn cases() -> u32 {
 /// that the model's files can make (two kinds at one place, a link, a rule against markers and
 /// files past the text limits they can't), the starting points that disagree, a line's conflict
 /// that stops a combine, and each way the other commands meet a conflict.
-const MUST_MEET: [&str; 38] = [
+const MUST_MEET: [&str; 40] = [
     "changed on both, in the same place",
     "changed on both, not text",
     "changed, removed",
@@ -5026,6 +5148,8 @@ const MUST_MEET: [&str; 38] = [
     "resolve --keep theirs",
     "resolve into the combined save",
     "resolve on a save of its own",
+    "an amend refused: held only through a combine",
+    "resolve on a save of its own: held only through a combine",
     "resolve refused: not in conflict",
     "resolve refused: still yours",
     "resolve refused: markers left, answered no",

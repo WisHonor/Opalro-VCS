@@ -24,6 +24,7 @@ use crate::diary::{Position, State};
 use crate::history::tip_of;
 use crate::id::{ChangeId, Id};
 use crate::kept::{EXACT, Put, overlay_with};
+use crate::lastmade::LastMade;
 use crate::lines::Target;
 use crate::listing::{Entry, EntryKind, Listing, SaveLimits};
 use crate::moves::{
@@ -1154,6 +1155,10 @@ fn combine_locked(
         warnings.push(Warning::new(warning::TOO_MANY_MOVE_NOTES, message));
     }
     let mut done = to.switch(repo, lock, earlier, asked, made.save, warnings)?;
+    // The switch moved the handle's head to the entry it wrote.
+    if let Ok((entry, after)) = repo.current() {
+        LastMade::store(repo, &after.state, made.save, entry);
+    }
     // The rules file the switch left in the folder is the one the next combine reads.
     done.0.warnings.extend(repo.read_rules().warnings());
     let result = Combined::Made {
@@ -1189,8 +1194,8 @@ impl Landing<'_> {
         to: Id,
         warnings: Vec<Warning>,
     ) -> Result<(Applied, usize, usize, bool), CombineError> {
-        let (mut plan, drive) =
-            plan_switch(repo, self.from, to, asked.git_excludes).map_err(|e| match e {
+        let (mut plan, drive, cache) = plan_switch(repo, self.from, to, asked.git_excludes)
+            .map_err(|e| match e {
                 SwitchError::Collisions { paths } => CombineError::Collisions { paths },
                 e => CombineError::Switch(e),
             })?;
@@ -1206,6 +1211,7 @@ impl Landing<'_> {
             to,
             plan,
             drive,
+            cache,
         };
         let (applied, safety_copies, carried) =
             make_switch(repo, lock, planned, asked.who, "combine", earlier)

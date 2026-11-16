@@ -563,3 +563,51 @@ Planned on 2026-11-14 after decisions [174](decisions/174-the-conflict-record.md
 - **Docs** ✅ (2026-11-15): the design, the guide, [security.md](security.md), [testing.md](testing.md) and [benchmarks.md](benchmarks.md) §14 say what is built; [terminal.md](terminal.md), [json.md](json.md) and [storage-format.md](storage-format.md) were written with the code; what building refined is [decision 181](decisions/181-what-building-milestone-9-refined.md), and the calls made on the way are in [the rulings](plans/2026-11-14-milestone-9-rulings.md).
 - **Red team, review and merge** ✅ (2026-11-15): two red-team sessions (RT21: 2 Medium and 2 Low; RT22, on the fixes: 1 Low; all fixed, [decisions 182](decisions/182-red-team-m9-rulings.md) and [183](decisions/183-red-team-m9-session-2-rulings.md)), a whole-branch review by four readers, one round of fixes checked item by item, and the merge into `v0.2`.
 - *Done when:* every proven finding is fixed or ruled on, every document matches the code, and the branch is merged into `v0.2`.
+
+## Milestone 10: `who`, and v0.2
+
+Planned on 2026-11-15 after decisions [184](decisions/184-opalro-who-the-save-behind-each-line.md) to [187](decisions/187-v0.2s-package.md), which Claude made at the owner's request while the owner was away: [plans/2026-11-15-milestone-10-who-and-v0.2.md](plans/2026-11-15-milestone-10-who-and-v0.2.md). Each step ends with tests passing on Windows, macOS and Linux; the plan's task numbers are in brackets. A ✅ marks a step that is done. The rulings made along the way, and what the owner is asked to confirm: [plans/2026-11-15-milestone-10-rulings.md](plans/2026-11-15-milestone-10-rulings.md).
+
+**1. Which of these saves holds this one** ✅ (2026-11-15; Task 1)
+- One more question for the module that answers everything about ancestry: of a set of saves, one that is a given save or has it in its history, through any parent, whatever the clocks say ([decision 185](decisions/185-save-amend-and-a-save-something-else-holds.md)).
+- *Done when:* it agrees with a search through every parent on random histories, with clocks that lie.
+
+**2. The note of the save made last** ✅ (2026-11-15; Tasks 2 and 3)
+- A small cache, `cache/last-made`: for each line whose newest save this computer made, that save and the diary entry that recorded it (one note for the whole project, as first built, made an amend after work on another line ask about everything: [decision 185](decisions/185-save-amend-and-a-save-something-else-holds.md), its correction); its layout in the storage format with a vector, before any code writes it. `cache/other-lines` is marked as written by Opalro 0.1 only.
+- *Done when:* the vector test and the fuzz target pass.
+
+**3. An amend asks the exact question, of what moved** ✅ (2026-11-15; Task 3)
+- `opalro save --amend` is refused when another line, a tag or a server line names the save or has it in its history, through any parent; `opalro resolve` decides by the same rule whether a fix replaces the combined save. With the note, only what is new or has moved since the save was made is asked about; an amend right after a save reads nothing of the other lines.
+- *Done when:* an amend of a save another line combined in is refused; the counted reads hold; the model follows the same rule in its own words.
+
+**4. One file of the folder, and a typed path's stored spelling** ✅ (2026-11-15; Task 4)
+- Two small tools `who` needs, each in the one place that owns its rule.
+- *Done when:* `changes` and `resolve` use them and their tests pass unchanged.
+
+**5. `who`, in the engine** ✅ (2026-11-15; Task 5)
+- The save behind each line of a file: the folder's file or a save's; through every parent, the first one first; recorded moves followed; a place in conflict read as what stands there; lines compared without their endings ([decision 184](decisions/184-opalro-who-the-save-behind-each-line.md)).
+- *Done when:* every line gets exactly one save, or is marked unsaved, on random histories; each rule is broken once on purpose and a test catches it.
+
+**6. `opalro who`** ✅ (2026-11-15; Task 6)
+- The command, its rows and its `--json`; Git's `blame` and `annotate` run it.
+- *Done when:* the words are in [terminal.md](terminal.md) and [json.md](json.md), and the guide teaches it.
+
+**7. `who` against `git blame`** ✅ (2026-11-15; Task 7)
+- On generated histories, each line's save is the commit `git blame` names; on Git's own repository, timed against it in the nightly run. The two differ by design where a combine took a later parent's file whole ([decision 184](decisions/184-opalro-who-the-save-behind-each-line.md), its correction): the generator keeps that shape out and fixed tests pin both answers. On Git's own history every line where they differ was looked at, and none was found where `who` named a save that neither wrote nor moved the line ([benchmarks.md](benchmarks.md) §15).
+- *Done when:* the comparison passes and fails when it compares nothing.
+
+**8. Timers, then the work done twice** ✅ (2026-11-15; Task 8)
+- `goto` and `status` timed part by part; only changes that alter no write, no flush and no check; the rest written up for the owner ([decision 186](decisions/186-speed-before-v0.2.md)).
+- *Done when:* the table is in [benchmarks.md](benchmarks.md) and the gate is run before and after.
+- Two changes kept: the folder walk's lookups done once per folder, which took back about two thirds of what milestone 9 had cost `status` and `goto`; and the file cache a `goto` loaded twice, now once (its first form made `status` slower and was rebuilt). The ten flushes of a `goto`, what each is for and what it costs, are written up for the owner to rule on ([benchmarks.md](benchmarks.md) §15). The gate's run on the milestone's last code comes with the Nightly run that closes it.
+
+**9. The package** ✅ (2026-11-16; Task 9)
+- Version 0.2.0 with its notes; every document a release carries brought to v0.2; a page of what is left for the owner ([decision 187](decisions/187-v0.2s-package.md)). `USER-AGREEMENT.md` is not touched.
+- *Done when:* the program says `opalro 0.2.0` and the guide names this version's archives.
+
+**10. Docs, red team, review, merge, and the package's run** (Tasks 10 to 12)
+- The documents; a red-team session; a whole-branch review and one round of fixes; the merge into `v0.2`; the release workflow started by hand on `v0.2`, where its draft job does not run.
+- **Docs** ✅ (2026-11-16): the design, the guide, [security.md](security.md), [testing.md](testing.md), [benchmarks.md](benchmarks.md) §15 and the [follow-ups](plans/2026-11-01-milestone-1-follow-ups.md) say what is built, ruled and measured; [terminal.md](terminal.md), [json.md](json.md) and [storage-format.md](storage-format.md) were written with the code; what building corrected is in decisions [184](decisions/184-opalro-who-the-save-behind-each-line.md) and [185](decisions/185-save-amend-and-a-save-something-else-holds.md), and the calls made on the way are in [the rulings](plans/2026-11-15-milestone-10-rulings.md).
+- **Red team, review and merge** ✅ (2026-11-16): two red-team sessions (RT23: nothing proved; RT24, after the fix wave: one Low finding, ruled in [decision 188](decisions/188-red-team-m10-rulings.md) and left for the owner), a whole-branch review by four readers (nothing Critical; what it found fixed in one wave), and the merge into `v0.2` on 2026-11-16.
+- **The package's run:** the release workflow's run on `v0.2` follows the merge, and is recorded in [the owner's page](releases/v0.2.0-before-you-publish.md).
+- *Done when:* every proven finding is fixed or ruled on, every document matches the code, the branch is merged into `v0.2`, and the workflow's run is green. Nothing is tagged, drafted, merged into `main` or opened as a pull request.

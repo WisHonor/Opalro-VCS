@@ -690,6 +690,63 @@ fn unsaved_work_in_the_way_collides_and_the_rest_comes_along() {
     );
 }
 
+/// A project at a save holding `keep`, `d/x` and `d/e/y`, written, then the folder `d` deleted.
+fn folder_deleted() -> (tempfile::TempDir, Repository, Id) {
+    let (dir, mut repo) = project();
+    let empty = current_save(&repo).unwrap();
+    let a = planted(
+        &mut repo,
+        &files(&[("keep", b"k"), ("d/x", b"x"), ("d/e/y", b"y")]),
+    );
+    switch(&mut repo, empty, a);
+    fs::remove_dir_all(dir.path().join("d")).unwrap();
+    (dir, repo, a.0)
+}
+
+/// The paths a discard of `only` would act on, in order.
+fn acted_on(repo: &mut Repository, save: Id, only: Option<&[&str]>) -> Vec<String> {
+    let _lock = repo.lock_for_change("discard", &mut |_| {}).unwrap();
+    let drive = drive::probe(repo.tmp_folder()).unwrap();
+    let only: Option<Vec<String>> = only.map(|o| o.iter().map(|p| (*p).to_owned()).collect());
+    let plan = plan(repo, save, save, only.as_deref(), true, drive, None).unwrap();
+    assert!(plan.collisions.is_empty(), "{:?}", plan.collisions);
+    plan.actions.into_iter().map(|a| a.path).collect()
+}
+
+#[test]
+fn a_plan_for_some_paths_makes_a_folder_only_named_or_on_the_way_to_what_it_writes() {
+    let (_dir, mut repo, a) = folder_deleted();
+    // Above a named path, with nothing to write below it: left as the person has it.
+    assert!(acted_on(&mut repo, a, Some(&["d/z"])).is_empty());
+    // A file written into it.
+    assert_eq!(acted_on(&mut repo, a, Some(&["d/x"])), ["d", "d/x"]);
+    // Two levels above a written file: both.
+    assert_eq!(
+        acted_on(&mut repo, a, Some(&["d/e/y"])),
+        ["d", "d/e", "d/e/y"]
+    );
+    // Named itself.
+    assert_eq!(
+        acted_on(&mut repo, a, Some(&["d"])),
+        ["d", "d/e", "d/e/y", "d/x"]
+    );
+    assert_eq!(
+        acted_on(&mut repo, a, Some(&["d/e"])),
+        ["d", "d/e", "d/e/y"]
+    );
+    // Not limited to paths: everything the folder lacks, as before.
+    assert_eq!(acted_on(&mut repo, a, None), ["d", "d/e", "d/e/y", "d/x"]);
+}
+
+#[test]
+fn a_plan_for_some_paths_leaves_the_persons_file_where_the_save_has_a_folder() {
+    let (dir, mut repo, a) = folder_deleted();
+    fs::write(dir.path().join("d"), b"mine").unwrap();
+    assert!(acted_on(&mut repo, a, Some(&["d/z"])).is_empty());
+    assert!(acted_on(&mut repo, a, Some(&["d/e/z"])).is_empty());
+    assert_eq!(fs::read(dir.path().join("d")).unwrap(), b"mine");
+}
+
 #[test]
 fn nothing_below_a_folder_in_the_way_is_planned() {
     let (dir, mut repo) = project();
@@ -2045,4 +2102,52 @@ fn throwing_away_many_unsaved_links_beside_a_conflict_reads_its_record_once() {
         fs::read_link(dir.path().join("dir/new7")).unwrap(),
         Path::new("x.txt")
     );
+}
+
+#[test]
+fn a_typed_path_finds_the_stored_spelling_as_the_drive_takes_names() {
+    let (_dir, mut repo) = project();
+    let (save, _) = planted(
+        &mut repo,
+        &[
+            ("Docs/ReadMe.md", EntryKind::File, b"read me"),
+            ("Docs/Notes", EntryKind::File, b"upper"),
+            ("Docs/notes", EntryKind::File, b"lower"),
+            ("file", EntryKind::File, b"plain"),
+        ],
+    );
+    let root = repo.store().save(&save, false).unwrap().root;
+    let unstored = HashMap::new();
+    let listings = Listings::stored(repo.store(), &unstored);
+    let blind = Drive {
+        ignores_case: true,
+        composes_unicode: false,
+    };
+    let exact = crate::kept::EXACT;
+    let mut tree = Tree::new(&listings, root, blind);
+    let mut found = |typed: &str, drive: Drive| {
+        tree.entry_as_typed(typed, drive)
+            .unwrap()
+            .map(|(place, e)| (place, e.name))
+    };
+    let at = |place: &str| {
+        Some((
+            place.to_owned(),
+            place.rsplit('/').next().unwrap().to_owned(),
+        ))
+    };
+    assert_eq!(found("Docs/ReadMe.md", exact), at("Docs/ReadMe.md"));
+    assert_eq!(found("Docs/ReadMe.md", blind), at("Docs/ReadMe.md"));
+    assert_eq!(found("docs/README.MD", blind), at("Docs/ReadMe.md"));
+    assert_eq!(found("docs/README.MD", exact), None);
+    assert_eq!(found("DOCS", blind), at("Docs"));
+    // Two names alike but for case: the exact one, or none.
+    assert_eq!(found("Docs/notes", blind), at("Docs/notes"));
+    assert_eq!(found("docs/Notes", blind), at("Docs/Notes"));
+    assert_eq!(found("Docs/NOTES", blind), None);
+    // Nothing through a file, nothing missing, nothing for no path.
+    assert_eq!(found("file/x", blind), None);
+    assert_eq!(found("FILE/x", blind), None);
+    assert_eq!(found("Docs/gone", blind), None);
+    assert_eq!(found("", blind), None);
 }

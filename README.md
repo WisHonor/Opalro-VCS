@@ -1,10 +1,12 @@
 # Opalro
 
-Opalro is a version control system for code and large binary files together, with its own engine and storage format: it is not built on Git. You save versions of your project, go back to any of them, try ideas on lines of their own, and take back any command that changed your project with `opalro undo` (a save, a switch to another save, a discard of unsaved work, a shelf, a change of rules; it doesn't take back `opalro tidy`, which frees space, or the starting of the project itself). Big files are cut into chunks, so a change to part of a file stores only the part that changed.
+Opalro is a version control system for code and large binary files together, with its own engine and storage format: it is not built on Git. You save versions of your project, go back to any of them, try ideas on lines of their own, and take back any command that changed your project with `opalro undo` (a save, a switch to another save, a discard of unsaved work, a shelf, a change of rules; it doesn't take back `opalro tidy`, which frees space, `opalro setup --upgrade`, after which Opalro 0.1 can't open the project, or the starting of the project itself). Big files are cut into chunks, so a change to part of a file stores only the part that changed.
 
 ## State
 
-Opalro v0.1 is an early release, for one person on one computer: there is no server, so there is no sharing, merging or locking yet. It can import a Git repository, Git LFS files included. Keep another copy of anything that matters.
+Opalro v0.2 is an early release, for one person on one computer: there is no server, so there is no sharing or locking yet. You can combine one line's work into another, keep the conflicts and fix them when you choose, and see the save behind each line of a file with `opalro who`. It can import a Git repository, Git LFS files included. Keep another copy of anything that matters.
+
+A project made with Opalro 0.1 opens as it is. To keep conflicts it needs `opalro setup --upgrade` once, and after that Opalro 0.1 can't open it; nor can Opalro 0.1 open a project started with v0.2.
 
 What Opalro writes on disk is frozen from v0.1: every later Opalro reads what v0.1 wrote.
 

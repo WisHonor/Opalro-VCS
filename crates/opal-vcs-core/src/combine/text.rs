@@ -7,8 +7,7 @@ use similar::DiffTag;
 
 use super::NotMerged;
 use crate::changes::{
-    Lines, MAX_LINES, MAX_LINES_SIZE, file_lines, is_binary, line_count, line_ops, lines_of,
-    only_line_endings,
+    Lines, MAX_LINES_SIZE, NotLines, comparable, file_lines, line_ops, lines_of, only_line_endings,
 };
 use crate::conflict::Labels;
 use crate::conflict::markers::Marking;
@@ -65,18 +64,14 @@ fn merge_within(
     whole: bool,
 ) -> (Text, bool) {
     let sides = [base, ours, theirs];
-    if sides
-        .iter()
-        .any(|s| u64::try_from(s.len()).unwrap_or(u64::MAX) > MAX_LINES_SIZE)
-    {
-        return (Text::Not(NotMerged::TooBig), false);
-    }
-    if sides.iter().any(|s| is_binary(s)) {
-        return (Text::Not(NotMerged::Binary), false);
-    }
-    // Counted before anything is held per line.
-    if sides.iter().any(|s| line_count(s) > MAX_LINES) {
-        return (Text::Not(NotMerged::TooManyLines), false);
+    // The first reason of any side: too big, then not text, then too many lines.
+    if let Some(why) = sides.iter().filter_map(|s| comparable(s).err()).min() {
+        let not = match why {
+            NotLines::TooBig => NotMerged::TooBig,
+            NotLines::Binary => NotMerged::Binary,
+            NotLines::TooManyLines => NotMerged::TooManyLines,
+        };
+        return (Text::Not(not), false);
     }
     let (b, o, t) = (lines_of(base), lines_of(ours), lines_of(theirs));
     let (changes, late) = if whole {

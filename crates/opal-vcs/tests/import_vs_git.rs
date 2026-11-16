@@ -5,17 +5,19 @@
 
 mod support;
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::Path;
 use std::time::Instant;
 
+use opal_core::id::Id;
 use opal_core::import::{ImportRequest, import_git};
 use opal_core::names::holdable_here;
 use opal_core::repo::Repository;
 use opal_core::save::Person;
 use support::{
     Env, assert_ancestry_matches_git, assert_matches_git, assert_matches_git_counting,
-    assert_starts_match_git, copy_dir, git, git_with_input, text, top_folder,
+    assert_starts_match_git, copy_dir, git, git_commit, git_with_input, text, top_folder,
 };
 
 /// Writes `bytes` into the repository as a blob, and returns its ID.
@@ -607,6 +609,79 @@ fn a_real_repository_matches_git() {
         "A change ID no save has took {:.2} s to look for.",
         began.elapsed().as_secs_f64()
     );
+    who_against_git_blame(&repo, work.path());
+}
+
+/// Times `opalro who` against `git blame` on five files of different ages and sizes at the
+/// current branch's tip, and prints the share of lines on which the two name the same commit.
+/// Only that `who` names a save for every line is asserted.
+fn who_against_git_blame(repo: &Repository, dir: &Path) {
+    let branch = text(&git(dir, &["symbolic-ref", "--short", "HEAD"]));
+    let branch = branch.trim();
+    let tip = text(&git(dir, &["rev-parse", branch]));
+    let env = Env::empty();
+    let mut commits = BTreeMap::new();
+    for file in [
+        "Makefile",
+        "diff.c",
+        "git-compat-util.h",
+        "README.md",
+        "t/t8002-blame.sh",
+    ] {
+        let began = Instant::now();
+        let out = (env.opal_in(dir))
+            .args(["who", file, "--save", branch, "--json"])
+            .output()
+            .unwrap();
+        let who_took = began.elapsed();
+        assert_eq!(out.status.code(), Some(0), "{file}: {}", text(&out.stderr));
+        let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let mut ours = Vec::new();
+        for run in doc["runs"].as_array().unwrap() {
+            let save = run["save"].as_str();
+            let save = save.unwrap_or_else(|| panic!("{file}: a line with no save: {run}"));
+            let commit = (commits.entry(save.to_owned()))
+                .or_insert_with(|| git_commit(repo, &Id::from_hex(save).unwrap()));
+            ours.extend(std::iter::repeat_n(
+                commit.clone(),
+                run["lines"].as_u64().unwrap() as usize,
+            ));
+        }
+        assert!(!ours.is_empty(), "{file} has no lines");
+        assert_eq!(ours.len() as u64, doc["lines"].as_u64().unwrap(), "{file}");
+
+        let began = Instant::now();
+        let blamed = text(&git(dir, &["blame", "--porcelain", tip.trim(), "--", file]));
+        let git_took = began.elapsed();
+        // Each line's header (its commit first) comes before the line, which starts with a tab.
+        let mut theirs = Vec::new();
+        let mut header = true;
+        for line in blamed.lines() {
+            if header {
+                theirs.push(line.split(' ').next().unwrap().to_owned());
+                header = false;
+            } else if line.starts_with('\t') {
+                header = true;
+            }
+        }
+        // A save for every line of the file, which has as many lines as Git reads in it.
+        assert_eq!(ours.len(), theirs.len(), "{file}");
+        let same = ours.iter().zip(&theirs).filter(|(a, b)| a == b).count();
+        println!(
+            "who {file}: {} lines, {:.2} s; git blame: {} lines, {:.2} s; the same commit on \
+             {:.1}% of lines{}",
+            ours.len(),
+            who_took.as_secs_f64(),
+            theirs.len(),
+            git_took.as_secs_f64(),
+            100.0 * same as f64 / ours.len() as f64,
+            if doc["coarse"] == true {
+                " (who was coarse)"
+            } else {
+                ""
+            }
+        );
+    }
 }
 
 /// The most memory this process has held, as Linux reports it (VmHWM). Other systems need a

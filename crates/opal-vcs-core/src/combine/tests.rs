@@ -3904,6 +3904,19 @@ fn nothing_to_combine_makes_no_step() {
 }
 
 #[test]
+fn a_combine_loads_the_file_cache_once() {
+    use crate::filecache::counted::loads;
+    let mut h = Hist::new();
+    diverged(&mut h);
+    h.repo.set_cache_key([7; 32]);
+    let loaded = loads();
+    combine_in(&mut h, "side").unwrap();
+    // The scan's load; the switch takes what the scan stored.
+    assert_eq!(loads() - loaded, 1);
+    assert_eq!(h.folder(), both_tree());
+}
+
+#[test]
 fn a_line_that_hasnt_moved_is_moved_forward() {
     let mut h = Hist::new();
     let first = h.first;

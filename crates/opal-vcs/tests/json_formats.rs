@@ -125,6 +125,10 @@ fn every_document() -> Vec<(&'static str, usize, Value)> {
     let first = history["saves"][1]["id"].as_str().unwrap().to_owned();
     docs.push(("`opalro history --json`", 0, history));
     docs.push(("`opalro show --json`", 0, run(&["show"], 0)));
+    let who = "`opalro who --json`";
+    docs.push((who, 0, run(&["who", "a.txt"], 0)));
+    docs.push((who, 0, run(&["who", "a.txt", "--save", "main"], 0)));
+    docs.push(("5. Errors", 0, run(&["who", "none.txt"], 1)));
     docs.push(("`opalro line --json`", 0, run(&["line"], 0)));
     docs.push(("`opalro line new --json`", 0, run(&["line", "new", "x"], 0)));
     docs.push((

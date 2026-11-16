@@ -187,6 +187,14 @@ pub enum RepoError {
         escape(&source.to_string(), false)
     )]
     CantWrite { path: PathBuf, source: io::Error },
+    /// The drive's name test couldn't make its file in `.opalro/tmp`, at `path`. Its other errors
+    /// keep their own words.
+    #[error(
+        "Opalro couldn't make a file in {}: {}",
+        escape(&path.display().to_string(), false),
+        escape(&source.to_string(), false)
+    )]
+    DriveUntested { path: PathBuf, source: io::Error },
     #[error(transparent)]
     Io(#[from] io::Error),
     #[error(transparent)]
@@ -266,6 +274,10 @@ impl RepoError {
                      finish."
                 }
                 RepoError::BeingMade { .. } => "Run the command again once it has finished.",
+                RepoError::DriveUntested { .. } => {
+                    "Opalro makes a file there for a moment, and removes it again, to learn how \
+                     this drive compares names (whether README and readme are one file, say)."
+                }
                 RepoError::OpalChanged { .. } => "Run the command again.",
                 RepoError::ImportUnfinished => "Run `opalro import` again to finish the import.",
                 RepoError::NewerFormat { .. } => "Update Opalro to open it.",
@@ -917,6 +929,8 @@ pub struct Repository {
     head: Option<Id>,
     /// The user's own key, which seals the caches; without it none is read or written.
     cache_key: Option<[u8; KEY_LEN]>,
+    /// Caches are read and never stored, as [`Repository::store_no_caches`] asks.
+    store_no_caches: bool,
     /// The project's `opalro.toml`, as the change lock last read it.
     rules: RulesRead,
 }
@@ -1257,6 +1271,7 @@ impl Repository {
             format: parse_format(FORMAT_TEXT)?,
             head: None,
             cache_key: None,
+            store_no_caches: false,
             rules: RulesRead::default(),
         };
         // `state/lock-info` is never shown before there is a `format`, so an import's says
@@ -1370,8 +1385,8 @@ impl Repository {
         Repository::discover_with(start, &check_owner)
     }
 
-    /// [`Repository::discover`] for a command that changes nothing, `verify`: the leftovers in
-    /// `tmp/` are left as they are, and the lock file isn't touched.
+    /// [`Repository::discover`] for a command that changes nothing, `verify` and `who`: the
+    /// leftovers in `tmp/` are left as they are, and the lock file isn't touched.
     pub fn discover_untouched(start: &Path) -> Result<Repository, RepoError> {
         Repository::search(start, &check_owner, Repository::open_untouched)
     }
@@ -1470,6 +1485,7 @@ impl Repository {
             store,
             head,
             cache_key: None,
+            store_no_caches: false,
             rules: RulesRead::default(),
         })
     }
@@ -1540,7 +1556,14 @@ impl Repository {
 
     /// How the project's drive compares names.
     pub fn drive(&self) -> Result<crate::drive::Drive, RepoError> {
-        Ok(crate::drive::probe(self.tmp_folder())?)
+        use crate::drive::ProbeError;
+        crate::drive::probe_telling(self.tmp_folder()).map_err(|e| match e {
+            ProbeError::CantMake(source) => RepoError::DriveUntested {
+                path: self.tmp.clone(),
+                source,
+            },
+            ProbeError::Other(e) => e.into(),
+        })
     }
 
     /// `tmp/`, held open.
@@ -1553,9 +1576,10 @@ impl Repository {
         &self.held.opalro
     }
 
-    /// The key that seals this project's caches, if `set_cache_key` gave one.
+    /// The key that seals this project's caches, if `set_cache_key` gave one: for reading a
+    /// cache only; a cache is written with [`Repository::storing_key`].
     #[must_use]
-    pub fn cache_key(&self) -> Option<&[u8; KEY_LEN]> {
+    pub(crate) fn cache_key(&self) -> Option<&[u8; KEY_LEN]> {
         self.cache_key.as_ref()
     }
 
@@ -1564,6 +1588,18 @@ impl Repository {
     /// a key for one run seals, no later run trusts, and writing it would replace a good cache.
     pub fn set_cache_key(&mut self, key: [u8; KEY_LEN]) {
         self.cache_key = Some(key);
+    }
+
+    /// From now on this handle reads its caches and stores none, for a command that writes
+    /// nothing at all.
+    pub fn store_no_caches(&mut self) {
+        self.store_no_caches = true;
+    }
+
+    /// The key to seal a cache being written with: none when the handle stores no caches, or has
+    /// no key. For writing only; reading a cache asks [`Repository::cache_key`].
+    pub(crate) fn storing_key(&self) -> Option<&[u8; KEY_LEN]> {
+        self.cache_key.as_ref().filter(|_| !self.store_no_caches)
     }
 
     /// `state/`, held open.
@@ -4383,6 +4419,95 @@ mod tests {
             "Its safe-folders entry Z:/mine doesn't count: its drive doesn't tell its folders \
              apart, so safe-folders can't vouch for a folder on it, and Opalro never trusts a \
              folder that way."
+        );
+    }
+
+    /// A handle that stores no caches reads each of the three as before and writes none of them:
+    /// a file there stays byte for byte as it was, and one that is missing stays missing.
+    #[test]
+    fn a_handle_that_stores_no_caches_reads_them_and_writes_none() {
+        use crate::changeids::ChangeIds;
+        use crate::filecache::FileCache;
+        use crate::id::ChangeId;
+        use crate::lastmade::LastMade;
+        use opal_platform::dir::{EntryMeta, EntryType};
+
+        let dir = tempfile::tempdir().unwrap();
+        let who = Person {
+            name: "Ada".into(),
+            email: "ada@example.com".into(),
+            time_ms: 0,
+            tz_offset_min: 0,
+        };
+        let mut repo = Repository::init(dir.path(), &who).unwrap();
+        repo.set_cache_key([7; 32]);
+        let (a, b) = (Id([3; 32]), Id([5; 32]));
+        let state = State {
+            lines: [("main".to_owned(), a), ("side".to_owned(), b)]
+                .into_iter()
+                .collect(),
+            tags: None,
+            position: Position::OnLine("main".into()),
+            shelves: vec![],
+            server_lines: None,
+        };
+        let meta = |size| EntryMeta {
+            kind: EntryType::File,
+            size,
+            modified_ns: 1_700_000_000_000_000_000,
+            changed_ns: 1_700_000_000_000_000_000,
+            executable: None,
+            file_id: (1, 2),
+        };
+        let now = 1_800_000_000_000_000_000;
+        // Each cache stored by an ordinary handle.
+        let mut ids = ChangeIds::dropped();
+        ids.set("main", vec![(a, ChangeId([1; 16]))]);
+        ids.store(&repo, &state);
+        let mut files = FileCache::load(&repo);
+        files.record("a.txt", &meta(3), Id([1; 32]));
+        files.store(&repo, now).unwrap();
+        LastMade::store(&repo, &state, a, Id([4; 32]));
+        let cache = dir.path().join(".opalro/cache");
+        let names = ["change-ids", "files", "last-made"];
+        let before: Vec<Vec<u8>> = (names.iter())
+            .map(|n| std::fs::read(cache.join(n)).unwrap())
+            .collect();
+
+        repo.store_no_caches();
+        // Read as before.
+        assert_eq!(
+            ChangeIds::load(&repo).get("main"),
+            Some(&[(a, ChangeId([1; 16]))][..])
+        );
+        assert!(FileCache::load(&repo).matches("a.txt", &meta(3)).is_some());
+        assert_eq!(LastMade::load(&repo).entry_of(&a), Some(Id([4; 32])));
+        // What would have changed each is stored nowhere.
+        let store_all = |repo: &Repository| {
+            let mut ids = ChangeIds::load(repo);
+            ids.set("side", vec![(b, ChangeId([2; 16]))]);
+            ids.store(repo, &state);
+            let mut files = FileCache::load(repo);
+            files.record("b.txt", &meta(4), Id([2; 32]));
+            files.store(repo, now).unwrap();
+            LastMade::store(repo, &state, b, Id([6; 32]));
+        };
+        store_all(&repo);
+        for (name, was) in names.iter().zip(&before) {
+            assert_eq!(&std::fs::read(cache.join(name)).unwrap(), was, "{name}");
+        }
+        for name in names {
+            std::fs::remove_file(cache.join(name)).unwrap();
+        }
+        store_all(&repo);
+        for name in names {
+            assert!(!cache.join(name).exists(), "{name}");
+        }
+        assert!(
+            std::fs::read_dir(dir.path().join(".opalro/tmp"))
+                .unwrap()
+                .next()
+                .is_none()
         );
     }
 }

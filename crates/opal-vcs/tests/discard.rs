@@ -532,3 +532,23 @@ fn a_path_two_saved_names_fold_to_is_refused_with_both() {
     assert!(said.contains("A.txt") && said.contains("a.txt"), "{said}");
     assert_eq!(env.standing(), before);
 }
+
+/// The person deleted the folder `d`. A discard of one file in it makes `d` again to hold that
+/// file, and only that file; one of a path neither the save nor the folder holds is refused and
+/// leaves `d` deleted. The step records only what changed, and `undo` gives back exactly what
+/// was there.
+#[test]
+fn discard_below_a_deleted_folder_makes_it_only_to_write_into_it() {
+    let env = project(&[("a.txt", "a\n"), ("d/x.txt", "x\n"), ("d/y.txt", "y\n")]);
+    fs::remove_dir_all(env.root().join("d")).unwrap();
+    let before = support::entries(env.root());
+    let said = refused(&env, &["d/z.txt"]);
+    assert!(said.contains("Nothing in your last save or your unsaved changes is at d/z.txt"));
+    assert_eq!(support::entries(env.root()), before);
+    discard(&env, &["d/x.txt"]);
+    assert_eq!(fs::read(env.root().join("d/x.txt")).unwrap(), b"x\n");
+    assert!(!env.root().join("d/y.txt").exists());
+    support::assert_step_records(&env, &before);
+    env.opalro().arg("undo").assert().success();
+    assert_eq!(support::entries(env.root()), before);
+}

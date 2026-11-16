@@ -4,7 +4,7 @@
 use std::path::Path;
 
 use crate::diary::{Action, DiaryEntry, FolderChange, MAX_SHELVES, Position, State, is_plain};
-use crate::drive::{self, Drive};
+use crate::drive::Drive;
 use crate::history::{ResolveError, tip_of};
 use crate::id::Id;
 use crate::journal::{Change, Journal};
@@ -569,6 +569,7 @@ fn throw_away(
         plan,
         drive,
         packs,
+        cache: None,
     };
     let applied = switch(repo, lock, to_make, who, command, earlier)?;
     // What had changed again since the plan stays as it is.
@@ -623,7 +624,7 @@ fn go(
     let (head, entry) = repo.current()?;
     let from = tip_of(&entry)?;
     let (position, to) = landing(repo, &entry.state, target)?;
-    let (plan, drive) = plan_switch(repo, from, to, git_excludes)?;
+    let (plan, drive, cache) = plan_switch(repo, from, to, git_excludes)?;
     let holds_conflicts = plan.holds_conflicts;
     let mut state = entry.state.clone();
     state.position = position.clone();
@@ -647,6 +648,7 @@ fn go(
         to,
         plan,
         drive,
+        cache,
     };
     let (applied, safety_copies, carried) =
         make_switch(repo, lock, planned, who, command, earlier)?;
@@ -662,21 +664,23 @@ fn go(
 }
 
 /// Plans switching the folder from the save `from` to `to`, as `goto` plans it: unsaved work in
-/// the way stops it with `Collisions`.
+/// the way stops it with `Collisions`. Gives the body of the file-state cache the read of the
+/// folder stored too, if that is known: the switch is made with it if nothing reads the folder
+/// in between.
 pub(crate) fn plan_switch(
     repo: &Repository,
     from: Id,
     to: Id,
     git_excludes: Option<&Path>,
-) -> Result<(Plan, Drive), SwitchError> {
-    let drive = drive::probe(repo.tmp_folder()).map_err(RepoError::from)?;
-    let plan = writeout::plan(repo, from, to, None, false, drive, git_excludes)?;
+) -> Result<(Plan, Drive, Option<Vec<u8>>), SwitchError> {
+    let drive = repo.drive()?;
+    let (plan, cache) = writeout::plan_keeping_cache(repo, from, to, drive, git_excludes)?;
     if !plan.collisions.is_empty() {
         return Err(SwitchError::Collisions {
             paths: plan.collisions,
         });
     }
-    Ok((plan, drive))
+    Ok((plan, drive, cache))
 }
 
 /// A switch from the save `from` to `to`, planned, to be made as one diary step after `head`
@@ -689,6 +693,8 @@ pub(crate) struct Planned<'a> {
     pub to: Id,
     pub plan: Plan,
     pub drive: Drive,
+    /// The file-state cache's body from `plan_switch`, if nothing read the folder since.
+    pub cache: Option<Vec<u8>>,
 }
 
 /// Makes a planned switch as `goto` does: safety copies of unsaved work kept first, then the
@@ -715,6 +721,7 @@ pub(crate) fn make_switch(
         plan: p.plan,
         drive: p.drive,
         packs,
+        cache: p.cache,
     };
     let applied = switch(repo, lock, to_make, who, command, earlier)?;
     Ok((applied, safety_copies, carried))
@@ -804,6 +811,8 @@ pub(crate) struct Switch {
     pub drive: Drive,
     /// What is stored with its diary entry.
     pub packs: PackSet,
+    /// The body `cache/files` holds now, if known; else the switch loads the file-state cache.
+    pub cache: Option<Vec<u8>>,
 }
 
 /// Makes a planned switch in this order: its packs and diary entry are stored, then
@@ -835,7 +844,7 @@ pub(crate) fn switch(
         actions: s.plan.actions.clone(),
     };
     journal.write(repo, lock)?;
-    let applied = writeout::carry_out(repo, lock, &journal, s.drive)?;
+    let applied = writeout::carry_out_with(repo, lock, &journal, s.drive, s.cache)?;
     crate::merge::merge_after_commit(repo, lock);
     let applied = switch_warnings(s.plan, applied, earlier);
     if !applied.in_use.is_empty() {
