@@ -1511,6 +1511,22 @@ fn parent(path: &str) -> &str {
     split(path).0
 }
 
+/// The entry of `listing` a typed name means: the one spelled so, or else the only one `drive`
+/// takes as the same name.
+fn named_as_typed<'l>(listing: &'l Listing, name: &str, drive: Drive) -> Option<&'l Entry> {
+    listing.get(name).or_else(|| {
+        let want = drive.compared(name);
+        let mut alike = listing
+            .entries()
+            .iter()
+            .filter(|e| drive.compared(&e.name) == want);
+        match (alike.next(), alike.next()) {
+            (Some(e), None) => Some(e),
+            _ => None,
+        }
+    })
+}
+
 /// Whether the entry at `path` belongs to a switch limited to `only`: it is at or below one of
 /// them, or is a folder that must be made on the way to one.
 fn in_scope(path: &str, only: Option<&Scope>, t: Option<&Entry>) -> bool {
@@ -2022,6 +2038,33 @@ impl<'a> Tree<'a> {
     pub(crate) fn entry(&mut self, path: &str) -> Result<Option<Entry>, StoreError> {
         let (up, name) = split(path);
         Ok(self.folder(up)?.and_then(|f| f.listing.get(name)).cloned())
+    }
+
+    /// The entry at a path as it was typed, each name matched exactly or, failing that, as
+    /// `drive` takes names when exactly one entry matches; with the path as stored.
+    pub(crate) fn entry_as_typed(
+        &mut self,
+        typed: &str,
+        drive: Drive,
+    ) -> Result<Option<(String, Entry)>, StoreError> {
+        let mut place = String::new();
+        let mut found = None;
+        for name in typed.split('/').filter(|n| !n.is_empty()) {
+            // `folder` has nothing below an entry that isn't a folder.
+            let Some(e) = self
+                .folder(&place)?
+                .and_then(|f| named_as_typed(&f.listing, name, drive))
+                .cloned()
+            else {
+                return Ok(None);
+            };
+            if !place.is_empty() {
+                place.push('/');
+            }
+            place.push_str(&e.name);
+            found = Some(e);
+        }
+        Ok(found.map(|e| (place, e)))
     }
 
     fn read(&self, id: Option<Id>) -> Result<Option<Folder>, StoreError> {

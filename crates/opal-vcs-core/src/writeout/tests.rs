@@ -2046,3 +2046,51 @@ fn throwing_away_many_unsaved_links_beside_a_conflict_reads_its_record_once() {
         Path::new("x.txt")
     );
 }
+
+#[test]
+fn a_typed_path_finds_the_stored_spelling_as_the_drive_takes_names() {
+    let (_dir, mut repo) = project();
+    let (save, _) = planted(
+        &mut repo,
+        &[
+            ("Docs/ReadMe.md", EntryKind::File, b"read me"),
+            ("Docs/Notes", EntryKind::File, b"upper"),
+            ("Docs/notes", EntryKind::File, b"lower"),
+            ("file", EntryKind::File, b"plain"),
+        ],
+    );
+    let root = repo.store().save(&save, false).unwrap().root;
+    let unstored = HashMap::new();
+    let listings = Listings::stored(repo.store(), &unstored);
+    let blind = Drive {
+        ignores_case: true,
+        composes_unicode: false,
+    };
+    let exact = crate::kept::EXACT;
+    let mut tree = Tree::new(&listings, root, blind);
+    let mut found = |typed: &str, drive: Drive| {
+        tree.entry_as_typed(typed, drive)
+            .unwrap()
+            .map(|(place, e)| (place, e.name))
+    };
+    let at = |place: &str| {
+        Some((
+            place.to_owned(),
+            place.rsplit('/').next().unwrap().to_owned(),
+        ))
+    };
+    assert_eq!(found("Docs/ReadMe.md", exact), at("Docs/ReadMe.md"));
+    assert_eq!(found("Docs/ReadMe.md", blind), at("Docs/ReadMe.md"));
+    assert_eq!(found("docs/README.MD", blind), at("Docs/ReadMe.md"));
+    assert_eq!(found("docs/README.MD", exact), None);
+    assert_eq!(found("DOCS", blind), at("Docs"));
+    // Two names alike but for case: the exact one, or none.
+    assert_eq!(found("Docs/notes", blind), at("Docs/notes"));
+    assert_eq!(found("docs/Notes", blind), at("Docs/Notes"));
+    assert_eq!(found("Docs/NOTES", blind), None);
+    // Nothing through a file, nothing missing, nothing for no path.
+    assert_eq!(found("file/x", blind), None);
+    assert_eq!(found("FILE/x", blind), None);
+    assert_eq!(found("Docs/gone", blind), None);
+    assert_eq!(found("", blind), None);
+}

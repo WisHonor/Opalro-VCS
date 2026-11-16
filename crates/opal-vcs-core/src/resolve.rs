@@ -33,7 +33,7 @@ use crate::store::{Store, StoreError};
 use crate::switch::{Earlier, Planned, SwitchError, locked, make_switch};
 use crate::text::{escape, thousands};
 use crate::warning::Warning;
-use crate::writeout::{self, Applied, fold_path};
+use crate::writeout::{self, Applied, Tree, fold_path};
 
 /// How many places still in conflict an outcome names; it counts the rest.
 pub const LISTED: usize = 100;
@@ -809,35 +809,8 @@ fn conflict_on(
 ) -> Result<Option<(String, Id)>, ResolveError> {
     let unstored = HashMap::new();
     let listings = Listings::stored(store, &unstored);
-    let names: Vec<&str> = path.split('/').filter(|n| !n.is_empty()).collect();
-    let (mut at, mut place) = (root, String::new());
-    for (i, name) in names.iter().enumerate() {
-        let listing = listings.read(&at)?;
-        let found = listing.get(name).or_else(|| {
-            let want = drive.compared(name);
-            let mut alike = listing
-                .entries()
-                .iter()
-                .filter(|e| drive.compared(&e.name) == want);
-            match (alike.next(), alike.next()) {
-                (Some(e), None) => Some(e),
-                _ => None,
-            }
-        });
-        let Some(e) = found else {
-            return Ok(None);
-        };
-        if !place.is_empty() {
-            place.push('/');
-        }
-        place.push_str(&e.name);
-        match e.kind {
-            EntryKind::Conflict if i + 1 == names.len() => return Ok(Some((place, e.id))),
-            EntryKind::Folder if i + 1 < names.len() => at = e.id,
-            _ => return Ok(None),
-        }
-    }
-    Ok(None)
+    let found = Tree::new(&listings, root, drive).entry_as_typed(path, drive)?;
+    Ok(found.and_then(|(place, e)| (e.kind == EntryKind::Conflict).then_some((place, e.id))))
 }
 
 /// The folder `to` is in, opened once, and the name to make there, refused when that folder is

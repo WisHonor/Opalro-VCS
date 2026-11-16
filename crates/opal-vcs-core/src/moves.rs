@@ -420,7 +420,11 @@ fn noted(
 
 /// Whether a note is true of the save it is in: its file left `from` for `to` with the same
 /// non-empty contents, as a save's own notes are made.
-fn true_of(before: &mut Tree, after: &mut Tree, n: &MoveNote) -> Result<bool, StoreError> {
+pub(crate) fn true_of(
+    before: &mut Tree,
+    after: &mut Tree,
+    n: &MoveNote,
+) -> Result<bool, StoreError> {
     // An untrue note is mostly one whose file was never there: that is answered first.
     let Some(left) = file(before.entry(&n.from)?.as_ref()).map(|e| e.id) else {
         return Ok(false);
