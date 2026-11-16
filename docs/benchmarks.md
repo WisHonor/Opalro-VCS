@@ -1,6 +1,6 @@
 # Opalro Benchmarks
 
-> **Status:** started 2026-11-09 with the two speed gates for v0.1; Opalro against Git and Git LFS, the speeds of a save's parts and the ruling on compressing again were added the same day. A third gate, against Git on a code project, and the profile milestone 6 starts from (§7) were added on 2026-11-10; the numbers in §1 to §6 are from before milestone 6's speed work, and §8, added the same day, gives them after it; §9, added that day too, measures both halves of milestone 6 together; §10, added on 2026-11-11, has the gate's new rule for v0.1, its ten runs on the finished code, and the finished code beside `main` turn by turn; §11, added on 2026-11-14, has milestone 7's walk on Git's own history, and the gate before and after milestone 7 on the runners' new image, where `status` now sits at its limit; §12, added the same day, has milestone 8's common starting points and its search through every parent on Git's own history, the gate after milestone 8, and the cost of the move notes every save now works out; §13, added the same day, has a combine over saves that hold 100,000 move notes each; §14, added on 2026-11-15, has what the `conflicts` feature of milestone 9 costs `status` and `goto`. Every speed or size claim Opalro makes comes from this page, the ones Git or Git LFS wins included ([decision 088](decisions/088-benchmarks-and-the-speed-gates.md)).
+> **Status:** started 2026-11-09 with the two speed gates for v0.1; Opalro against Git and Git LFS, the speeds of a save's parts and the ruling on compressing again were added the same day. A third gate, against Git on a code project, and the profile milestone 6 starts from (§7) were added on 2026-11-10; the numbers in §1 to §6 are from before milestone 6's speed work, and §8, added the same day, gives them after it; §9, added that day too, measures both halves of milestone 6 together; §10, added on 2026-11-11, has the gate's new rule for v0.1, its ten runs on the finished code, and the finished code beside `main` turn by turn; §11, added on 2026-11-14, has milestone 7's walk on Git's own history, and the gate before and after milestone 7 on the runners' new image, where `status` now sits at its limit; §12, added the same day, has milestone 8's common starting points and its search through every parent on Git's own history, the gate after milestone 8, and the cost of the move notes every save now works out; §13, added the same day, has a combine over saves that hold 100,000 move notes each; §14, added on 2026-11-15, has what the `conflicts` feature of milestone 9 costs `status` and `goto`; §15, added on 2026-11-16, has what milestone 9 cost in time after all and what milestone 10 took back, timers inside `status` and `goto` with what each of a `goto`'s ten flushes is for, `opalro who` beside `git blame` on Git's own history, the gate on milestone 10's code, and the check before an amend. Every speed or size claim Opalro makes comes from this page, the ones Git or Git LFS wins included ([decision 088](decisions/088-benchmarks-and-the-speed-gates.md)).
 
 **In plain words.** Opalro promises three things before v0.1 (decisions [023](decisions/023-v0.1-speed-bar.md) and [099](decisions/099-a-third-speed-gate-within-twice-gits-time.md)): saving a huge file must not eat the computer's memory, asking what changed in a big project must be quick, and on an everyday code project Opalro must stay within twice Git's time. This page says how each was measured, on which machines, and what came out, pass or fail. It then puts Opalro beside Git and Git LFS on the same files, step by step, and says where each one wins.
 
@@ -1076,6 +1076,8 @@ The proof test asserts no time (a debug build still takes 13 seconds, almost all
 
 **In plain words.** From milestone 9 every new project can keep conflicts ([decision 178](decisions/178-the-conflicts-feature.md)), and almost none holds one at any given moment, so the ability must cost nothing until it is used ([decision 179](decisions/179-every-command-and-a-conflict.md)). On a project of 100,003 files it costs nothing that can be measured: `status` with the feature and no conflict is within 7 ms of `status` without it (medians of 36 runs each), where single runs spread over 155.8 ms with the feature and 253.4 ms without, and `goto`'s medians are 6.1 ms apart going back and 1.9 ms going forward. Three conflicts seven folders deep cost nothing that can be measured either.
 
+**Corrected in milestone 10 ([§15](#15-v02-milestone-10-who-the-amend-check-and-where-status-and-goto-spend-their-time)).** "Costs nothing" holds for what is read, not for time. Timed in turns on one of GitHub's Linux runners, milestone 9 made `status` about 4 to 5 % slower on the gate's code project, with the feature and without it, and `goto` about as much: a millisecond, which the laptop's spread below can't show. Milestone 10 took about two thirds of it back. The numbers below stand as measured.
+
 Measured on 2026-11-15 on the Windows laptop of §1 (AMD Ryzen 7 7730U, 8 cores (16 threads), 16 GB of RAM, a 1 TB NVMe SSD (WD PC SN560); Windows 11 Home 10.0.26200), with a release build of `milestone-9` at `2b639a4` (`cargo build --release -p opal-vcs`), by `bench/conflicts.py`. Everything here was measured; nothing is estimated.
 
 ### The project
@@ -1159,7 +1161,291 @@ The Nightly workflow, started by hand on `a695479` ([run 43768324503](https://gi
   | Linux again, EPYC 7763 | 22.3 ms, 11.6 ms, 1.924 | 28.6 ms, 26.7 ms, 1.072 | 32.6 ms, 15.0 ms, 2.180 |
   | Windows | 71.8 ms, 43.4 ms, 1.654 | 80.8 ms, 126.1 ms, 0.641 | 87.6 ms, 52.8 ms, 1.659 |
 
-- **`status` on Linux is over its limit on the Xeon and under it on the EPYC,** as in §11 and §12: the ratio depends on which processor the runner has. On the Xeon, Opalro's own time was 14.1 ms in this run, where milestone 8's run on the same processor type had 12.7 ms and §11's runs 13.1 to 13.9 ms. One run can't tell a slowdown of a millisecond from the spread between runners, and nothing was timed part by part; the engine's tests that count what is read say a project without conflicts reads nothing more than before. Whether `status` got slower is the first thing the next milestone's speed work times.
+- **`status` on Linux is over its limit on the Xeon and under it on the EPYC,** as in §11 and §12: the ratio depends on which processor the runner has. On the Xeon, Opalro's own time was 14.1 ms in this run, where milestone 8's run on the same processor type had 12.7 ms and §11's runs 13.1 to 13.9 ms. One run can't tell a slowdown of a millisecond from the spread between runners, and nothing was timed part by part; the engine's tests that count what is read say a project without conflicts reads nothing more than before. Whether `status` got slower is the first thing the next milestone's speed work times. (It did, by about a millisecond on that runner type: §15.)
 - **`goto` is over the v0.2 goal of twice Git's time** on Linux in both runs (2.297 and 2.180), and under it on Windows.
 - **The model test** ran 1,024 new cases in a release build beside its fixed pass: all five of its tests passed, in 143.7 s. The job was marked failed all the same: its last line still looked for "1 passed", from when the file held one test. That check now asks for at least one test passed and none failed.
 - Every other job passed: `status` on 100,000 unchanged files, the two sweeps, the move notes, the memory gate and the fuzz targets.
+
+## 15. v0.2, milestone 10: `who`, the amend check, and where `status` and `goto` spend their time
+
+**In plain words.** Four things were measured. First, §14 was wrong about time: milestone 9 made `status` and `goto` about a millisecond slower on GitHub's Linux runners, with or without conflicts. Milestone 10 found the commit, took about two thirds of it back, and stopped `goto` loading one cache twice; about 0.3 ms of `status` is still unexplained. Second, timers inside `status` and `goto` show where the time goes: mostly the walk of the folder, and, in a `goto`, ten waits for the disk (flushes) that make up a tenth of it on Linux. What each of those ten protects is written out below for the owner to rule on; nothing about them was changed ([decision 186](decisions/186-speed-before-v0.2.md)). Third, `opalro who` was run beside `git blame` on Git's own history: on four of five files the two named the same commit for 90 to 100 % of the lines, and on the fifth, which was renamed, for two thirds. Where they differ, no line was found where `who` named a save that neither wrote nor moved the line. `who` took 3 to 5 times `git blame`'s time. Fourth, the check before an amend: right after a save, an amend in a project with 300 old lines of 2,000 saves each took 4.35 ms on Linux, because it asks nothing of lines that haven't moved since the save was made; without its note of the save, 2.84 s.
+
+Everything here was measured on 2026-11-15 on GitHub's machines. The laptop of §1 was building all day, so none of it is the laptop's; where [decision 186](decisions/186-speed-before-v0.2.md) asked for the laptop, GitHub's Windows runner stands in.
+
+### What milestone 9 cost in time, and what came back
+
+§14 timed milestone 9 on the laptop and found nothing to measure; single runs there spread over 150 ms and more. Two builds timed in turns on one runner show a millisecond. [Run 43777174209](https://github.com/WisHonor/Opalro-VCS/actions/runs/43777174209), on an AMD EPYC 7763, timed `status` with nothing changed on the gate's code project (medians of 20 runs, five rounds in turns) and `goto` back to the first save (medians of 15, three rounds), in milliseconds:
+
+| | Before milestone 9 (`c3da2fc`) | After it (`33000cf`), a project with the `conflicts` feature | After it, a project without it |
+|---|---|---|---|
+| `status` | 21.15, 21.36, 21.46, 21.63, 21.42 | 22.51, 22.69, 22.42, 22.28, 22.79 | 22.47, 22.86, 22.43, 22.23, 22.49 |
+| `goto` | 29.59, 29.08, 28.83 | 30.45, 30.31, 30.64 | |
+
+So `status` went from about 21.4 to 22.5 ms (about 5 %) in every round, with the feature and without it, and `goto` by about 1.3 ms. The engine's tests that count what is read still held: the cost is time, not reads.
+
+[Run 43777645126](https://github.com/WisHonor/Opalro-VCS/actions/runs/43777645126), on an AMD EPYC 9V45, timed `status` with eight builds from along milestone 9, each on its own copy of the project, in turns (medians of 20 runs, four rounds; round 1 is noisy for the first two builds):
+
+| Build | `status`, ms |
+|---|---|
+| `c3da2fc` (before milestone 9) | 15.49, 14.58, 14.75, 14.63 |
+| `0cf86a7` (`tidy` and `verify` with conflicts) | 15.54, 14.37, 14.61, 14.51 |
+| **`04a143c` (the folder walk meets a conflict)** | **15.28, 15.01, 15.17, 15.29** |
+| `7f7093a` | 15.20, 15.07, 15.25, 15.18 |
+| `d2e9b31` | 15.29, 15.24, 15.40, 15.15 |
+| `6392c1b` | 15.35, 15.48, 14.94, 15.32 |
+| `d3426fb` | 16.62, 15.28, 15.33, 15.50 |
+| `33000cf` (after milestone 9) | 15.51, 15.33, 15.16, 15.34 |
+
+The step is between `0cf86a7` and `04a143c` (about 14.5 to 14.65 ms before, about 15.15 ms after: some 0.6 ms on this runner), and nothing after it adds more than the spread. The eight builds were eight different programs, growing in size with every commit, and the time steps once while the size keeps growing. `04a143c` is where the folder walk learned to meet a conflict, and its review had named three lookups it added for every file and left them as "can wait": the folder's last-saved listing looked up again for each file where it had been once per folder, a name looked up twice, and the conflict records looked up before the entry's kind was checked.
+
+**Two changes, and only these** ([decision 186](decisions/186-speed-before-v0.2.md) point 2: work done twice is done once; no write, flush or check changes):
+
+1. **The walk's lookups hoisted** (`c210a27`): the folder's listing once per folder, each name once, the kind before the records. Every entry is decided as before; its review went through each kind of entry, and a test now pins the one case nothing pinned (an entry that isn't a conflict, named under a record's ID).
+2. **The file cache handed on to the switch** (`66d3dde`). A `goto` loaded the file cache twice: beside the walk, as `status` does, and again when the switch is carried out. Now the read of the folder hands on the bytes it has just stored, and only the switch decodes them. As first built (`ef44594`), every read of the folder decoded the cache a second time to have it ready, `status`'s too, also where nothing would use it: `goto` 0.35 ms faster and `status` 0.31 ms slower, in every round. `status` is the command run most, so that form was turned down and rebuilt. The review of the rebuilt form went through every state the cache can be in and found the switch trusting exactly what a fresh load would have given.
+
+Three runs timed the builds in turns on one runner, each an Intel Xeon 6975P-C with 4 CPUs (`status` with nothing changed, 6 rounds of 20 runs; `goto` back to the first save, 4 rounds of 15; the mean of the rounds' medians, in milliseconds):
+
+| Build | [43795155022](https://github.com/WisHonor/Opalro-VCS/actions/runs/43795155022): `status` | `goto` | [43801977569](https://github.com/WisHonor/Opalro-VCS/actions/runs/43801977569): `status` | `goto` | [43805990843](https://github.com/WisHonor/Opalro-VCS/actions/runs/43805990843): `status` | `goto` |
+|---|---|---|---|---|---|---|
+| `c3da2fc` (before milestone 9) | 12.96 | 17.53 | 12.80 | 17.05 | 13.47 | 18.78 |
+| `33000cf` (after milestone 9) | 13.82 | 18.77 | | | | |
+| `0f78b6e` (milestone 10, before the changes) | 13.84 | 18.77 | 13.72 | 18.17 | | |
+| `c210a27` (the lookups hoisted) | **13.24** | **18.06** | 13.07 | 17.75 | 13.64 | 19.47 |
+| `ef44594` (the cache handed on, as first built) | | | 13.38 | 17.40 | 14.22 | 19.04 |
+| `66d3dde` (the cache handed on, as kept) | | | | | **13.71** | **18.96** |
+
+- **The lookups:** in the first run milestone 9's step was 0.86 to 0.88 ms of `status` (6.7 %), and hoisting the lookups took back 0.60 ms of it (68 %); for `goto` the step was 1.24 ms (7.1 %) and 0.71 ms came back (57 %). Kept.
+- **The cache, as first built:** `status` 0.31 ms slower than `c210a27` in every round of the second run, `goto` 0.35 ms faster. Turned down.
+- **The cache, as kept:** in the third run `status` took 13.71 ms against 13.64 without the change, inside the spread between rounds, and `goto` was 0.51 ms faster in every round, 0.18 ms over its time before milestone 9. Kept. (That runner was a little slower overall than the second run's: compare within a run.)
+- **What is left:** in the first run, 0.28 ms of `status` (2.1 %) and 0.53 ms of `goto` (3.0 %) over the time before milestone 9. Nothing measured points at a cause, and the search stopped there, under the half millisecond the milestone's plan set for it (the [follow-ups](plans/2026-11-01-milestone-1-follow-ups.md), "Deferred by milestone 10").
+
+### Where `status` and `goto` spend their time: the timers
+
+[Decision 186](decisions/186-speed-before-v0.2.md) asked for timers before anything about flushing is ruled on. A throwaway build printed how long each part took: the branch `gate/m10-timers` at `beacc4f`, which is `c210a27` (the lookups hoisted, the cache not yet handed on) with timers added, never merged.
+
+- **The runs:** [run 43798151295](https://github.com/WisHonor/Opalro-VCS/actions/runs/43798151295). Linux: image ubuntu24 20261111.370.1, AMD EPYC 7763, 4 virtual CPUs. Windows: image win25-vs2026 20261103.298.1, Intel Xeon Platinum 8573C, 2 cores and 4 logical processors, Windows Defender's real-time protection off.
+- **The project:** Git's source at v2.56.0 (`bench/data.sh code`), `opalro start --preset custom`, a save, `/* a small change */` added to `abspath.c`, a second save; 4,850 files in 226 folders on Linux, 4,964 in 233 on Windows; then 3 seconds of waiting, so the file cache trusts every file.
+- **What was timed:** 15 runs of `status` with nothing changed, then 15 pairs of `goto` to the first save and `goto main`, each writing `abspath.c`. Every figure is the median of the 15, in milliseconds, inside the process (from `main`'s first line to its last). Parts on other threads run beside the walk and are summed over their threads.
+- **What the timers cost:** `status` 5.0 % more on Linux and 4.2 % on Windows, `goto` 2.6 % and 2.4 % on Linux, timed with `hyperfine` with the timers off and on. Most of it is the timer around each of the 5,078 entries the walk judges, so read the walk's parts as up to about 0.5 ms high.
+- An earlier run ([43797590040](https://github.com/WisHonor/Opalro-VCS/actions/runs/43797590040)) drew other processors: `status` took 13.1 ms on an Intel Xeon 6975P-C, and 78.4 ms on Windows on an AMD EPYC 7763. The processor changes the totals by up to 1.7 times, so compare parts within one run.
+
+**`status` with nothing changed:**
+
+| | Linux runner | Windows runner |
+|---|---|---|
+| The whole command, inside the process | **21.63** | **47.60** |
+| Opening the project | 0.171 | 0.977 |
+| The diary lookup (twice) | 0.073 | 0.180 |
+| **Reading the folder, whole** | **20.876** | **45.475** |
+| the drive clock's file, whole (made, written, flushed, closed, its time read, removed) | 0.657, of which the flush 0.503 | 0.509, of which the flush 0.250 |
+| the drive name test | 0.069 | 0.423 |
+| **the walk of the folder, whole** | **16.920** | **41.083** |
+| before the walk: the top listing and setting up the rules | 0.622 | 1.704 |
+| **the walking thread** | **15.183** | **37.950** |
+| judging each of the 5,078 entries | 9.147 | 16.044 |
+| of which reading each folder's names (225 folders) | 5.357 | 9.129 |
+| of which opening each folder | 0.961 | 3.381 |
+| of which entering each folder (its ignore files) | 0.563 | 1.602 |
+| the last save's listing of each folder | 0.829 | 3.105 |
+| setting up each folder entered (rules, sorting its names) | 0.616 | 0.445 |
+| handing files to the looking threads (on Windows, waiting for room) | 0.967 | **14.343** |
+| the rest of the walking thread (paths, name checks, books), by difference | 3.6 | 4.0 |
+| waiting for the looking threads after the walk | 0.098 | 0.480 |
+| *beside the walk:* looking at each file, summed over 4 threads | 10.846 | 114.368 |
+| *beside the walk:* reading the last save's listings ahead | 2.866 | 3.740 |
+| *beside the walk:* loading the file cache (waited for afterwards) | 2.073 (0.000) | 1.694 (0.002) |
+| building the listings with the file cache's answers | 2.600 | 2.848 |
+| the file cache store (unchanged, so nothing written) | 0.139 | 0.100 |
+| **All flushes** (one: the drive clock's file) | **0.503** | **0.250** |
+| All renames (one: the drive name test's) | 0.016 | 0.165 |
+| Not covered inside the process (arguments, printing) | 0.23 | 0.42 |
+| Outside the process: starting and ending it | under 1 | about 9 |
+
+**`goto` to the first save (one file written):**
+
+| | Linux runner | Windows runner |
+|---|---|---|
+| The whole command, inside the process | **30.57** | **60.75** |
+| Opening the project | 0.183 | 1.014 |
+| Resolving the target | 0.130 | 0.463 |
+| Taking the change lock (of which writing `lock-info`, unflushed) | 0.293 (0.193) | 0.740 (0.415) |
+| **Planning, whole** | **23.318** | **49.964** |
+| the drive name test | 0.064 | 0.424 |
+| reading the folder, whole | 22.149 | 47.434 |
+| of which the walk | 16.959 | 41.387 |
+| of which the file cache written again (the file the last switch wrote is too new to trust) | 1.447 | 1.553 |
+| comparing the two saves, by difference | 1.1 | 2.1 |
+| **Making the switch, whole** | **5.229** | **7.086** |
+| safety copies of unsaved work (none here) | 0.934 | 1.966 |
+| storing the diary entry (the pack written, flushed, renamed, its folder flushed) | 0.829 | 0.664 |
+| writing the journal (written, flushed, renamed, its folder flushed) | 0.683 | 0.523 |
+| carrying it out (a second load of the file cache, `abspath.c` written and flushed with its folder, `head` moved, the journal removed) | 2.697 | 3.239 |
+| merging small packs (none merged) | 0.061 | 0.390 |
+| The file cache loaded twice: beside the walk, and again in carrying the switch out | 2.755 | 2.858 |
+| The diary lookup (4 times) | 0.131 | 0.417 |
+| Save records read (9) | 0.086 | 0.324 |
+| **All flushes** (10) | **3.277** (10.7 %) | **0.925** (1.5 %) |
+| **All renames** (7) | 0.778 (2.5 %) | 1.847 (3.0 %) |
+| Not covered inside the process (the save read back, printing, freeing) | 1.2 | 1.0 |
+| Outside the process: starting and ending it | under 1 | about 12 |
+
+`goto main` is the same within a few hundredths: 30.58 ms on Linux, with 10 flushes in 3.402 ms (11.1 %) and 7 renames in 0.786 ms; 60.22 ms on Windows, with flushes in 0.887 ms and renames in 1.906 ms. In 1 run of 15 the small packs were merged: 138 ms on Linux (that run took 168 ms), 244 ms on Windows, its pack's flush alone 72 ms (that run took 312 ms). The medians leave it out; anyone timing 15 `goto`s meets it once.
+
+**The ten flushes of a `goto`, in order** (every run made the same ten). On Windows a flush of a folder does nothing: Windows writes a rename through as it makes it ([decision 076](decisions/076-renames-reach-the-disk-on-windows.md)), so the five folder flushes show 0 there and the cost moves to the renames.
+
+| # | What is flushed | Linux | Windows |
+|---|---|---|---|
+| 1 | the drive clock's file (made in `.opalro/tmp`, flushed, removed again) | 0.431 | 0.208 |
+| 2 | the pack holding the diary entry, in `tmp/` | 0.485 | 0.122 |
+| 3 | `store/packs/`, after the pack is renamed in | 0.228 | 0.000 |
+| 4 | the journal, in `tmp/` | 0.389 | 0.190 |
+| 5 | `state/`, after the journal is renamed in | 0.210 | 0.000 |
+| 6 | `abspath.c`, written in `tmp/` | 0.397 | 0.164 |
+| 7 | the project's top folder, after `abspath.c` is renamed in | 0.241 | 0.000 |
+| 8 | `head`, in `tmp/` | 0.373 | 0.188 |
+| 9 | `state/`, after `head` is renamed in | 0.249 | 0.000 |
+| 10 | `state/`, after the journal is removed | 0.236 | 0.000 |
+| | **All ten** | **3.277** | **0.925** |
+
+On Linux the five files take about 0.4 ms each (2.1 ms together) and the five folders about 0.2 ms each (1.1 ms); three of the ten are `state/`, one after another.
+
+**The seven renames of a `goto`, in order:**
+
+| # | From, to | Flushed after? | Linux | Windows |
+|---|---|---|---|---|
+| 1 | `tmp/` to `state/lock-info` | no | 0.153 | 0.315 |
+| 2 | the drive name test's file to its accented name, in `tmp/` | no | 0.015 | 0.192 |
+| 3 | `tmp/` to `cache/files` (the file cache; in 14 of 15 runs of the first `goto`, and every `goto main`) | no | 0.356 | 0.382 |
+| 4 | `tmp/` to `store/packs/<pack>.pack` | yes (#3) | 0.028 | 0.210 |
+| 5 | `tmp/` to `state/journal` | yes (#5) | 0.021 | 0.202 |
+| 6 | `tmp/` to `abspath.c` in the project | yes (#7) | 0.107 | 0.262 |
+| 7 | `tmp/` to `state/head` | yes (#9) | 0.104 | 0.263 |
+| | **All seven** | | **0.778** | **1.847** |
+
+**What the timers show:**
+
+- **Most of `status` is the walk,** and a quarter of it on Linux is reading each folder's names (5.4 of 21.6 ms; 9.1 of 47.6 on Windows). Flushes are 2.3 % of `status` and 11 % of `goto` on Linux, 0.5 % and 1.5 % on Windows.
+- **On Windows the walk waits for the looking threads:** handing files over takes 14 ms of the walking thread's 38. One look at a file costs 23.6 µs there, against 2.2 µs on Linux, and four threads don't keep up, so the queue fills. On Linux the hand-over is 1 ms. It is the largest part of `status` on Windows that is waiting rather than work.
+- **On Windows the seven renames of a `goto` cost more than its flushes** (1.85 against 0.93 ms), at 0.2 to 0.4 ms each.
+- **About 9 ms of `status` and 12 ms of `goto` on Windows** go to starting and ending the process, outside `main` (`hyperfine`'s whole time against the time inside `main`, measured minutes apart: a size, not a figure). On Linux it is under 1 ms.
+- **The file cache was loaded twice in every `goto`** (2.76 ms together on Linux; the second load, on the main thread, about 0.7 ms by difference). That was the work done twice that the second change above took out; since `66d3dde` a `goto` loads it once.
+- **Small reads repeated:** the diary lookup twice in `status` and 4 times in the first `goto`, the save record 9 times, the change-ID cache loaded twice in the first `goto`: under 0.5 ms together.
+
+### For the owner's ruling: what each flush is for
+
+[Decision 186](decisions/186-speed-before-v0.2.md) point 3 leaves what is flushed, and when, to the owner. This part is the evidence for that ruling and recommends nothing. It is the measurer's reading of the code as it stood at `c210a27` and of the decisions; a sentence marked **(inferred)** is the measurer's own reading where the code and the documents don't say it. The project's documents say nothing about the order in which a drive puts changes to different files or folders on the disk; where an answer depends on that order, the entry says so. The costs are the medians above.
+
+**How the next command recovers, as the code has it.** Every changing command, under the lock, reads `state/journal` (its checksum checked first). It removes the journal if `head` already names the journal's target. Otherwise the journal must be usable (`head` equal to the journal's `from`, and its target entry readable from the store), and it is carried out again, each change checked against the folder just before it is made: what is there must be what the plan found, or already what the switch puts there, and anything else is left as it is and listed. A missing or garbled `head`, or one naming an entry the store can't give, is a lost `head`, which [decision 075](decisions/075-crash-recovery.md) leaves to `undo --list` and `undo --to`. A pack whose bytes are wrong is reported as damaged ([security.md](security.md) T9).
+
+**Why they are there.** [Decision 100](decisions/100-caches-are-written-without-a-flush-and-only-when-they-changed.md) lists what stays flushed: "Everything a command's result rests on is still flushed as before: packs, `state/head`, `state/journal` and its removal, `format`, each file a switch writes and the folders it changes." That is the stated reason for flushes 2 to 10; [decision 049](decisions/049-writing-files-one-at-a-time.md) sets their order.
+
+| # | What | Where in the code | With the flush, a crash leaves | Without it, a crash could leave | Dropping it gains (Linux, Windows) |
+|---|---|---|---|---|---|
+| 1 | The drive clock's file | `filecache::drive_now` | (see below) | (see below) | 0.431, 0.208 |
+| 2 | The diary's pack | `PackWriter::finish_into` ([decision 009](decisions/009-storage-engine.md): a pack becomes visible only when complete; [storage-format.md](storage-format.md): the flush before the rename "is the one that counts") | the pack whole, or still in `tmp/`, cleared as a leftover | a renamed pack holding fewer bytes than it should (inferred): reported as damaged; the journal's target entry then doesn't read, so finishing stops with an error, not a recovery (inferred from `usable`); and if `head` had moved, a lost `head` (inferred) | 0.485, 0.122 |
+| 3 | `store/packs/` | `fsio::rename_durable`, called from `finish_into` ("so the move survives a crash") | the pack's name on the disk | whether the pack's name can be lost while the later renames into `state/` survive depends on the drive's order; if it can (inferred), the journal or `head` names an entry not in the store: the same error or lost `head` as #2. It can't be folded into #5: another folder | 0.228, 0 |
+| 4 | The journal | `Journal::write`, through `fsio::write_atomic` ("whole, flushed and renamed into place") | the journal whole | a journal renamed into place but cut short (inferred): it fails its checksum, and every changing command stops with an error ("can't be read"), a state recovery doesn't handle (inferred) | 0.389, 0.190 |
+| 5 | `state/` after the journal comes in | `rename_durable`, inside `write_atomic`; decision 049's order: the journal before the first change to the folder | the journal's name on the disk before any file of the project changes | after a power cut, a folder half switched, with `head` on the old entry and no journal (inferred): nothing finishes the switch, and the switched files look like unsaved changes (inferred) | 0.210, 0 |
+| 6 | The file written | `Run::write_file` ("through a file in `.opalro/tmp`, flushed, then renamed into place"); decision 100's "each file a switch writes" | the file whole under its name | the name in place with its bytes missing or cut short (inferred): a replay finds neither what the plan found nor what the switch puts there, so it leaves it and lists it, and the person's file stays damaged (inferred); if `head` had moved and the journal was gone, nothing looks at the file again (inferred) | 0.397, 0.164 |
+| 7 | Its folder | `Run::finish`; decision 100's "the folders it changes"; one flush per folder changed (inferred) | the file's rename on the disk before `head` moves | whether the file's rename can be lost while `head`'s survives depends on the drive's order; if it can (inferred), `head` names the new save, the journal is gone and the folder holds the old file: `status` shows it as an unsaved change and nothing finishes the switch (inferred) | 0.241, 0 |
+| 8 | `head` | `Repository::move_head_to`, through `fsio::write_head`; the storage format: `head` "is always replaced whole: written to `tmp/`, flushed to disk, then renamed"; decision 075: a command "takes effect when `head` moves" | `head` whole | `state/head` empty or cut short (inferred): a lost `head`, which `undo --list` and `undo --to` handle only by the person's hand, every command stopping until then | 0.373, 0.188 |
+| 9 | `state/` after `head` | `fsio::rename_reported` ("`rename_durable` for `state/head`, whose move is the moment a command happens"); decision 075: a failed flush here is a `head_not_flushed` warning, the command done | the new `head` on the disk before the journal is removed | the old `head` back after a power cut: alone, that is the state before the command, with the journal there to finish it; what matters is its order against #10 (below) | 0.249, 0 |
+| 10 | `state/` after the journal is removed | `Journal::remove`, called by `writeout::carry_out` ("The head's own flush came first, so a power cut can only bring the journal back"); the storage format: "removed (the removal flushed too)" | the journal gone for good | the journal back after a power cut with `head` already on its target. The code handles that state: the next changing command sees `head` equal to the journal's target and only removes the journal; a command that moves `head` itself removes such a journal first; a reading command says a command stopped "just after it was done". (A failed flush here is a warning in `carry_out` but an error in `remove_before_head`.) | 0.236, 0 |
+
+**Could two flushes of `state/` be one?**
+
+- **#5 and #9: no.** The project's files are renamed between them (#6 and #7), and decision 049's order needs the journal on the disk before the first change to the folder.
+- **#9 and #10:** one flush after both would leave the same bytes on the disk once it finishes. The difference is what a power cut *before* it could leave: the old `head` with the journal (handled: the switch is carried out again); the new `head` with the journal (handled: the journal is only removed); the new `head` without the journal (the command is done); and **the old `head` without the journal, which nothing handles**: the folder would hold the new save's files with nothing to finish or explain them, and `status` would show them as unsaved changes (inferred). Today #9 makes that fourth state impossible, since the journal is removed only after `head`'s rename is flushed, and the comment at the call site rests on exactly that. For one flush to do, a drive would have to never put the journal's removal on the disk before the earlier rename of `head` in the same folder; no project document says that. On Windows both are written through as they are made, so the question doesn't arise, and both flushes already cost 0.
+- **#10 dropped altogether,** rather than folded into #9, leaves only states the code handles. It gains 0.236 ms on Linux and nothing on Windows.
+
+**The drive clock's file (#1), the one flush `status` makes.** It is made at the start of every read of the folder (`filecache::drive_now`), so in `status` and in the plan of every `goto`. Its doc comment: "The drive's own 'now': the modified time of a file written in `.opalro/tmp`, since a network or FAT drive's clock and resolution may differ from this computer's", "Read once closed: some network drives set the time only then." [Decision 053](decisions/053-file-state-cache.md) asked for the file, and [decision 100](decisions/100-caches-are-written-without-a-flush-and-only-when-they-changed.md) already considered dropping its flush (its option C) and refused: "the 2-second rule's clock stays exactly as it is, since the gain is small and 'nil risk' can't be shown for every network drive", since "some network drives set a file's time only when its bytes reach them".
+- A crash: the file is a throwaway in `tmp/`, cleared at the next start; with or without the flush, a crash leaves nothing recovery reads.
+- The risk is not a crash. Without the flush, on such a network drive the time read could be wrong, and the 2-second rule could then trust a file changed within one tick of the clock, so `status` would miss that change (inferred from decision 053's purpose).
+- Dropping the flush would gain 0.503 ms of `status` (2.3 %) and 0.431 of `goto` on Linux, 0.250 and 0.208 on Windows. The whole file costs 0.657 ms on Linux and 0.509 on Windows (made, 3 bytes written, flushed, closed, its time read, removed; the removal 0.10 ms of it).
+
+**The other things the timers showed, not touched,** each being a write, a flush or a check (decision 186 point 3), or under the bar:
+
+- **The file cache written again after every switch** (`keep_file_cache`, at the end of the read of the folder): 1.447 ms on Linux and 1.553 on Windows, plus its rename, 0.356 and 0.382. Decision 100 has it written "only when it changed" and never flushed ("A cache a crash tore fails its seal and is rebuilt"); it changed here because the `goto` before had written `abspath.c`, under 2 seconds old and so not to be trusted yet (inferred; partly a result of running `goto`s back to back). With no flush, a crash can leave it missing, older or torn; "no command's result changes" (decision 100).
+- **`lock-info` written in every `goto`** (`Repository::lock_for_change`, through `fsio::write_unflushed`): 0.193 ms on Linux and about 0.42 on Windows. It feeds the "waiting for another command" message, "is only informational and may be stale" (the storage format), and decision 100 asked that it not be flushed. A crash can leave it missing or old, and a waiting command would show an old or empty text (inferred from the storage format).
+- **The drive clock's flush in every command** that reads the folder: above.
+- **The three flushes of `state/`:** above.
+- **The renames on Windows:** 0.2 to 0.4 ms each, more than the flushes there.
+- **The walk waiting for the looking threads on Windows:** threading the walk changes the module that decides what a save holds, which decision 186 point 3 leaves alone (the [follow-ups](plans/2026-11-01-milestone-1-follow-ups.md), "Deferred by milestone 6: speed and space").
+
+### `who` against `git blame` on Git's own history
+
+The Nightly workflow's differential job (job 133075538391 in [run 43799383187](https://github.com/WisHonor/Opalro-VCS/actions/runs/43799383187), on `11a2bb9`) imported Git's own repository and ran `opalro who` and `git blame` on five files at its tip:
+
+| File | Lines | `who` | `git blame` | The same commit named |
+|---|---|---|---|---|
+| `Makefile` | 4,146 | 3.38 s | 0.94 s | 90.3 % of lines |
+| `diff.c` | 7,846 | 3.42 s | 1.01 s | 94.4 % |
+| `git-compat-util.h` | 1,145 | 1.94 s | 0.51 s | 94.6 % |
+| `README.md` | 75 | 0.93 s | 0.31 s | 66.7 % |
+| `t/t8002-blame.sh` | 173 | 4.62 s | 0.93 s | 100 % |
+
+**`who` took between 3.0 and 5.0 times `git blame`'s time** on these files. Both programs counted the same number of lines in each.
+
+**Where they differ, and whether `who` is right there.** A side run looked at every line of the five on which the two differ: the branch `gate/m10-who-diff`, [run 43801020994](https://github.com/WisHonor/Opalro-VCS/actions/runs/43801020994) at `431d087` (the code of `11a2bb9`, the engine and the command unchanged, with a throwaway test and script) and a second look at the merges and moved lines in [run 43801701273](https://github.com/WisHonor/Opalro-VCS/actions/runs/43801701273) (Git only). Git's source was git/git's `master` at `7fb6055e678f800320d8ab8cd8f201d9493d1ba0`, the Nightly's own clone, imported whole: 86,289 commits (98 not exact, none skipped). `git blame` was Git 2.56.1's plain `git blame --porcelain <tip> -- <file>`, and `who` ran as `opalro who <file> --save master --json`, each save matched to its commit by the commit ID the import recorded; `who` was coarse on no file, and the share of lines that agree matched the Nightly's exactly. Each differing line was put into the first class that fits:
+
+| File | Lines | Differ | A rename | A line ending | Text that repeats in the file | At a merge | None of these |
+|---|---|---|---|---|---|---|---|
+| `Makefile` | 4,146 | 402 | 0 | 0 | 381 | 0 | 21 |
+| `diff.c` | 7,846 | 441 | 0 | 0 | 427 | 6 | 8 |
+| `git-compat-util.h` | 1,145 | 62 | 0 | 0 | 61 | 0 | 1 |
+| `README.md` | 75 | 25 | 23 | 0 | 2 | 0 | 0 |
+| `t/t8002-blame.sh` | 173 | 0 | 0 | 0 | 0 | 0 | 0 |
+| **All** | **13,385** | **930** | **23** | **0** | **871** | **6** | **30** |
+
+**A check that needs no diff.** Where a line's text appears once in the file, the commit named can be checked directly: it wrote the line if its version holds the text and none of its parents' versions does. Where the text appears more than once, it can't be checked this way.
+
+| File | `who` right | `who` wrong | `who` can't be checked | `git blame` right | `git blame` wrong | `git blame` can't be checked |
+|---|---|---|---|---|---|---|
+| `Makefile` | 16 | 8 | 378 | 10 | 13 | 379 |
+| `diff.c` | 14 | 2 | 425 | 6 | 9 | 426 |
+| `git-compat-util.h` | 1 | 0 | 61 | 1 | 1 | 60 |
+| `README.md` | 16 | 0 | 9 | 16 | 0 | 9 |
+| `t/t8002-blame.sh` | 0 | 0 | 0 | 0 | 0 | 0 |
+| **All** | **47** | **10** | **873** | **33** | **23** | **874** |
+
+(`README.md`'s 16 "right" for `who` hold only in the check's terms: no parent has `README.md`, so the check can't see the rename.)
+
+- **No line was found where `who` named a save that neither wrote nor moved the line.** All 10 of `who`'s answers that fail the check are lines that moved. Eight are pairs of neighbouring lines that a commit sorting `Makefile`'s lists swapped: any line-up of the two versions must call one of the pair new; `who` calls one new and Git's diff the other, and on the neighbouring line `git blame` makes the same choice `who` made here. Both are shortest line-ups. The other two are in `diff.c`: on line 2103, Git's own diff of the commit `who` named shows the line as added, at the head of a new function, so `who`'s answer is the one that follows the code (inferred); on line 4622, the same change was made twice on two lines of history, both programs named one of the twins, and both are right in substance (inferred).
+- **The rename (`README.md`, 23 lines):** Git follows `README` to `README.md`; `who` stops at the commit that made `README.md`, since an import records no moves ([decision 184](decisions/184-opalro-who-the-save-behind-each-line.md), its correction).
+- **At a merge (`diff.c`, 6 lines):** on five, `git blame` names the merge itself, whose first parent lacks the text and whose second parent holds it; `who` names the second parent's commit, which the check proves wrote the lines. There `who` is right and Git is not. The sixth is line 4622 above.
+- **None of these (30 lines):** the 16 lines of the swapped pairs; 11 where `who` passes the check and Git names a later commit that only moved the line, often through a merge's second parent; and 4 (`diff.c` 416, 420, 786 and 795) where the same text was written twice on two lines of history and each program took the other side of a merge. Across the 30, `who` passes the check on 21 and Git on 13.
+- **The repeats (871 lines):** a weaker check (the commit's version holds more copies of the text than its first parent's) holds for `who` on 821 and for `git blame` on 802. It looks only at the first parent, so a line that came in through a merge's second parent fails it without being wrong.
+- **Not looked at:** the 50 repeated lines on which the weaker check fails for `who`, one by one (so on those `who`'s choice was not shown to be a possible one); Git's source, to confirm that its blame hands a whole file to a parent whose file is identical (read from the output of 4 merges, inferred); `git blame -M` and `-C`; other files; whether the import's 98 inexact commits touch these files.
+
+**The one rule on which the two differ by design** ([decision 184](decisions/184-opalro-who-the-save-behind-each-line.md), its correction). Where a combine's file is byte for byte what a parent other than the first holds (the combine took the other line's version whole), `git blame` hands the whole file to that parent; `who` keeps its one rule, the first parent first. A line both lines hold, written on each separately, is then named for the save on the first parent's side by `who` and for the one on the other side by Git; both saves wrote it. In the side run, Git named the second parent's side at all 4 merges whose file was identical to their second parent's, `who` the first parent's: that is 3 of the "none of these" lines and line 4622. Git's rule is put to the owner ([the follow-ups](plans/2026-11-01-milestone-1-follow-ups.md), "For the owner to decide"). On generated histories, where every line's text is unique but for a line both sides of a merge may add, `who` and `git blame` name the same commit for every line compared; the generator keeps out that one shape, and fixed tests pin what each program answers there ([testing.md](testing.md) §3).
+
+### The gate on milestone 10's code
+
+`bench/run.sh gate` in the same Nightly run on `11a2bb9`, which has the walk's lookups hoisted and not yet the cache handed on (Opalro's median, Git's median, the ratio; limits: `status` and the small save 2, `goto` 3.5, with 2 the goal for `goto` in v0.2):
+
+| Runner | `status` | Small save | `goto` |
+|---|---|---|---|
+| Linux, AMD EPYC 9V74 | 18.2 ms, 10.8 ms, 1.683 | 24.5 ms, 25.0 ms, 0.983 | 26.9 ms, 13.9 ms, 1.934 |
+
+- Both speed gates passed, Linux's and Windows'.
+- **`goto` was under twice Git's time on this runner (1.934),** where §14's run on the milestone before had it at 2.297 on a Xeon 6975P-C and 2.180 on an EPYC 7763. These are different processors, and §6 and §11 show the ratio depends on which one a runner has, so one run on an EPYC 9V74 doesn't show `goto` under twice Git's time on the others. The timers above say what stands between: on Linux the ten flushes alone are 3.3 ms of a 30.6 ms `goto`.
+- `status` at 1.683 has room on this runner; §11 to §14 have it over 2 on a Xeon 6975P-C, where Git is quick.
+
+### The check before an amend
+
+[Decision 185](decisions/185-save-amend-and-a-save-something-else-holds.md) promises that an amend of a save Opalro has just made reads nothing of the other lines: when a command makes a save it leaves a note of it in `cache/last-made`, and the amend then asks only about the lines, tags and server lines that are new or have moved since. That is asserted by counting the saves read, never by a clock ([testing.md](testing.md) §3), in `crates/opal-vcs-core/src/snapshot.rs`: `an_amend_right_after_a_save_reads_no_save_of_another_line` (300 old lines of 20 saves read nothing more than the same amend with none), `after_a_save_on_one_other_line_only_that_line_is_asked_about`, `the_red_team_s_shape_in_small_reads_only_the_line_worked_on`, `after_another_line_moved_without_a_save_only_that_line_is_asked_about` and `without_a_note_every_other_line_is_asked_about_once`; and in `crates/opal-vcs/tests/redteam13.rs`, on Linux, `an_amend_of_a_save_just_made_reads_a_quarter_or_less_of_what_it_reads_without_its_note`, by the bytes the process read.
+
+**Timed once:** [run 43806787547](https://github.com/WisHonor/Opalro-VCS/actions/runs/43806787547), on the branch `gate/m10-who-diff` at `835895c`, ran milestone 10's code at `7576db0` in a release build: `amend_in_a_project_of_300_old_lines_timed` (in `redteam13.rs`; ignored unless asked for, and it asserts nothing on a clock). The project is imported from Git: `main` of two commits, and 300 lines of 2,000 commits each that parted from it at its first (the red team's shape). Then a save, an amend right after it, the note removed (`cache/last-made`), and another amend, which must ask about every other line. One run each:
+
+| | Linux, Intel Xeon 6975P-C | Windows (image windows-2025-vs2026 20261103.298.1; the processor's name wasn't printed) |
+|---|---|---|
+| An amend right after a save | 4.35 ms (4.345793 ms printed) | 172.8 ms |
+| An amend with no note | 2.84 s (2.839164823 s) | 10.64 s |
+
+The amend with no note is the slow case decision 185 accepts, paid once: the amend it allows leaves a note. Decision 112's red team measured the old check at 19 to 21 s an amend in this shape, on another machine and build, so the two aren't compared. If the slow case bites, a table of the saves each line reaches is the next step (the [follow-ups](plans/2026-11-01-milestone-1-follow-ups.md)).
+
+### Not measured
+
+- The laptop's run of the timers, which decision 186 asked for beside GitHub's Linux runner: GitHub's Windows runner stands in.
+- The slow case of the amend on Git's own history, with its tags and server lines, which decision 185 point 5 also names.
+- The gate on the milestone's last code, after the cache was handed on: the Nightly run that closes the milestone.

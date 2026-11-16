@@ -606,7 +606,7 @@ Each row is the save's change ID (type it into `opalro show` to see the whole sa
 opalro who todo.txt --save main
 ```
 
-Through a combined save, each line is named for the save on the line it came from; what the combine wrote itself, such as your fix of a conflict, is the combined save's. A file a save moved is followed back to where it was, when the save recorded the move. A file that isn't text, or is over 64 MiB or 1,000,000 lines, is refused, as `opalro changes` shows no lines for it.
+Through a combined save, each line is named for the save on the line it came from; what the combine wrote itself, such as your fix of a conflict, is the combined save's. A file a save moved is followed back to where it was, when the save recorded the move. A project imported from Git has no moves recorded, so there `opalro who` follows no rename, where `git blame` does. Where a combine took the other line's version of a file whole, a line both lines wrote is still named for the save on your line, where `git blame` names the other line's. A file that isn't text, or is over 64 MiB or 1,000,000 lines, is refused, as `opalro changes` shows no lines for it.
 
 ### `opalro goto`
 
