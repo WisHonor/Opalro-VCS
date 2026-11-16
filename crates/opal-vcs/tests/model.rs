@@ -2020,7 +2020,8 @@ fn count_settled(before: &BTreeMap<String, Kept>, after: &Tree) {
 }
 
 /// `save <path>`: the place at or below `path` settled as a full save settles it, everything
-/// else as the save the project is on holds it.
+/// else as the save the project is on holds it, except that a folder gone from the working
+/// folder goes from the save too once the save takes away the last of what it held.
 fn save_only(repo: &mut Repository, m: &mut Model, path: &str) {
     let who = who();
     let only = [Given::Path(path.to_owned())];
@@ -2042,6 +2043,18 @@ fn save_only(repo: &mut Repository, m: &mut Model, path: &str) {
     let tip = m.saves[m.state.on].stored.clone();
     let mut stored = tip.clone();
     stored.take(path, &settled(&m.folder, &tip));
+    let holds_below = |t: &Tree, up: &str| {
+        let mut all = t.files.keys().chain(&t.folders).chain(t.kept.keys());
+        all.any(|p| p != up && within(p, up))
+    };
+    let mut up = path;
+    while let Some((above, _)) = up.rsplit_once('/') {
+        let gone = !m.folder.folders.contains(above);
+        if gone && holds_below(&tip, above) && !holds_below(&stored, above) {
+            stored.remove(above);
+        }
+        up = above;
+    }
     let named = |p: &String| within(p, path);
     match done.unwrap() {
         SaveOutcome::Saved {
