@@ -61,11 +61,11 @@ Opalro writes the terminal's own colours (SGR codes), never RGB, and ends each s
 | `…` | `...` | something cut short; work in progress |
 | `█` `░` | `#` `.` | the cells of a progress bar |
 
-Opalro draws no boxes, banners or rules beyond that separator.
+Opalro draws no boxes, banners or rules beyond these two separators.
 
 ## 5. Layout
 
-- **The outcome line** is first, starts at the left edge with what happened in the past tense, and is one line. A command that only reports (`status`, `history`, `line`, `show`) starts with where you are instead. "Nothing to …" lines are plain, and the command ends with exit code 0.
+- **The outcome line** is first, starts at the left edge with what happened in the past tense, and is one line. A command that only reports (`status`, `history`, `line`, `show`) starts with where you are instead; `who`, which only reports too, starts with what it shows (`Each line of <path> and the save it is from:`, §12). "Nothing to …" lines are plain, and the command ends with exit code 0.
 - **Details** come after one empty line, indented 4 spaces. Bullets are the bullet symbol and one space. On a terminal a detail that is a sentence wraps as §6 says, its later lines starting under its text: 4 spaces in, or under the text after a bullet or a check mark when the line starts with one. The outcome line is one line and is never wrapped; the rows of lists and tables are cut as §7 says, never wrapped.
 - **Text from the project or a Git repository** (a name, a path, a message) is never broken by wrapping and never starts a line 4 spaces in, where it could pass for one of Opalro's details. Where it doesn't fit beside the words that introduce it, it goes on a row of its own, 4 spaces further in than the text of its detail (8 in for a plain detail, 10 under a bullet or a check mark), as the rows of a list are; a row still too long runs long. A command Opalro names inside a sentence (`opalro status`) is never broken either.
 - **Lists with a place marker** put the marker at the left edge and start every other row with two spaces.

@@ -26,6 +26,24 @@ On five files of Git's own history, `opalro who` took 3 to 5 times `git blame`'s
 
 **What to do:** for a file renamed in Git, `git blame` still works in the Git repository you imported from: the import never changes it.
 
+## `opalro who` stops in a project whose `.opalro/tmp` can't be written
+
+`opalro who` changes nothing in the project, but, like every command given a path, it makes an empty file in `.opalro/tmp` for a moment, and removes it again, to learn how the drive compares names. Where that file can't be made (a project on a drive you may only read, say), it stops with `error: Opalro couldn't make a file in` the project's `.opalro/tmp` folder and the system's reason.
+
+**What to do:** work on a copy of the project in a folder you can write to.
+
+## `opalro status` is at its limit on Linux on some machines
+
+With nothing changed, `opalro status` is held to twice Git's time. In eight runs on GitHub's Linux machines it took 1.68 to 2.29 times Git's time, over twice in five: a matter of milliseconds (13 to 22 ms against Git's 6 to 13).
+
+**What to do:** nothing; it is only slower.
+
+## An amend can take seconds in a project with hundreds of lines
+
+`opalro save --amend` first checks that nothing else holds the save. Right after a save, Opalro keeps a note that makes this quick (4.35 ms on Linux, in a project with 300 old lines of 2,000 saves each). Without that note, the same amend took 2.84 s on Linux and 10.64 s on Windows.
+
+**What to do:** nothing; it is only slower.
+
 ## Files another program has open, on Windows
 
 On Windows, a program that holds a file open (an editor, a game engine, a preview) stops Opalro from writing over it. The commands that write files in your folder (`opalro goto`, `opalro combine`, `opalro discard`, `opalro shelf`, `opalro unshelf`, `opalro undo`, `opalro redo` and `opalro setup --preset`) write everything else, name the file, and stop.

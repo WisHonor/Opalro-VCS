@@ -1,6 +1,6 @@
 # Opalro
 
-Opalro is a version control system for code and large binary files together, with its own engine and storage format: it is not built on Git. You save versions of your project, go back to any of them, try ideas on lines of their own, and take back any command that changed your project with `opalro undo` (a save, a switch to another save, a discard of unsaved work, a shelf, a change of rules; it doesn't take back `opalro tidy`, which frees space, or the starting of the project itself). Big files are cut into chunks, so a change to part of a file stores only the part that changed.
+Opalro is a version control system for code and large binary files together, with its own engine and storage format: it is not built on Git. You save versions of your project, go back to any of them, try ideas on lines of their own, and take back any command that changed your project with `opalro undo` (a save, a switch to another save, a discard of unsaved work, a shelf, a change of rules; it doesn't take back `opalro tidy`, which frees space, `opalro setup --upgrade`, after which Opalro 0.1 can't open the project, or the starting of the project itself). Big files are cut into chunks, so a change to part of a file stores only the part that changed.
 
 ## State
 

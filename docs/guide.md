@@ -499,6 +499,16 @@ Updated save rmns "Add a to-do list and an idea" on main  (2 files)
 
 `opalro undo` puts the save back as it was before the amend.
 
+**An amend can be refused.** When another line, a tag or a server line names the save or has it in its history (a line that combined yours in, say), replacing it would leave two saves you can see with one change ID, so Opalro saves nothing and names them:
+
+```text
+error: Opalro can't amend this save: line side and tag v1.0 show it too, and two saves you can see would then share one change ID.
+
+hint: Nothing was saved. Save your changes as a new save instead: opalro save "describe your change"
+```
+
+Right after a save the check is quick. Without Opalro's note of the save, in a project with hundreds of other lines, it can take seconds.
+
 **When there is nothing to save,** Opalro says so and changes nothing:
 
 ```text
@@ -608,7 +618,7 @@ Each row is the save's change ID (type it into `opalro show` to see the whole sa
 opalro who todo.txt --save main
 ```
 
-Through a combined save, each line is named for the save on the line it came from; what the combine wrote itself, such as your fix of a conflict, is the combined save's. A file a save moved is followed back to where it was, when the save recorded the move. A project imported from Git has no moves recorded, so there `opalro who` follows no rename, where `git blame` does. Where a combine took the other line's version of a file whole, a line both lines wrote is still named for the save on your line, where `git blame` names the other line's. A file that isn't text, or is over 64 MiB or 1,000,000 lines, is refused, as `opalro changes` shows no lines for it.
+Through a combined save, each line is named for the save on the line it came from; what the combine wrote itself, such as your fix of a conflict, is the combined save's. A file a save moved is followed back to where it was, when the save recorded the move. A project imported from Git has no moves recorded, so there `opalro who` follows no rename, where `git blame` does. Where a combine took the other line's version of a file whole, a line both lines wrote is still named for the save on your line, where `git blame` names the other line's. A file that isn't text, or is over 64 MiB or 1,000,000 lines, is refused, as `opalro changes` shows no lines for it. `opalro who` changes nothing in the project, but to work out the path it makes an empty file in `.opalro/tmp` and removes it again, to learn how the drive compares names; in a project where that file can't be made, it stops with `error: Opalro couldn't make a file in <folder>: <why>`, `<folder>` being the project's `.opalro/tmp` in full, and a hint that says why.
 
 ### `opalro goto`
 
@@ -1211,6 +1221,8 @@ Commands that only look (`status`, `changes`, `history`, `show`, `line`, `setup`
 **What undo can't bring back:**
 
 - The diary's first entry, the start: it can't be undone.
+- `opalro setup --upgrade`: the diary doesn't hold which features a project has, so once conflicts are turned on they stay on, and Opalro 0.1 can't open the project ([`opalro setup`](#opalro-setup)).
+- A version `opalro resolve <file> --copy … --to <somewhere>` wrote out: it records nothing, so there is no step to undo. Delete the file yourself.
 - A step whose saves `opalro tidy` has removed, because it was older than the undo window.
 - Anything Opalro never stored: a file it left out because an ignore rule matched it and it was never saved. `discard` and `goto` never touch such files.
 - An unsaved link (a shortcut-like file that points elsewhere) that Opalro couldn't write back as a link: `discard` and `shelf` leave it alone and warn.
