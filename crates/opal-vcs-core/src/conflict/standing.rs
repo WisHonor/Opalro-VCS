@@ -19,9 +19,13 @@ pub(crate) fn as_it_stands<'e>(
     e: &'e Entry,
     records: &HashMap<Id, Summary>,
 ) -> Option<Cow<'e, Entry>> {
-    let record = match records.get(&e.id) {
-        Some(record) if e.kind == EntryKind::Conflict => record,
-        _ => return Some(Cow::Borrowed(e)),
+    // The kind first: most entries aren't conflicts, and their IDs needn't be hashed.
+    let record = match e.kind {
+        EntryKind::Conflict => records.get(&e.id),
+        _ => None,
+    };
+    let Some(record) = record else {
+        return Some(Cow::Borrowed(e));
     };
     record.stands_as.map(|t| {
         Cow::Owned(Entry {

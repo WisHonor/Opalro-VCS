@@ -1943,11 +1943,15 @@ struct Last<'a> {
     records: &'a HashMap<Id, Summary>,
 }
 
-impl Last<'_> {
-    /// The base save's entry `name` in the folder `rel`, as it stands in the folder.
-    fn as_base(&self, rel: &str, name: &str) -> Option<Cow<'_, Entry>> {
-        let listing = self.listings.get(rel)?.as_ref()?;
-        as_it_stands(listing.get(name)?, self.records)
+impl<'a> Last<'a> {
+    /// The base save's listing of the folder `rel`, if it has that folder.
+    fn before(&self, rel: &str) -> Option<&'a Listing> {
+        self.listings.get(rel)?.as_ref()
+    }
+
+    /// The base save's entry `stored`, as it stands in the folder.
+    fn as_base<'e>(&self, stored: Option<&'e Entry>) -> Option<Cow<'e, Entry>> {
+        as_it_stands(stored?, self.records)
     }
 }
 
@@ -1967,10 +1971,12 @@ fn build_reading(
     // What the cache said of each file, for `build_with`, which meets them in this same order.
     let mut known = Vec::new();
     for (rel, children) in in_build_order(folders) {
+        let before = last.before(rel);
         for c in children {
             let read = match c.kind {
                 Kind::File => {
-                    let vouched = contents.vouched(c, last.as_base(rel, &c.name).as_deref());
+                    let stored = before.and_then(|l| l.get(&c.name));
+                    let vouched = contents.vouched(c, last.as_base(stored).as_deref());
                     known.push((c.rel.as_str(), vouched));
                     vouched.is_none()
                 }
@@ -2101,11 +2107,11 @@ fn build_with<'a>(
     let (mut changed, mut taken_back) = (Vec::new(), Vec::new());
     let mut met_conflicts = 0u64;
     for (rel, children) in in_build_order(folders) {
-        let before = last.listings.get(rel).and_then(Option::as_ref);
+        let before = last.before(rel);
         let mut found = Vec::new();
         for c in children {
             let stored = before.and_then(|l| l.get(&c.name));
-            let as_base = last.as_base(rel, &c.name);
+            let as_base = last.as_base(stored);
             let was = as_base.as_deref();
             let (kind, id, size) = match c.kind {
                 Kind::Folder => {
