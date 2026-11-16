@@ -393,6 +393,7 @@ What the owner's review of v0.2 kept for v0.2 and put first after it. Each gets 
 | Empty folders | A switch stops making a folder that holds only conflicts with nothing in the folder for them ([decision 188](../decisions/188-red-team-m10-rulings.md)), and `opalro status` shows a saved empty folder that is gone. One decision for both. |
 | The flush after the journal is removed | Put to the crash tests before anything about it is proposed ([benchmarks.md](../benchmarks.md) §15 has what it costs and what the code shows). |
 | `who` at a combine | Measure what Git's rule (a parent that holds the file unchanged takes every line) would save in time, before the rule is looked at again (milestone 10's "Please confirm" 16). |
+| What the program says about older versions | Two messages name "Opalro 0.1": what `opalro setup --upgrade` prints before it asks, and the hint of a combine that would keep conflicts in a project that can't keep them yet. Only a project made with a build from before 0.2 ever shows them, and no page people get quotes them, so [decision 190](../decisions/190-v0.2-is-the-first-published-version.md) changed no word the program prints. The words are written again when the next feature arrives, naming the version each feature came with. |
 
 ## For the owner to decide
 

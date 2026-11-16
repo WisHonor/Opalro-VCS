@@ -10,7 +10,7 @@ Opalro 0.2 is for one person on one computer. It can't share a project, lock fil
 
 ## Going back to another save is slower than Git on Linux
 
-`opalro goto` takes about twice Git's time on Linux, often more: 1.93 to 2.74 times in nine runs on GitHub's Linux machines (2.125 in the one on the code as packaged), how much depending on the machine's processor. Opalro's own bar is twice Git's time; this version is held to three and a half times instead.
+`opalro goto` takes about twice Git's time on Linux, often more: 1.93 to 2.74 times in the nine runs of the speed check on v0.2's code that measured all three of its steps on GitHub's Linux machines (2.125 in the one on the code as packaged), how much depending on the machine's processor. Opalro's own bar is twice Git's time; this version is held to three and a half times instead.
 
 **What to do:** nothing; it is only slower.
 
@@ -28,7 +28,7 @@ A command that needs to know how the drive compares names (every command given a
 
 ## `opalro status` is at its limit on Linux on some machines
 
-With nothing changed, `opalro status` is held to twice Git's time. In nine runs of the speed check on GitHub's Linux machines (eight on v0.2's code as it was being built, one on the code as packaged), it took 1.68 to 2.29 times Git's time, over twice in five, and 1.824 on the code as packaged: a matter of milliseconds (13 to 22 ms against Git's 6 to 13).
+With nothing changed, `opalro status` is held to twice Git's time. In the nine runs of the speed check on v0.2's code that measured all three of its steps on GitHub's Linux machines (eight while it was being built, one on the code as packaged), it took 1.68 to 2.29 times Git's time, over twice in five, and 1.824 on the code as packaged: a matter of milliseconds (13 to 22 ms against Git's 6 to 13).
 
 **What to do:** nothing; it is only slower.
 
