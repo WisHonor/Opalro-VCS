@@ -31,6 +31,7 @@ pub mod merge;
 pub(crate) mod moves;
 pub mod names;
 pub mod pack;
+pub mod phase;
 pub mod presets;
 pub mod repo;
 pub mod resolve;

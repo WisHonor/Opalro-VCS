@@ -121,6 +121,10 @@ impl ChangeIds {
     /// The cache in `repo`, or an empty one if it can't be read or the handle's key didn't seal
     /// it, or the handle has none.
     pub(crate) fn load(repo: &Repository) -> ChangeIds {
+        crate::timed!("cache: change IDs load", ChangeIds::load_untimed(repo))
+    }
+
+    fn load_untimed(repo: &Repository) -> ChangeIds {
         let Some(key) = repo.cache_key() else {
             return ChangeIds::default();
         };
@@ -136,7 +140,10 @@ impl ChangeIds {
     /// `state` has and, at a save, the position's list; nothing when the handle has no key. A
     /// cache that can't be written is just not there next time, so a failure is ignored.
     pub(crate) fn store(&mut self, repo: &Repository, state: &State) {
-        self.store_within(repo, state, MAX_BYTES);
+        crate::timed!(
+            "cache: change IDs store (write if changed)",
+            self.store_within(repo, state, MAX_BYTES)
+        );
     }
 
     fn store_within(&mut self, repo: &Repository, state: &State, cap: u64) {

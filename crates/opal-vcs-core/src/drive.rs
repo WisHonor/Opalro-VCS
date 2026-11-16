@@ -34,6 +34,10 @@ const TRIES: usize = 5;
 /// checks), and opening a project clears `tmp/` while the lock is free: a file taken away midway
 /// gives no answer, so it tests again.
 pub fn probe(tmp: &Dir) -> io::Result<Drive> {
+    crate::timed!("drive name test: whole (probe)", probe_untimed(tmp))
+}
+
+fn probe_untimed(tmp: &Dir) -> io::Result<Drive> {
     for _ in 0..TRIES {
         if let Some(drive) = probe_once(tmp)? {
             return Ok(drive);
@@ -47,8 +51,8 @@ pub fn probe(tmp: &Dir) -> io::Result<Drive> {
 
 /// One test of the drive, or `None` if its file went away before the answer was sure.
 fn probe_once(tmp: &Dir) -> io::Result<Option<Drive>> {
-    let (file, plain) = fsio::create_temp(tmp)?;
-    drop(file);
+    let (file, plain) = crate::timed!("drive name test: make its file", fsio::create_temp(tmp))?;
+    crate::timed!("drive name test: close its file", drop(file));
     let name = plain.to_string_lossy().into_owned();
     let accented = format!("{name}{}", fsio::ACCENTED_SUFFIX);
     let result = (|| -> io::Result<Option<Drive>> {
@@ -72,14 +76,14 @@ fn probe_once(tmp: &Dir) -> io::Result<Option<Drive>> {
     })();
     // Whatever is left is only litter, which opening the repository clears too.
     for left in [plain.as_os_str(), OsStr::new(&accented)] {
-        let _ = fsio::remove_file(tmp, left);
+        let _ = crate::timed!("drive name test: remove (both names tried)", fsio::remove_file(tmp, left));
     }
     result
 }
 
 /// Whether the folder `dir` holds something under the name `name`, as this drive compares names.
 fn there(dir: &Dir, name: &str) -> io::Result<bool> {
-    match dir.metadata(OsStr::new(name)) {
+    match crate::timed!("drive name test: look a name up (3 per test)", dir.metadata(OsStr::new(name))) {
         Ok(_) => Ok(true),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(false),
         Err(e) => Err(e),

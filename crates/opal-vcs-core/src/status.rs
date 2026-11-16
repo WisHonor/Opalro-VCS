@@ -257,14 +257,20 @@ pub fn status(
     let mut now = read_folder(repo, save.root, full, git_excludes, None)
         .map_err(|e| e.in_save(save_id, true))?;
     let mut warnings = std::mem::take(&mut now.warnings);
-    let unfinished = writeout::unfinished_warning(repo);
+    let unfinished = crate::timed!(
+        "status: look for a journal (unfinished_warning)",
+        writeout::unfinished_warning(repo)
+    );
     let unfinished_switch = unfinished.as_ref().map(|w| w.message.clone());
     warnings.extend(unfinished);
     let mut changes = Vec::new();
     let mut conflicts = Vec::new();
     let mut records = std::mem::take(&mut now.records);
     let mut disk = None;
-    each_difference(repo, &now, &mut records, save.root, |d| {
+    static COMPARE: crate::phase::Timer =
+        crate::phase::Timer::new("status: compare with the save (each_difference)");
+    let began = std::time::Instant::now();
+    let compared = each_difference(repo, &now, &mut records, save.root, |d| {
         match d {
             Difference::File(c) => changes.push(PathChange::from(c)),
             Difference::Conflict {
@@ -280,8 +286,11 @@ pub fn status(
             )?),
         }
         Ok::<(), SaveError>(())
-    })
-    .map_err(|e| e.in_save(save_id, true))?;
+    });
+    if crate::phase::on() {
+        COMPARE.add(began.elapsed());
+    }
+    compared.map_err(|e| e.in_save(save_id, true))?;
     for (path, id) in &now.kept_conflicts {
         let record = conflict::record_at(repo.store(), &mut records, path, id)?;
         conflicts.push(ConflictAt {

@@ -1405,8 +1405,11 @@ impl Repository {
 
     /// Opens the project whose top folder is `root` (the folder holding `.opalro`).
     pub fn open(root: &Path) -> Result<Repository, RepoError> {
-        let repo = Repository::open_untouched(root)?;
-        repo.clean_tmp()?;
+        let repo = crate::timed!(
+            "open: the project (format, folders, head, store)",
+            Repository::open_untouched(root)
+        )?;
+        crate::timed!("open: clear tmp of leftovers (clean_tmp)", repo.clean_tmp())?;
         Ok(repo)
     }
 
@@ -1656,7 +1659,10 @@ impl Repository {
             Some(id) => id,
             None => self.head()?,
         };
-        head_entry(&self.store, id)
+        crate::timed!(
+            "diary lookup: the current entry (repo.current)",
+            head_entry(&self.store, id)
+        )
     }
 
     /// The diary entry `id`. One the store lacks, holds as another kind of record, or can't
@@ -1715,6 +1721,17 @@ impl Repository {
         command: &str,
         on_wait: &mut dyn FnMut(&str),
     ) -> Result<ChangeLock, RepoError> {
+        crate::timed!(
+            "lock: take the change lock, whole (lock_for_change)",
+            self.lock_for_change_untimed(command, on_wait)
+        )
+    }
+
+    fn lock_for_change_untimed(
+        &mut self,
+        command: &str,
+        on_wait: &mut dyn FnMut(&str),
+    ) -> Result<ChangeLock, RepoError> {
         let file = self.open_lock_file()?;
         let locking = |e| naming(&self.lock_path(), "lock", e);
         match file.try_lock() {
@@ -1735,7 +1752,7 @@ impl Repository {
         let lock = ChangeLock { _file: file };
         // Opening the project couldn't clear `tmp/` where a drive locks only a file open for
         // writing.
-        self.clear_tmp(&lock);
+        crate::timed!("lock: clear tmp again (clear_tmp)", self.clear_tmp(&lock));
         let started = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_or(0, |d| d.as_millis());
@@ -1745,11 +1762,14 @@ impl Repository {
         );
         let (held, name) = (&self.held, "lock-info");
         // Only ever a hint to a waiting command, so not flushed.
-        fsio::write_unflushed(&held.tmp, &held.state, name, info.as_bytes())
-            .map_err(|e| cant_write(self.state_dir().join(name), e))?;
+        crate::timed!(
+            "lock: write lock-info (unflushed)",
+            fsio::write_unflushed(&held.tmp, &held.state, name, info.as_bytes())
+        )
+        .map_err(|e| cant_write(self.state_dir().join(name), e))?;
         // Another command may have changed `format` since this handle was opened. A project
         // being started has none yet.
-        if let Some(format) = self.read_format_if_there()? {
+        if let Some(format) = crate::timed!("lock: read format again", self.read_format_if_there())? {
             self.format = format;
         }
         // Before anything is stored: builds from before chunk lists must refuse this project now.
@@ -1761,10 +1781,14 @@ impl Repository {
         }
         // Another command may have committed since this handle was opened. A lost head stops
         // the command at `current`, unless it is the `undo --to` that picks one up.
-        self.head = read_head(&self.held.state, &self.opalro)?.id();
+        self.head = crate::timed!(
+            "lock: read state/head again",
+            read_head(&self.held.state, &self.opalro)
+        )?
+        .id();
         self.store.refresh()?;
         // Once per command, under the lock, before anything is stored.
-        self.rules = self.read_rules();
+        self.rules = crate::timed!("lock: read the rules (opalro.toml)", self.read_rules());
         self.store.set_chunk_from(self.rules.rules.chunk_files_over);
         Ok(lock)
     }
@@ -1815,7 +1839,10 @@ impl Repository {
         // Refuse an entry that would not read back before storing it.
         DiaryEntry::decode(&bytes)?;
         let id = packs.add_record(ObjectKind::DiaryEntry, &bytes)?;
-        self.store_packs(lock, packs)?;
+        crate::timed!(
+            "store: move the packs into the store (finish, flush, rename)",
+            self.store_packs(lock, packs)
+        )?;
         Ok(id)
     }
 
@@ -1836,8 +1863,11 @@ impl Repository {
     /// Once the new head is in place, a flush of `state/` that fails is only a warning.
     pub fn move_head_to(&mut self, _lock: &ChangeLock, id: Id) -> Result<(), RepoError> {
         let (name, head) = ("head", format!("{id}\n"));
-        let done = fsio::write_head(&self.held.tmp, &self.held.state, name, head.as_bytes())
-            .map_err(|e| cant_write(self.state_dir().join(name), e))?;
+        let done = crate::timed!(
+            "head: move it (write, flush, rename, flush state/)",
+            fsio::write_head(&self.held.tmp, &self.held.state, name, head.as_bytes())
+        )
+        .map_err(|e| cant_write(self.state_dir().join(name), e))?;
         self.head = Some(id);
         if let Done::NotFlushed(e) = done {
             self.store.note(Warning::new(

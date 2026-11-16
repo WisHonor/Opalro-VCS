@@ -107,6 +107,10 @@ impl LastMade {
     /// The notes in `repo`; none if the handle has no key, or the file can't be read, isn't
     /// sealed with that key or doesn't decode.
     pub(crate) fn load(repo: &Repository) -> LastMade {
+        crate::timed!("cache: notes of saves made last (last-made) load", LastMade::load_untimed(repo))
+    }
+
+    fn load_untimed(repo: &Repository) -> LastMade {
         let Some(key) = repo.cache_key() else {
             return LastMade::default();
         };

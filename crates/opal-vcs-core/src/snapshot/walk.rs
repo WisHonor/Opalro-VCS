@@ -475,9 +475,15 @@ impl<'a> Base<'a> {
 
     /// The listing `id`, through what was read ahead of it if that is ready.
     fn read(&self, id: &Id) -> Result<Listing, StoreError> {
-        match self.ahead.and_then(|ahead| ahead.take(id)) {
+        match crate::timed!(
+            "walk:   look for a listing read ahead (Ahead::take)",
+            self.ahead.and_then(|ahead| ahead.take(id))
+        ) {
             Some(peeked) => self.store.listing_after(id, peeked),
-            None => self.store.listing(id),
+            None => crate::timed!(
+                "walk:   a listing not read ahead, read by the walk (store.listing)",
+                self.store.listing(id)
+            ),
         }
     }
 
@@ -1321,7 +1327,10 @@ impl WalkState {
         #[cfg(test)]
         verdicts::note(&self.root);
         // Before `path`'s own ignore files are read, if it is a folder: they are for what it holds.
-        let verdict = self.matcher.verdict(met.bytes, is_dir);
+        let verdict = crate::timed!(
+            "walk:   the ignore rules' verdict per name",
+            self.matcher.verdict(met.bytes, is_dir)
+        );
         if verdict.opalro == Decision::Ignored {
             return self.saved_before(folder, met, is_dir);
         }
@@ -1342,8 +1351,11 @@ impl WalkState {
         // name only where the listing could hold it, and the walk then uses that same listing.
         let mut hints = Listed::ALL;
         let nested = opens
-            && match self.handles.held(rel).map(Arc::clone) {
-                Ok(dir) => match dir.entries() {
+            && match crate::timed!(
+                "walk:   open a folder (held handles)",
+                self.handles.held(rel).map(Arc::clone)
+            ) {
+                Ok(dir) => match crate::timed!("walk:   read a folder's names (entries)", dir.entries()) {
                     Ok(entries) => {
                         hints = listed_hints(
                             entries
@@ -1354,7 +1366,11 @@ impl WalkState {
                         if hints.git || hints.opalro {
                             asked::lookup(self.root.join(rel));
                         }
-                        let nested = (hints.git || hints.opalro) && holds_own_repository(&dir);
+                        let nested = (hints.git || hints.opalro)
+                            && crate::timed!(
+                                "walk:   ask a folder for .git and .opalro",
+                                holds_own_repository(&dir)
+                            );
                         self.listed = Some((met.rel.to_owned(), dir, entries));
                         nested
                     }
@@ -1387,7 +1403,12 @@ impl WalkState {
             }
             return kept;
         }
-        if opens && let Err(problem) = self.enter(rel, None, hints) {
+        if opens
+            && let Err(problem) = crate::timed!(
+                "walk:   enter a folder (read its ignore files)",
+                self.enter(rel, None, hints)
+            )
+        {
             self.listed = None;
             self.problem.get_or_insert(problem);
             return false;
@@ -1535,7 +1556,10 @@ pub(super) fn walk(
             .then(|| {
                 thread::Builder::new()
                     .spawn_scoped(scope, || {
-                        read_ahead(store, top, &ahead);
+                        crate::timed!(
+                            "store: the read-ahead helper thread, whole",
+                            read_ahead(store, top, &ahead)
+                        );
                         #[cfg(test)]
                         ahead
                             .ended
@@ -1560,7 +1584,12 @@ pub(super) fn walk(
         }
         let scanned = thread::Builder::new()
             .stack_size(WALK_STACK_BYTES)
-            .spawn_scoped(scope, || scan_folder(root, base, limits, drive, own_list))
+            .spawn_scoped(scope, || {
+                crate::timed!(
+                    "scan: the scan thread (scan_folder), whole",
+                    scan_folder(root, base, limits, drive, own_list)
+                )
+            })
             .map_err(|e| SaveError::Repo(e.into()))
             .and_then(|scan| {
                 scan.join().unwrap_or_else(|_| {
@@ -1605,9 +1634,13 @@ fn scan_folder(
 ) -> Result<Scan, SaveError> {
     let too_large = |detail| SaveError::TooLarge { detail };
     let too_long = |why: String, rel: &str| too_large(format!("{why}: {}", escape(rel, false)));
+    let began = std::time::Instant::now();
     let (top, dropped) = base.listing(base.root)?;
     let whole = dropped.is_empty();
-    let mut rules = WalkState::new(root, drive, top, dropped, own_list)?;
+    let mut rules = crate::timed!(
+        "scan: set up the walk (WalkState::new: own lists, top ignore files)",
+        WalkState::new(root, drive, top, dropped, own_list)
+    )?;
     rules.keeps_conflicts = base.conflicts;
     if let Some(Some(top)) = rules.old.remove("") {
         let noted = rules.note_records("", &top, base.store);
@@ -1617,7 +1650,18 @@ fn scan_folder(
     if whole {
         rules.old_ids.insert(String::new(), base.root);
     }
-    let mut folders = walk_and_look(root, &mut base, &mut limits, drive, &mut rules, &look_at)?;
+    static BEFORE: crate::phase::Timer =
+        crate::phase::Timer::new("scan: before the walk (top listing, set-up)");
+    static AFTER: crate::phase::Timer =
+        crate::phase::Timer::new("scan: after the walk (gone folders, kept, sorting)");
+    if crate::phase::on() {
+        BEFORE.add(began.elapsed());
+    }
+    let mut folders = crate::timed!(
+        "scan: walk and look (walk_and_look), whole",
+        walk_and_look(root, &mut base, &mut limits, drive, &mut rules, &look_at)
+    )?;
+    let after = std::time::Instant::now();
     // Sorted, so a name the walk found can be looked up.
     for children in folders.values_mut() {
         children.sort_by(|a, b| a.name.cmp(&b.name));
@@ -1718,6 +1762,9 @@ fn scan_folder(
         let left_out = nested_projects_left_out(&rules.nested);
         rules.warnings.push(left_out);
     }
+    if crate::phase::on() {
+        AFTER.add(after.elapsed());
+    }
     Ok(Scan {
         handles: rules.handles,
         folders,
@@ -1812,11 +1859,14 @@ fn walk_and_look(
             }
         }
         drop(jobs);
-        let walked = walk_folders(root, base, limits, drive, rules, &send);
+        let walked = crate::timed!(
+            "walk: the walking thread's walk (walk_folders), whole",
+            walk_folders(root, base, limits, drive, rules, &send)
+        );
         drop(send);
         let mut looked = Vec::new();
         for looker in lookers {
-            match looker.join() {
+            match crate::timed!("walk: wait for the looking threads after the walk", looker.join()) {
                 Ok(found) => looked.extend(found),
                 Err(_) => {
                     let stopped =
@@ -1879,10 +1929,17 @@ fn look(jobs: &Mutex<Receiver<Job>>, look_at: &dyn Fn(Job) -> Looked) -> Vec<Loo
 
 /// The details of each file and link in `job`, through the handle that listed their folder.
 fn look_at(job: Job) -> Looked {
+    crate::timed!("lookers: look at a job's files (summed over threads)", look_at_untimed(job))
+}
+
+fn look_at_untimed(job: Job) -> Looked {
     fsio::act_point("walk:looking");
     let mut found = Vec::with_capacity(job.looks.len());
     for look in job.looks {
-        let meta = match job.dir.metadata(OsStr::new(&look.name)) {
+        let meta = match crate::timed!(
+            "lookers:   look at one file (metadata), summed over threads",
+            job.dir.metadata(OsStr::new(&look.name))
+        ) {
             Ok(meta) => meta,
             Err(source) => {
                 let path = path_in(&job.folder, &look.name);
@@ -1961,7 +2018,10 @@ fn walk_folders(
                         path: Path::new(&rel),
                         bytes: rel.as_bytes(),
                     };
-                    rules.judged(&met, here.within, is_dir, opens)
+                    crate::timed!(
+                        "walk: judge each entry (judged), all of it",
+                        rules.judged(&met, here.within, is_dir, opens)
+                    )
                 }
                 // Taken apart the long way, so the ignore rules see the name's own bytes.
                 None => rules.judged_at(&root.join(&here.rel).join(&entry.name), is_dir, opens),
@@ -1978,10 +2038,12 @@ fn walk_folders(
                 path: rel.clone(),
                 reason: "its name is not valid UTF-8".into(),
             })?;
-            validate_name(name).map_err(|e| SaveError::InvalidName {
-                path: rel.clone(),
-                reason: e.to_string(),
-            })?;
+            crate::timed!("walk: check each name (validate_name)", validate_name(name)).map_err(
+                |e| SaveError::InvalidName {
+                    path: rel.clone(),
+                    reason: e.to_string(),
+                },
+            )?;
             limits
                 .check_path(rel.len())
                 .map_err(|why| too_long(why, &rel))?;
@@ -1989,7 +2051,10 @@ fn walk_folders(
                 EntryType::Dir => {
                     limits.check_depth(depth).map_err(too_large)?;
                     // The walk hands a folder over before it asks about anything inside.
-                    rules.note_folder(&rel, base)?;
+                    crate::timed!(
+                        "walk: the last save's listing of each folder (note_folder)",
+                        rules.note_folder(&rel, base)
+                    )?;
                     Kind::Folder
                 }
                 EntryType::Symlink => Kind::Symlink,
@@ -2036,7 +2101,11 @@ fn walk_folders(
                 return Ok(None);
             }
             let ready = rules.listed.take();
-            InFolder::listed(rules, ready, rel.clone(), depth).map(Some)
+            crate::timed!(
+                "walk: set up each folder entered (InFolder::listed: rules, list if not yet, sort)",
+                InFolder::listed(rules, ready, rel.clone(), depth)
+            )
+            .map(Some)
         })();
         match visited {
             Ok(Some(inner)) => path.push(inner),
@@ -2054,7 +2123,10 @@ fn walk_folders(
 fn send_job(job: &mut Option<Job>, send: &SyncSender<Job>) {
     if let Some(job) = job.take() {
         fsio::act_point("walk:sending");
-        let _ = send.send(job);
+        let _ = crate::timed!(
+            "walk: hand files to the looking threads (may wait for room)",
+            send.send(job)
+        );
     }
 }
 

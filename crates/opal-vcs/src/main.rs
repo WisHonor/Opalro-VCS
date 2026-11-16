@@ -1317,19 +1317,30 @@ fn file_change(c: &PathChange) -> opal_core::diff::FileChange<'_> {
 }
 
 fn status_command(json: bool, full: bool, opened: &mut Option<Repository>) -> Result<(), Failure> {
-    let repo: &Repository = opened.insert(with_users_key(Repository::discover(
-        &std::env::current_dir()?,
-    )?));
-    let git_excludes = git_excludes_file(repo.root())?;
+    let dir = std::env::current_dir()?;
+    let found = opal_core::timed!("main: find and open the project (discover)", Repository::discover(&dir))?;
+    let keyed = opal_core::timed!("main: the user's cache key (with_users_key)", with_users_key(found));
+    let repo: &Repository = opened.insert(keyed);
+    let git_excludes = opal_core::timed!(
+        "main: the user's Git ignore list (git_excludes_file)",
+        git_excludes_file(repo.root())
+    )?;
     // Status only reads, so its hints never say that nothing was saved.
-    let found = status(repo, full, git_excludes.as_deref()).map_err(|e| Failure {
+    let found = opal_core::timed!(
+        "main: status(), whole",
+        status(repo, full, git_excludes.as_deref())
+    )
+    .map_err(|e| Failure {
         hint: e.hint_when_reading(),
         message: why_stopped(&e),
         printed: false,
     })?;
     let mut warnings = found.warnings.clone();
     let (id, save) = (&found.save_id, &found.save);
-    let short = short_or_whole(repo, id, &save.change_id, &mut warnings);
+    let short = opal_core::timed!(
+        "main: shorten the change ID (short_or_whole)",
+        short_or_whole(repo, id, &save.change_id, &mut warnings)
+    );
     warnings.extend(repo.store().warnings());
     let mut out = output::Stdout::new();
     // What stdout can't take is remembered, for `ended` to tell.
@@ -2285,21 +2296,32 @@ fn project_name(repo: &Repository) -> String {
 }
 
 fn goto_command(json: bool, text: &str, opened: &mut Option<Repository>) -> Result<(), Failure> {
-    let repo = opened.insert(with_users_key(Repository::discover(
-        &std::env::current_dir()?,
-    )?));
-    let who = now_person(&load_identity(Some(repo.root()))?);
-    let git_excludes = git_excludes_file(repo.root())?;
-    let target = resolve_target(repo, text)?;
+    let dir = std::env::current_dir()?;
+    let found = opal_core::timed!("main: find and open the project (discover)", Repository::discover(&dir))?;
+    let keyed = opal_core::timed!("main: the user's cache key (with_users_key)", with_users_key(found));
+    let repo = opened.insert(keyed);
+    let identity = opal_core::timed!(
+        "main: who is working (load_identity)",
+        load_identity(Some(repo.root()))
+    )?;
+    let who = now_person(&identity);
+    let git_excludes = opal_core::timed!(
+        "main: the user's Git ignore list (git_excludes_file)",
+        git_excludes_file(repo.root())
+    )?;
+    let target = opal_core::timed!("main: resolve the target (resolve_target)", resolve_target(repo, text))?;
     let done = {
         let _working = progress::Working::start("Writing files");
-        goto(
-            repo,
-            &target,
-            &who,
-            "goto",
-            git_excludes.as_deref(),
-            &mut waiting,
+        opal_core::timed!(
+            "main: goto(), whole",
+            goto(
+                repo,
+                &target,
+                &who,
+                "goto",
+                git_excludes.as_deref(),
+                &mut waiting,
+            )
         )
     }?;
     let mut warnings = done.applied.warnings.clone();
@@ -2309,7 +2331,10 @@ fn goto_command(json: bool, text: &str, opened: &mut Option<Repository>) -> Resu
         .save(&done.save, repo.signatures_allowed())
         .ok();
     let short = match &save {
-        Some(save) => short_or_whole(repo, &done.save, &save.change_id, &mut warnings),
+        Some(save) => opal_core::timed!(
+            "main: shorten the change ID (short_or_whole)",
+            short_or_whole(repo, &done.save, &save.change_id, &mut warnings)
+        ),
         None => done.save.short_hex(),
     };
     // Likewise, this only leaves out a line of advice if it fails.
@@ -2319,9 +2344,12 @@ fn goto_command(json: bool, text: &str, opened: &mut Option<Repository>) -> Resu
                 .current()
                 .map(|(_, e)| e.state.lines)
                 .unwrap_or_default();
-            (lines.iter())
-                .find(|(_, tip)| *tip == id)
-                .and_then(|(line, _)| keep_saving(repo, line))
+            opal_core::timed!(
+                "main: advice on keeping saving (keep_saving)",
+                (lines.iter())
+                    .find(|(_, tip)| *tip == id)
+                    .and_then(|(line, _)| keep_saving(repo, line))
+            )
         }
         _ => None,
     };
@@ -3435,6 +3463,13 @@ fn help_or_usage_error(e: &clap::Error, args: &[OsString], json: bool) -> ExitCo
 }
 
 fn main() -> ExitCode {
+    let began = std::time::Instant::now();
+    let code = timed_main();
+    opal_core::phase::report(began.elapsed());
+    code
+}
+
+fn timed_main() -> ExitCode {
     let mut typed = std::env::args_os();
     let program = typed.next().unwrap_or_else(|| "opalro".into());
     let typed: Vec<OsString> = typed.collect();

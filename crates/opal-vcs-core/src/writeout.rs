@@ -93,8 +93,11 @@ pub fn plan(
     drive: Drive,
     git_excludes: Option<&Path>,
 ) -> Result<Plan, SaveError> {
-    planned(repo, from, to, only, remove_new, drive, git_excludes)
-        .map_err(|e| told_whose(repo, e, from, to))
+    crate::timed!(
+        "plan: whole (read_folder, then compare the two saves)",
+        planned(repo, from, to, only, remove_new, drive, git_excludes)
+    )
+    .map_err(|e| told_whose(repo, e, from, to))
 }
 
 /// `e`, a spelling of `.opalro` the plan met past reading the folder against `from`, told as the
@@ -735,10 +738,16 @@ pub fn carry_out(
     journal: &Journal,
     drive: Drive,
 ) -> Result<Applied, RepoError> {
-    let done = apply(repo, lock, journal, drive)?;
+    let done = crate::timed!(
+        "carry out: apply the journal (file cache load, write, flush folders)",
+        apply(repo, lock, journal, drive)
+    )?;
     if done.in_use.is_empty() {
         repo.move_head_to(lock, journal.target)?;
-        match Journal::remove(repo, lock) {
+        match crate::timed!(
+            "carry out: remove the journal (remove, flush state/)",
+            Journal::remove(repo, lock)
+        ) {
             Ok(Done::Flushed) => {}
             // The head's own flush came first, so a power cut can only bring the journal back.
             Ok(Done::NotFlushed(e)) => repo.store().note(Warning::new(
@@ -1221,7 +1230,8 @@ impl Run<'_> {
                 )));
             }
             early.finish()?;
-            file.sync_all()?;
+            let shown = || format!("written file {}, in tmp", name.to_string_lossy());
+            crate::phase::event("flush", shown, || file.sync_all())?;
             fsio::fault_point("switch:written")?;
             fsio::act_point("switch:written");
             Ok(())
@@ -1231,7 +1241,11 @@ impl Run<'_> {
         let outcome = match written {
             Ok(()) => match self.unchanged(name, there) {
                 Ok(false) => Ok(Outcome::Changed),
-                Ok(true) => match retried(|| tmp.rename_into(&temp, self.folders.here(), name)) {
+                Ok(true) => match crate::phase::event(
+                    "rename",
+                    || format!("tmp-* -> {} (into the project)", name.to_string_lossy()),
+                    || retried(|| tmp.rename_into(&temp, self.folders.here(), name)),
+                ) {
                     Ok(()) => return Ok(Outcome::Wrote),
                     Err(e) => classify(e),
                 },
@@ -1390,7 +1404,9 @@ impl Run<'_> {
     fn finish(mut self) -> Result<Applied, RepoError> {
         for rel in std::mem::take(&mut self.dirty) {
             if self.folders.enter(&rel).is_ok() {
-                self.folders.here().sync()?;
+                let here = self.folders.here();
+                let shown = || format!("project folder '{rel}' (changed by the switch)");
+                crate::phase::event("flush", shown, || here.sync())?;
             }
         }
         let mut applied = self.applied;

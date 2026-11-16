@@ -462,14 +462,14 @@ impl Store {
             #[cfg(test)]
             counted: Arc::default(),
         };
-        store.list()?;
+        crate::timed!("store: list the packs at open", store.list())?;
         Ok(store)
     }
 
     /// Lists the packs again, to find those another process committed since this store was
     /// opened.
     pub fn refresh(&mut self) -> Result<(), StoreError> {
-        self.list()
+        crate::timed!("store: list the packs again (refresh, under the lock)", self.list())
     }
 
     /// Makes files of `bytes` or more (up to the most that is cut) stored in chunks from now on.
@@ -872,9 +872,12 @@ impl Store {
         #[cfg(test)]
         self.listings_read
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        Ok(Listing::decode(
-            &self.read_record(id, ObjectKind::FolderListing)?,
-        )?)
+        let read = crate::timed!(
+            "store: listing read whole (find, read, check, decode), any thread",
+            self.read_record(id, ObjectKind::FolderListing)
+                .and_then(|bytes| Ok(Listing::decode(&bytes)?))
+        );
+        read
     }
 
     /// The conflict record `id`, checked against its fingerprint and decoded; a copy whose index
@@ -936,6 +939,13 @@ impl Store {
     /// so this store notes what `listing` would. It is spared only the lookup in the pack asked
     /// first when that is the pack `peeked` came from, and the read of `peeked`'s own copy.
     pub(crate) fn listing_after(&self, id: &Id, peeked: Peeked) -> Result<Listing, StoreError> {
+        crate::timed!(
+            "store: listing taken from the read-ahead (listing_after)",
+            self.listing_after_untimed(id, peeked)
+        )
+    }
+
+    fn listing_after_untimed(&self, id: &Id, peeked: Peeked) -> Result<Listing, StoreError> {
         #[cfg(test)]
         counted::listing();
         #[cfg(test)]
@@ -1013,6 +1023,13 @@ impl Store {
     /// on any failure. It tries that one copy only and notes nothing about copies or packs, so a
     /// `listing` after it tells of them as it would have.
     pub(crate) fn peek_listing(&self, id: &Id) -> Option<Peeked> {
+        crate::timed!(
+            "store: listing read ahead (helper thread, beside the walk)",
+            self.peek_listing_untimed(id)
+        )
+    }
+
+    fn peek_listing_untimed(&self, id: &Id) -> Option<Peeked> {
         let mut quiet = Vec::new();
         let found = self.each_pack_in(&mut quiet, true, |n, pack| {
             let copy = match pack.find(id) {
@@ -1042,6 +1059,10 @@ impl Store {
     }
 
     pub fn save(&self, id: &Id, signatures_allowed: bool) -> Result<Save, StoreError> {
+        crate::timed!("store: save record read", self.save_untimed(id, signatures_allowed))
+    }
+
+    fn save_untimed(&self, id: &Id, signatures_allowed: bool) -> Result<Save, StoreError> {
         #[cfg(test)]
         self.saves_read
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);

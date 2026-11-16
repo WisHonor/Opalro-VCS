@@ -1284,7 +1284,10 @@ pub(crate) fn keep_file_cache(
     warnings: &mut Vec<Warning>,
 ) {
     if let Some(now) = now
-        && let Err(why) = seen.store(repo, now)
+        && let Err(why) = crate::timed!(
+            "cache: file cache store (compare, encode, seal, write if changed)",
+            seen.store(repo, now)
+        )
     {
         warnings.push(Warning::new(
             warning::FILE_CACHE_NOT_STORED,
@@ -2530,6 +2533,19 @@ pub(crate) fn read_folder(
     git_excludes: Option<&Path>,
     drive: Option<Drive>,
 ) -> Result<FolderNow, SaveError> {
+    crate::timed!(
+        "read_folder: whole (clock file, drive test, walk, build, cache store)",
+        read_folder_untimed(repo, base, full, git_excludes, drive)
+    )
+}
+
+fn read_folder_untimed(
+    repo: &Repository,
+    base: Id,
+    full: bool,
+    git_excludes: Option<&Path>,
+    drive: Option<Drive>,
+) -> Result<FolderNow, SaveError> {
     // Taken before the walk, so a file changed during it is too new to trust next time. Without
     // it no time can be trusted, so every file is read and nothing cached.
     let now = filecache::drive_now(repo).ok();
@@ -2541,12 +2557,15 @@ pub(crate) fn read_folder(
     let walked = || {
         let mut base = Base::new(repo.store(), base, SaveLimits::default());
         base.conflicts = keeps_conflicts;
-        walk(
-            repo.root(),
-            base,
-            SaveLimits::default(),
-            drive,
-            git_excludes,
+        crate::timed!(
+            "scan: the whole walk of the project folder (walk)",
+            walk(
+                repo.root(),
+                base,
+                SaveLimits::default(),
+                drive,
+                git_excludes,
+            )
         )
     };
     let (scan, cache) = match now {
@@ -2578,7 +2597,10 @@ pub(crate) fn read_folder(
         ids: &old_ids,
         records: &records,
     };
-    let built = build_reading(&mut reading, None, &mut handles, &folders, last, &noted)?;
+    let built = crate::timed!(
+        "read_folder: build listings, the cache vouching (build_reading)",
+        build_reading(&mut reading, None, &mut handles, &folders, last, &noted)
+    )?;
     let kept_conflicts = kept_places(repo.store(), kept_conflicts)?;
     keep_file_cache(repo, reading.cache, now, &mut warnings);
     let mut not_written_here = built.kept;
@@ -2639,7 +2661,10 @@ struct Reading {
 impl Contents for Reading {
     fn vouched(&mut self, c: &Child, _was: Option<&Entry>) -> Option<(Id, u64)> {
         let meta = c.meta.as_ref()?;
-        let known = self.cache.vouch(&c.rel, meta)?;
+        let known = crate::timed!(
+            "build: the file cache's answer per file (vouch)",
+            self.cache.vouch(&c.rel, meta)
+        )?;
         Some((known.id, meta.size))
     }
 
@@ -2652,7 +2677,7 @@ impl Contents for Reading {
         if let Some(known) = known {
             return Ok(known);
         }
-        let (id, size) = hashed_read(read, &c.rel)?;
+        let (id, size) = crate::timed!("build: files read and hashed", hashed_read(read, &c.rel))?;
         // The walk's details, which the read found the file still had.
         if let Some(meta) = &c.meta {
             self.cache.record(&c.rel, meta, id);
@@ -2681,7 +2706,7 @@ impl Contents for Reading {
     }
 
     fn listing(&mut self, listing: Listing) -> Result<Id, SaveError> {
-        let id = listing.id();
+        let id = crate::timed!("build: listing ID (encode and hash a listing)", listing.id());
         self.listings.insert(id, listing);
         Ok(id)
     }

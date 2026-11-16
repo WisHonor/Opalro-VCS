@@ -356,7 +356,8 @@ impl PackWriter {
         self.file.write_all(&PACK_END_MAGIC)?;
         self.file.flush()?;
         self.early.finish()?;
-        self.file.get_ref().sync_all()?;
+        let file = self.file.get_ref();
+        crate::phase::event("flush", || "pack file, written in tmp".into(), || file.sync_all())?;
         fsio::fault_point("pack:before-rename")?;
         let dest = OsString::from(format!("{}.pack", checksum.to_hex()));
         fsio::rename_durable(&self.tmp, &self.name, packs, &dest)?;

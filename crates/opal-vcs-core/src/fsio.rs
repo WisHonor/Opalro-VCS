@@ -26,7 +26,7 @@ pub(crate) const BETWEEN_TRIES: Duration = Duration::from_millis(100);
 /// `tmp-` and 16 random lowercase hex digits. Returns it and its name.
 pub fn create_temp(tmp: &Dir) -> io::Result<(File, OsString)> {
     let name = opal_platform::temp_name();
-    let file = tmp.create_new(&name, false)?;
+    let file = crate::timed!("fsio: make a temp file in tmp (create_temp)", tmp.create_new(&name, false))?;
     Ok((file, name))
 }
 
@@ -67,7 +67,9 @@ fn replace<T>(
     let result = (|| {
         file.write_all(bytes)?;
         if flush {
-            flush_file(&file)?;
+            crate::phase::event("flush", || format!("file {name}, written in tmp"), || {
+                flush_file(&file)
+            })?;
         }
         drop(file);
         if faults {
@@ -92,7 +94,9 @@ pub(crate) fn write_new<E: From<io::Error>>(
 ) -> Result<u64, E> {
     let mut file = dir.create_new(name, false)?;
     let done = fill(&mut file).and_then(|()| {
-        flush_file(&file)?;
+        crate::phase::event("flush", || format!("new file {}", crate::phase::shown(name)), || {
+            flush_file(&file)
+        })?;
         Ok(file.metadata()?.len())
     });
     if done.is_err() {
@@ -107,7 +111,11 @@ pub(crate) fn write_new<E: From<io::Error>>(
 /// then flushes `to_dir` so the move survives a crash.
 pub fn rename_durable(from_dir: &Dir, from: &OsStr, to_dir: &Dir, to: &OsStr) -> io::Result<()> {
     rename(from_dir, from, to_dir, to)?;
-    flush_dir(to_dir)
+    crate::phase::event(
+        "flush",
+        || format!("folder holding {}", crate::phase::shown(to)),
+        || flush_dir(to_dir),
+    )
 }
 
 /// Moves `from` in the folder `from_dir` to `to` in the folder `to_dir`, replacing a file there,
@@ -314,13 +322,21 @@ pub(crate) fn rename_reported(
 
 /// Flushes `dir` after a change made in it, past the fault point `label`.
 pub(crate) fn flush_after(dir: &Dir, label: &'static str) -> Done {
-    match fault_point(label).and_then(|()| flush_dir(dir)) {
+    let flushed = crate::phase::event("flush", || format!("folder, after {label}"), || {
+        fault_point(label).and_then(|()| flush_dir(dir))
+    });
+    match flushed {
         Ok(()) => Done::Flushed,
         Err(e) => Done::NotFlushed(e),
     }
 }
 
 fn rename(from_dir: &Dir, from: &OsStr, to_dir: &Dir, to: &OsStr) -> io::Result<()> {
+    let what = || format!("{} -> {}", crate::phase::shown(from), crate::phase::shown(to));
+    crate::phase::event("rename", what, || rename_untimed(from_dir, from, to_dir, to))
+}
+
+fn rename_untimed(from_dir: &Dir, from: &OsStr, to_dir: &Dir, to: &OsStr) -> io::Result<()> {
     let mut tries = 1;
     loop {
         match from_dir.rename_into(from, to_dir, to) {
@@ -346,7 +362,7 @@ pub(crate) fn held(e: &io::Error) -> bool {
 /// Deletes the file `name` in the folder `dir`, or the link itself if it is one. Not flushed: only
 /// used for leftovers, which may as well come back.
 pub fn remove_file(dir: &Dir, name: &OsStr) -> io::Result<()> {
-    dir.remove_file(name)
+    crate::timed!("fsio: remove a file (remove_file)", dir.remove_file(name))
 }
 
 /// Opens the change-lock file `name` in the folder `state` for reading and writing, making it if

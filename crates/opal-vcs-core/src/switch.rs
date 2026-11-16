@@ -424,7 +424,10 @@ pub(crate) fn locked<T>(
     let mut earlier = Earlier::default();
     let mut finished = false;
     // Kept with the store's warnings, so it is told even if the command then fails.
-    if let Some(done) = writeout::finish_interrupted(repo, &lock)? {
+    if let Some(done) = crate::timed!(
+        "goto: look for a stopped switch (finish_interrupted)",
+        writeout::finish_interrupted(repo, &lock)
+    )? {
         for w in done.warnings {
             if !LISTED.contains(&w.kind) {
                 repo.store().note(w);
@@ -623,7 +626,10 @@ fn go(
     let (head, entry) = repo.current()?;
     let from = tip_of(&entry)?;
     let (position, to) = landing(repo, &entry.state, target)?;
-    let (plan, drive) = plan_switch(repo, from, to, git_excludes)?;
+    let (plan, drive) = crate::timed!(
+        "goto: plan (drive test, walk, compare), whole",
+        plan_switch(repo, from, to, git_excludes)
+    )?;
     let holds_conflicts = plan.holds_conflicts;
     let mut state = entry.state.clone();
     state.position = position.clone();
@@ -648,8 +654,10 @@ fn go(
         plan,
         drive,
     };
-    let (applied, safety_copies, carried) =
-        make_switch(repo, lock, planned, who, command, earlier)?;
+    let (applied, safety_copies, carried) = crate::timed!(
+        "goto: make the switch, whole",
+        make_switch(repo, lock, planned, who, command, earlier)
+    )?;
     Ok(GotoOutcome {
         position,
         save: to,
@@ -703,10 +711,12 @@ pub(crate) fn make_switch(
     earlier: &mut Earlier,
 ) -> Result<(Applied, usize, usize), SwitchError> {
     let carried = p.plan.carried;
-    let mut packs = repo.new_packs()?;
+    let mut packs = crate::timed!("goto: new packs (make the pack in tmp)", repo.new_packs())?;
     let kept_from = kept_on(p.before, p.from, command, &[], who);
-    let (folder_change, safety_copies) =
-        kept::switch_saves(repo, &p.plan, p.from, p.to, &kept_from, p.drive, &mut packs)?;
+    let (folder_change, safety_copies) = crate::timed!(
+        "goto: safety copies of unsaved work (switch_saves)",
+        kept::switch_saves(repo, &p.plan, p.from, p.to, &kept_from, p.drive, &mut packs)
+    )?;
     let to_make = Switch {
         head: p.head,
         action: Action::Command,
@@ -828,15 +838,24 @@ pub(crate) fn switch(
         state: s.state,
         folder_change: s.folder_change,
     };
-    let target = repo.store_entry(lock, s.packs, &entry)?;
+    let target = crate::timed!(
+        "switch: store the diary entry (encode, pack, move into the store)",
+        repo.store_entry(lock, s.packs, &entry)
+    )?;
     let journal = Journal {
         target,
         from: s.head,
         actions: s.plan.actions.clone(),
     };
-    journal.write(repo, lock)?;
-    let applied = writeout::carry_out(repo, lock, &journal, s.drive)?;
-    crate::merge::merge_after_commit(repo, lock);
+    crate::timed!("switch: write the journal", journal.write(repo, lock))?;
+    let applied = crate::timed!(
+        "switch: carry out (write files, flush folders, move head, remove journal)",
+        writeout::carry_out(repo, lock, &journal, s.drive)
+    )?;
+    crate::timed!(
+        "switch: merge small packs (merge_after_commit)",
+        crate::merge::merge_after_commit(repo, lock)
+    );
     let applied = switch_warnings(s.plan, applied, earlier);
     if !applied.in_use.is_empty() {
         let detail = applied

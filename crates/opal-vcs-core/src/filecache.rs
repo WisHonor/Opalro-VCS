@@ -231,7 +231,11 @@ impl FileCache {
                 .spawn_scoped(scope, move || FileCache::load_from(folder, &shown, key));
             let done = meanwhile();
             let cache = match helper {
-                Ok(helper) => helper.join().unwrap_or_default(),
+                Ok(helper) => crate::timed!(
+                    "cache: wait for the file cache's loader after the walk",
+                    helper.join()
+                )
+                .unwrap_or_default(),
                 Err(_) => FileCache::load(repo),
             };
             (done, cache)
@@ -240,6 +244,17 @@ impl FileCache {
 
     /// The cache in the folder `cache/`, shown as `cache_dir`, sealed with `key`.
     fn load_from(folder: &Dir, cache_dir: &Path, key: Option<&[u8; keyed::KEY_LEN]>) -> FileCache {
+        crate::timed!(
+            "cache: file cache load (read, check seal, decode)",
+            FileCache::load_from_untimed(folder, cache_dir, key)
+        )
+    }
+
+    fn load_from_untimed(
+        folder: &Dir,
+        cache_dir: &Path,
+        key: Option<&[u8; keyed::KEY_LEN]>,
+    ) -> FileCache {
         let Some(key) = key else {
             return FileCache::default();
         };
@@ -400,13 +415,21 @@ impl FileCache {
 /// The drive's own "now": the modified time of a file written in `.opalro/tmp`, since a network or
 /// FAT drive's clock and resolution may differ from this computer's.
 pub fn drive_now(repo: &Repository) -> Result<i128, RepoError> {
+    crate::timed!("drive clock's file: whole (drive_now)", drive_now_untimed(repo))
+}
+
+fn drive_now_untimed(repo: &Repository) -> Result<i128, RepoError> {
     let tmp = repo.tmp_folder();
-    let (mut file, name) = fsio::create_temp(tmp)?;
-    let written = file.write_all(b"now").and_then(|()| file.sync_all());
-    drop(file);
+    let (mut file, name) = crate::timed!("drive clock's file: make it", fsio::create_temp(tmp))?;
+    let written = crate::timed!("drive clock's file: write 3 bytes", file.write_all(b"now"))
+        .and_then(|()| {
+            crate::phase::event("flush", || "the drive clock's file".into(), || file.sync_all())
+        });
+    crate::timed!("drive clock's file: close it", drop(file));
     // Read once closed: some network drives set the time only then.
-    let meta = written.and_then(|()| tmp.metadata(&name));
-    let removed = fsio::remove_file(tmp, &name);
+    let meta =
+        written.and_then(|()| crate::timed!("drive clock's file: read its time", tmp.metadata(&name)));
+    let removed = crate::timed!("drive clock's file: remove it", fsio::remove_file(tmp, &name));
     let now = meta?.modified_ns;
     removed?;
     Ok(now)
