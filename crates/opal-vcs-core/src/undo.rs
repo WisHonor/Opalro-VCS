@@ -737,6 +737,7 @@ fn jump(
         plan,
         drive,
         packs,
+        cache: None,
     };
     let applied = switch::switch(repo, lock, to_make, req.who, "undo", earlier)?;
     let effects = effects(&now.state, &state, folder_change);
@@ -856,6 +857,7 @@ fn take_one(
                 plan,
                 drive,
                 packs,
+                cache: None,
             };
             switch::switch(repo, lock, to_make, req.who, command, earlier)?
         }

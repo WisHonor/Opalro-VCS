@@ -94,6 +94,20 @@ pub fn plan(
     git_excludes: Option<&Path>,
 ) -> Result<Plan, SaveError> {
     planned(repo, from, to, only, remove_new, drive, git_excludes)
+        .map(|(plan, _)| plan)
+        .map_err(|e| told_whose(repo, e, from, to))
+}
+
+/// `plan`, with the file-state cache as a load would give it once the folder was read, if that
+/// is known, to hand on to [`carry_out`] when nothing reads the folder again before it.
+pub(crate) fn plan_keeping_cache(
+    repo: &Repository,
+    from: Id,
+    to: Id,
+    drive: Drive,
+    git_excludes: Option<&Path>,
+) -> Result<(Plan, Option<FileCache>), SaveError> {
+    planned(repo, from, to, None, false, drive, git_excludes)
         .map_err(|e| told_whose(repo, e, from, to))
 }
 
@@ -137,7 +151,7 @@ fn planned(
     remove_new: bool,
     drive: Drive,
     git_excludes: Option<&Path>,
-) -> Result<Plan, SaveError> {
+) -> Result<(Plan, Option<FileCache>), SaveError> {
     let store = repo.store();
     let from_root = store.save(&from, repo.signatures_allowed())?.root;
     let to_root = store.save(&to, repo.signatures_allowed())?.root;
@@ -337,7 +351,7 @@ fn planned(
     plan.collisions.dedup();
     plan.not_written = refused.into_iter().collect();
     plan.holds_conflicts = there.met_conflict();
-    Ok(plan)
+    Ok((plan, now.cache))
 }
 
 /// The paths of the entries of the save `save` that `drive` takes to be `path`: none, the one,
@@ -641,14 +655,26 @@ fn link_in(dir: &Dir, name: &str, path: &str, e: Expected) -> Result<Option<Stri
 /// that drive's business, and a journal finished on another drive is judged by that one.
 pub fn apply(
     repo: &Repository,
+    lock: &ChangeLock,
+    journal: &Journal,
+    drive: Drive,
+) -> Result<Applied, RepoError> {
+    apply_with(repo, lock, journal, drive, None)
+}
+
+/// `apply`, trusting `cache` as the file-state cache if given: it must be what a load would give
+/// now.
+fn apply_with(
+    repo: &Repository,
     _lock: &ChangeLock,
     journal: &Journal,
     drive: Drive,
+    cache: Option<FileCache>,
 ) -> Result<Applied, RepoError> {
     let mut run = Run {
         repo,
         folders: Folders::open(repo.root())?,
-        cache: FileCache::load(repo),
+        cache: cache.unwrap_or_else(|| FileCache::load(repo)),
         target_entry: journal.target,
         stored: HashMap::new(),
         target_root: None,
@@ -735,7 +761,19 @@ pub fn carry_out(
     journal: &Journal,
     drive: Drive,
 ) -> Result<Applied, RepoError> {
-    let done = apply(repo, lock, journal, drive)?;
+    carry_out_with(repo, lock, journal, drive, None)
+}
+
+/// `carry_out`, trusting `cache` as the file-state cache if given: it must be what a load would
+/// give now.
+pub(crate) fn carry_out_with(
+    repo: &mut Repository,
+    lock: &ChangeLock,
+    journal: &Journal,
+    drive: Drive,
+    cache: Option<FileCache>,
+) -> Result<Applied, RepoError> {
+    let done = apply_with(repo, lock, journal, drive, cache)?;
     if done.in_use.is_empty() {
         repo.move_head_to(lock, journal.target)?;
         match Journal::remove(repo, lock) {

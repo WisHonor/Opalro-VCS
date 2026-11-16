@@ -216,6 +216,8 @@ impl FileCache {
     /// handle's key, or the handle has none.
     #[must_use]
     pub fn load(repo: &Repository) -> FileCache {
+        #[cfg(test)]
+        counted::load();
         FileCache::load_from(repo.cache_folder(), &repo.cache_dir(), repo.cache_key())
     }
 
@@ -225,6 +227,8 @@ impl FileCache {
         repo: &Repository,
         meanwhile: impl FnOnce() -> T,
     ) -> (T, FileCache) {
+        #[cfg(test)]
+        counted::load();
         let (folder, shown, key) = (repo.cache_folder(), repo.cache_dir(), repo.cache_key());
         std::thread::scope(|scope| {
             let helper = std::thread::Builder::new()
@@ -252,7 +256,12 @@ impl FileCache {
             return FileCache::default();
         };
         bytes.truncate(body_len);
-        FileCache::decode_owned(bytes)
+        FileCache::from_body(bytes)
+    }
+
+    /// The cache a load gives when `cache/files` holds `body`, its seal opened.
+    fn from_body(body: Vec<u8>) -> FileCache {
+        FileCache::decode_owned(body)
             .map(|cache| FileCache {
                 loaded: true,
                 ..cache
@@ -368,8 +377,18 @@ impl FileCache {
     /// isn't at least 2 s older is kept as racy, never matched, since it may change again within
     /// one tick of the drive's clock.
     pub fn store(self, repo: &Repository, now_ns: i128) -> Result<(), RepoError> {
+        self.store_and_reload(repo, now_ns).map(|_| ())
+    }
+
+    /// `store`, giving what a load would give right after it: the cache `cache/files` holds now.
+    /// `None` when nothing was or could be stored, since the file may then hold anything.
+    pub(crate) fn store_and_reload(
+        self,
+        repo: &Repository,
+        now_ns: i128,
+    ) -> Result<Option<FileCache>, RepoError> {
         let Some(key) = repo.storing_key() else {
-            return Ok(());
+            return Ok(None);
         };
         let trusted_before = now_ns.saturating_sub(RACY_NS);
         // Every entry kept, none added and none turning racy: the same bytes, unencoded. A kept
@@ -380,12 +399,13 @@ impl FileCache {
                 .slots
                 .iter()
                 .all(|s| s.kept && s.entry.state.modified_ns <= trusted_before);
+        // The file still holds the body it was loaded from.
         if same {
-            return Ok(());
+            return Ok(Some(FileCache::from_body(self.body)));
         }
         let body = self.body_of(false, Some(trusted_before));
         if self.loaded && body == self.body {
-            return Ok(());
+            return Ok(Some(FileCache::from_body(body)));
         }
         let sealed = keyed::seal(key, &body);
         if sealed.len() as u64 > MAX_BYTES {
@@ -394,7 +414,7 @@ impl FileCache {
             )));
         }
         fsio::write_cache(repo.tmp_folder(), repo.cache_folder(), FILE, &sealed)?;
-        Ok(())
+        Ok(Some(FileCache::from_body(body)))
     }
 }
 
@@ -443,6 +463,24 @@ fn join_ns(secs: i64, nanos: u32) -> Option<i128> {
         return None;
     }
     i128::from(secs).checked_mul(SECOND)?.checked_add(nanos)
+}
+
+/// How many times this thread asked for the cache to be loaded.
+#[cfg(test)]
+pub(crate) mod counted {
+    use std::cell::Cell;
+
+    thread_local! {
+        static LOADS: Cell<usize> = const { Cell::new(0) };
+    }
+
+    pub(super) fn load() {
+        LOADS.set(LOADS.get().saturating_add(1));
+    }
+
+    pub(crate) fn loads() -> usize {
+        LOADS.get()
+    }
 }
 
 #[cfg(test)]
@@ -763,6 +801,82 @@ mod tests {
         assert!(cache.vouch("a", &file(1, THEN)).is_some());
         assert!(cache.vouch("b", &file(2, THEN)).is_some());
         cache.store(&repo, THEN + 120 * SECOND).unwrap();
+        assert_eq!(on_disk(&dir), before);
+    }
+
+    /// That `handed` is what loading the cache now gives, entry for entry.
+    fn as_loaded(handed: &FileCache, repo: &Repository, asked: &[(&str, EntryMeta)]) {
+        let loaded = FileCache::load(repo);
+        assert!(loaded.loaded && handed.loaded);
+        assert_eq!(handed.body, loaded.body);
+        assert_eq!(handed.encode(), loaded.encode());
+        assert!(handed.added.is_empty());
+        assert!(handed.slots.iter().all(|s| !s.kept && !s.gone));
+        for (path, meta) in asked {
+            assert_eq!(
+                handed.matches(path, meta),
+                loaded.matches(path, meta),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_store_gives_what_a_load_would_give_right_after() {
+        let later = THEN + 120 * SECOND;
+        let asked = [
+            ("a", file(1, THEN)),
+            ("b", file(2, THEN)),
+            ("c", file(3, later)),
+        ];
+        // Written: `b` dropped, `c` added too new to trust.
+        let (_dir, repo) = two_files();
+        let mut cache = FileCache::load(&repo);
+        assert!(cache.vouch("a", &file(1, THEN)).is_some());
+        cache.record("c", &file(3, later), Id([3; 32]));
+        let handed = cache.store_and_reload(&repo, later).unwrap().unwrap();
+        as_loaded(&handed, &repo, &asked);
+        assert!(handed.matches("b", &file(2, THEN)).is_none());
+        assert!(handed.matches("c", &file(3, later)).is_none());
+        // Nothing to write: every entry vouched for.
+        let (_dir, repo) = two_files();
+        let mut cache = FileCache::load(&repo);
+        assert!(cache.vouch("a", &file(1, THEN)).is_some());
+        assert!(cache.vouch("b", &file(2, THEN)).is_some());
+        let handed = cache.store_and_reload(&repo, later).unwrap().unwrap();
+        as_loaded(&handed, &repo, &asked);
+        // Nothing to write: an entry recorded again as it was.
+        let (_dir, repo) = two_files();
+        let mut cache = FileCache::load(&repo);
+        cache.record("a", &file(1, THEN), Id([1; 32]));
+        assert!(cache.vouch("b", &file(2, THEN)).is_some());
+        let handed = cache.store_and_reload(&repo, later).unwrap().unwrap();
+        as_loaded(&handed, &repo, &asked);
+    }
+
+    #[test]
+    fn a_store_that_writes_nothing_it_may_gives_nothing() {
+        let (dir, mut repo) = two_files();
+        let before = on_disk(&dir);
+        repo.store_no_caches();
+        let mut cache = FileCache::load(&repo);
+        cache.record("c", &file(3, THEN), Id([3; 32]));
+        assert!(
+            cache
+                .store_and_reload(&repo, THEN + 60 * SECOND)
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(on_disk(&dir), before);
+        let unkeyed = Repository::open(dir.path()).unwrap();
+        let mut cache = FileCache::load(&unkeyed);
+        cache.record("c", &file(3, THEN), Id([3; 32]));
+        assert!(
+            cache
+                .store_and_reload(&unkeyed, THEN + 60 * SECOND)
+                .unwrap()
+                .is_none()
+        );
         assert_eq!(on_disk(&dir), before);
     }
 

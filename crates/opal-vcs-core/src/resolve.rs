@@ -404,6 +404,7 @@ fn resolve_locked(
                 to: save_id,
                 plan,
                 drive,
+                cache: None,
             };
             let (applied, safety_copies, _) =
                 make_switch(repo, lock, planned, req.who, req.command, earlier)?;

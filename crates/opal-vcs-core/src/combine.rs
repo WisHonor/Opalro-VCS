@@ -1194,8 +1194,8 @@ impl Landing<'_> {
         to: Id,
         warnings: Vec<Warning>,
     ) -> Result<(Applied, usize, usize, bool), CombineError> {
-        let (mut plan, drive) =
-            plan_switch(repo, self.from, to, asked.git_excludes).map_err(|e| match e {
+        let (mut plan, drive, cache) = plan_switch(repo, self.from, to, asked.git_excludes)
+            .map_err(|e| match e {
                 SwitchError::Collisions { paths } => CombineError::Collisions { paths },
                 e => CombineError::Switch(e),
             })?;
@@ -1211,6 +1211,7 @@ impl Landing<'_> {
             to,
             plan,
             drive,
+            cache,
         };
         let (applied, safety_copies, carried) =
             make_switch(repo, lock, planned, asked.who, "combine", earlier)
