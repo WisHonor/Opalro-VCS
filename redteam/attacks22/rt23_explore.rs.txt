@@ -1,0 +1,291 @@
+//! Exploration for RT23; not kept.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+mod support;
+use support::{Env, run_limited, text};
+
+fn run(env: &Env, args: &[&str]) -> (Option<i32>, String, String) {
+    let out = env.opalro().args(args).output().unwrap();
+    (out.status.code(), text(&out.stdout), text(&out.stderr))
+}
+
+fn started() -> Env {
+    let env = Env::empty();
+    assert_eq!(run(&env, &["start", "--preset", "custom"]).0, Some(0));
+    env.overwrite("a.txt", "one\ntwo\nthree\n");
+    assert_eq!(run(&env, &["save", "A"]).0, Some(0));
+    env
+}
+
+fn everything(env: &Env) -> (support::Entries, support::Entries) {
+    (
+        support::entries(env.root()),
+        support::entries(&env.root().join(".opalro")),
+    )
+}
+
+#[cfg(unix)]
+#[test]
+fn rt23_fifo() {
+    let env = started();
+    let st = std::process::Command::new("mkfifo")
+        .arg(env.root().join("p.txt"))
+        .status()
+        .unwrap();
+    assert!(st.success());
+    let mut cmd = env.opal_process_in(env.root());
+    cmd.args(["who", "p.txt"]);
+    let ended = run_limited(cmd, 10);
+    eprintln!(
+        "fifo new: code {:?} timed_out {} {}",
+        ended.code, ended.timed_out, ended.stderr
+    );
+    std::fs::remove_file(env.root().join("a.txt")).unwrap();
+    let st = std::process::Command::new("mkfifo")
+        .arg(env.root().join("a.txt"))
+        .status()
+        .unwrap();
+    assert!(st.success());
+    let mut cmd = env.opal_process_in(env.root());
+    cmd.args(["who", "a.txt"]);
+    let ended = run_limited(cmd, 10);
+    eprintln!(
+        "fifo saved: code {:?} timed_out {} {}",
+        ended.code, ended.timed_out, ended.stderr
+    );
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn rt23_stopped_goto() {
+    for n in 1..60 {
+        let env = started();
+        assert_eq!(run(&env, &["line", "new", "side"]).0, Some(0));
+        env.overwrite("a.txt", "one\nside\nthree\n");
+        std::fs::create_dir_all(env.root().join("d")).unwrap();
+        for i in 0..5 {
+            env.overwrite(&format!("d/f{i}.txt"), &format!("{i}\n"));
+        }
+        assert_eq!(run(&env, &["save", "On side"]).0, Some(0));
+        let out = env
+            .opalro()
+            .args(["goto", "main"])
+            .env("OPALRO_FAULT_AT", n.to_string())
+            .output()
+            .unwrap();
+        let said = text(&out.stderr);
+        if !said.contains("injected crash") {
+            eprintln!("goto finished at {n}");
+            break;
+        }
+        let before = everything(&env);
+        for args in [
+            &["who", "a.txt"][..],
+            &["who", "a.txt", "--json"],
+            &["who", "a.txt", "--save", "main"],
+            &["blame", "d/f1.txt"],
+        ] {
+            let (code, shown, said) = run(&env, args);
+            let after = everything(&env);
+            if after != before {
+                let b: Vec<_> = before.1.keys().collect();
+                let a: Vec<_> = after.1.keys().collect();
+                panic!(
+                    "fault {n} {args:?} changed something; code {code:?}\n{shown}\n{said}\nbefore {b:?}\nafter {a:?}\nfolder before {:?}\nfolder after {:?}",
+                    before.0.keys().collect::<Vec<_>>(),
+                    after.0.keys().collect::<Vec<_>>()
+                );
+            }
+        }
+        eprintln!("fault {n}: who changed nothing ({})", said.lines().last().unwrap_or(""));
+    }
+}
+
+struct Rng(u64);
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+    fn below(&mut self, n: usize) -> usize {
+        (self.next() % n as u64) as usize
+    }
+}
+
+const TOKENS: [&str; 8] = ["x\n", "y\n", "{\n", "}\n", "x\r\n", "z", "\n", "y\r\n"];
+
+fn key(l: &[u8]) -> &[u8] {
+    let l = l.strip_suffix(b"\n").unwrap_or(l);
+    l.strip_suffix(b"\r").unwrap_or(l)
+}
+
+fn check_who(env: &Env, args: &[&str], text: &[u8], deadline: Option<&str>) -> usize {
+    let mut cmd = env.opalro();
+    cmd.args(args).arg("--json");
+    if let Some(d) = deadline {
+        cmd.env("OPALRO_DIFF_DEADLINE_MS", d);
+    }
+    let out = cmd.output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{args:?} {}", text_of(&out.stderr));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let lines: Vec<&[u8]> = text.split_inclusive(|b| *b == b'\n').collect();
+    let mut checked = 0;
+    for run in doc["runs"].as_array().unwrap() {
+        let Some(save) = run["save"].as_str() else {
+            continue;
+        };
+        let id = opal_core::id::Id::from_hex(save).unwrap();
+        let path = run["was"].as_str().unwrap_or(doc["path"].as_str().unwrap());
+        let files = support::saved_files(env, id);
+        let held = files.get(path).unwrap_or_else(|| panic!("{save} has no {path}"));
+        let keys: Vec<&[u8]> = held.split_inclusive(|b| *b == b'\n').map(key).collect();
+        let first = run["first"].as_u64().unwrap() as usize;
+        for n in first..first + run["lines"].as_u64().unwrap() as usize {
+            let line = key(lines[n - 1]);
+            assert!(
+                keys.contains(&line),
+                "{args:?} deadline {deadline:?}: line {n} {:?} named for {save} which lacks it",
+                String::from_utf8_lossy(line)
+            );
+            checked += 1;
+        }
+    }
+    checked
+}
+
+fn text_of(b: &[u8]) -> String {
+    String::from_utf8_lossy(b).into_owned()
+}
+
+#[test]
+fn rt23_model_lines_held() {
+    let mut total = 0;
+    for seed in 1..=6u64 {
+        let mut rng = Rng(0x9e37_79b9_7f4a_7c15 ^ seed.wrapping_mul(0x1234_5678_9abc));
+        let env = started();
+        assert_eq!(run(&env, &["line", "new", "side"]).0, Some(0));
+        let names = ["main", "side"];
+        let mut on = 1;
+        let mut tips = Vec::new();
+        for step in 0..24 {
+            match rng.below(6) {
+                0 => {
+                    on = 1 - on;
+                    let (c, _, e) = run(&env, &["goto", names[on]]);
+                    assert_eq!(c, Some(0), "{e}");
+                }
+                1 => {
+                    let (c, o, e) = run(&env, &["combine", names[1 - on]]);
+                    if c != Some(0) || o.contains("conflict") || e.contains("conflict") {
+                        let (c2, o2, e2) = run(&env, &["resolve", "--keep", "mine", "a.txt"]);
+                        eprintln!("seed {seed} step {step} combine {c:?}; resolve {c2:?} {o2} {e2}");
+                    }
+                }
+                _ => {
+                    let old = std::fs::read(env.root().join("a.txt")).unwrap_or_default();
+                    let mut lines: Vec<Vec<u8>> = old
+                        .split_inclusive(|b| *b == b'\n')
+                        .map(<[u8]>::to_vec)
+                        .collect();
+                    for _ in 0..1 + rng.below(4) {
+                        let at = rng.below(lines.len() + 1);
+                        let t = TOKENS[rng.below(TOKENS.len())].as_bytes().to_vec();
+                        match rng.below(3) {
+                            0 if at < lines.len() => {
+                                lines.remove(at);
+                            }
+                            1 if at < lines.len() => lines[at] = t,
+                            _ => lines.insert(at, t),
+                        }
+                    }
+                    // Only a last line may lack its ending.
+                    let n = lines.len();
+                    for l in lines.iter_mut().take(n.saturating_sub(1)) {
+                        if !l.ends_with(b"\n") {
+                            l.push(b'\n');
+                        }
+                    }
+                    std::fs::write(env.root().join("a.txt"), lines.concat()).unwrap();
+                    let (c, _, e) = run(&env, &["save", &format!("s{step}")]);
+                    assert!(c == Some(0) || e.contains("othing"), "{e}");
+                }
+            }
+            if step % 6 == 5 {
+                tips.push(support::main_tip(&env).to_hex());
+            }
+        }
+        let folder = std::fs::read(env.root().join("a.txt")).unwrap();
+        for d in [None, Some("0")] {
+            total += check_who(&env, &["who", "a.txt"], &folder, d);
+            for t in &tips {
+                let files = support::saved_files(&env, opal_core::id::Id::from_hex(t).unwrap());
+                if let Some(text) = files.get("a.txt") {
+                    total += check_who(&env, &["who", "a.txt", "--save", t], text, d);
+                }
+            }
+        }
+    }
+    eprintln!("checked {total} lines");
+}
+
+#[cfg(unix)]
+#[test]
+fn rt23_read_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = started();
+    env.overwrite("a.txt", "one\ntwo\nnew\n");
+    let set = |mode: u32| {
+        let mut dirs = vec![env.root().join(".opalro")];
+        while let Some(d) = dirs.pop() {
+            for e in std::fs::read_dir(&d).unwrap() {
+                let p = e.unwrap().path();
+                if p.is_dir() {
+                    dirs.push(p.clone());
+                }
+            }
+            std::fs::set_permissions(&d, std::fs::Permissions::from_mode(mode)).unwrap();
+        }
+    };
+    let before = everything(&env);
+    set(0o555);
+    for args in [
+        &["who", "a.txt"][..],
+        &["who", "a.txt", "--save", "main"],
+        &["who", "A.TXT"],
+        &["who", "a.txt", "--json"],
+    ] {
+        let (c, o, e) = run(&env, args);
+        eprintln!("read-only {args:?}: {c:?}\n{o}{e}");
+    }
+    set(0o755);
+    assert_eq!(everything(&env), before);
+}
+
+#[test]
+fn rt23_million_lines_memory() {
+    let env = started();
+    let mut body = String::with_capacity(4_000_000);
+    for i in 0..1_000_000u32 {
+        body.push_str(&format!("{}\n", i % 7));
+    }
+    env.overwrite("big.txt", &body);
+    assert_eq!(run(&env, &["save", "big"]).0, Some(0));
+    for round in 0..3 {
+        let mut lines: Vec<String> = body.lines().map(str::to_owned).collect();
+        for j in 0..1000 {
+            lines[(j * 997 + round * 13) % 1_000_000] = format!("r{round}-{j}");
+        }
+        body = lines.join("\n") + "\n";
+        env.overwrite("big.txt", &body);
+        assert_eq!(run(&env, &["save", &format!("round {round}")]).0, Some(0));
+    }
+    let mut cmd = env.opal_process_in(env.root());
+    cmd.args(["who", "big.txt", "--json"]);
+    let ended = run_limited(cmd, 300);
+    eprintln!(
+        "million: code {:?} {:.1}s peak {} MiB timed_out {} {}",
+        ended.code, ended.secs, ended.peak_mb, ended.timed_out, ended.stderr
+    );
+}
