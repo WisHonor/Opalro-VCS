@@ -32,7 +32,7 @@ Opalro keeps every version of your project: the code and the big files together,
 
 **What v0.2 is.** Opalro v0.2, the first published version, is for one person on one computer. Everything stays in your project folder, in a hidden folder named `.opalro`. There is no server yet, so you can't share a project through Opalro or work on one with other people. You can bring one line's work into another with `opalro combine`; syncing with a server and locking files are planned for v0.3 (see [section 13](#13-what-v02-doesnt-do-yet)).
 
-**If you used a build from before 0.2,** a project made with it opens as it is. To keep conflicts, it needs `opalro setup --upgrade` once ([`opalro setup`](#opalro-setup)).
+**If you used an earlier build of Opalro,** a project made with it opens as it is. To keep conflicts, it needs `opalro setup --upgrade` once ([`opalro setup`](#opalro-setup)).
 
 ## 2. Installing
 
@@ -144,7 +144,7 @@ The warning means only "nobody we know vouched for this program". It doesn't mea
 
 ### Folders that sync (OneDrive and the like)
 
-Opalro works in a project inside OneDrive: Windows keeps OneDrive's online-only files (placeholders, which stand in for files kept online) out of view of programs like Opalro, and the archive doesn't change that. This was tried on a real OneDrive folder, with a build from before 0.2.
+Opalro works in a project inside OneDrive: Windows keeps OneDrive's online-only files (placeholders, which stand in for files kept online) out of view of programs like Opalro, and the archive doesn't change that. This was tried on a real OneDrive folder, with an earlier build of Opalro.
 
 If another sync tool lets Opalro see a placeholder, Opalro can't read it yet, so `opalro save` and `opalro status` stop at it, as at any file Opalro can't read.
 
@@ -828,7 +828,7 @@ Next: fix the marked files and pick a version for the rest, then run opalro reso
 Changed your mind? opalro undo
 ```
 
-A text file is marked: both versions are in it, between marker lines, for you to fix in your editor. Anything else is left as your line has it, or as nothing where your line removed it. `opalro status` lists the places in conflict until you fix them, and `opalro undo` takes the whole combine back. In a script that must not go on with a conflict, use `opalro combine wall-run --only-if-clean`: whenever your line would end up on a save that holds a conflict, whether the combine would make it or one of the lines holds it already, it stops, names each place it would make, says how many the lines hold, and changes nothing, ending with exit code 1. A project made by a build from before 0.2 can't keep conflicts until `opalro setup --upgrade` turns them on; until then a combine stops there too.
+A text file is marked: both versions are in it, between marker lines, for you to fix in your editor. Anything else is left as your line has it, or as nothing where your line removed it. `opalro status` lists the places in conflict until you fix them, and `opalro undo` takes the whole combine back. In a script that must not go on with a conflict, use `opalro combine wall-run --only-if-clean`: whenever your line would end up on a save that holds a conflict, whether the combine would make it or one of the lines holds it already, it stops, names each place it would make, says how many the lines hold, and changes nothing, ending with exit code 1. A project made by an earlier build of Opalro can't keep conflicts until `opalro setup --upgrade` turns them on; until then a combine stops there too.
 
 Your unsaved changes come along, as with `opalro goto`; where the combine would change a file you have unsaved work in, it stops and changes nothing. `opalro undo` takes a combine back: the line goes back to where it was, and your files with it. See [Lines](#8-lines) for combining and then deleting a line.
 
@@ -1010,7 +1010,7 @@ Next: edit opalro.toml or .opalroignore to change a rule, or switch presets with
 
 `opalro setup` alone changes nothing. `opalro setup --preset <name>` switches to another preset: it shows the exact lines it would change in both files, asks `Apply these changes? [y/N]`, and changes them only on a yes. `--yes` skips the question. See [section 5](#5-presets-opalrotoml-and-opalroignore).
 
-A project made with a build from before 0.2 doesn't keep conflicts yet: there, `opalro setup` ends its list with `Upgrade available: conflicts (opalro setup --upgrade)`. `opalro setup --upgrade` says what each new feature allows and what it costs, then asks `Turn it on? [y/N]`; on a yes it says `Turned on conflicts: this project can keep conflicts now.` `--yes` answers the question. Once a feature is on, an Opalro from before that feature can't open the project, and `opalro undo` can't turn it off. A project made with this version has every feature from the start, and `opalro setup --upgrade` there says `Nothing to turn on`.
+A project made with an earlier build of Opalro doesn't keep conflicts yet: there, `opalro setup` ends its list with `Upgrade available: conflicts (opalro setup --upgrade)`. `opalro setup --upgrade` says what each new feature allows and what it costs, then asks `Turn it on? [y/N]`; on a yes it says `Turned on conflicts: this project can keep conflicts now.` `--yes` answers the question. Once a feature is on, an Opalro from before that feature can't open the project, and `opalro undo` can't turn it off. A project made with this version has every feature from the start, and `opalro setup --upgrade` there says `Nothing to turn on`.
 
 ### `opalro import`
 
@@ -1593,8 +1593,6 @@ Every command ends with one of three exit codes:
 
 The `--json` reference, published on https://opalro.com, describes every document, field and warning. Every document says its format's version in `opalro_json`, `1` since v0.2, the first published version. Within one version, a field is never removed, renamed or given another meaning, though new ones may be added; a change that would break that gets the next version number. The words of messages and hints, which are for people, may change at any time.
 
-<a id="13-what-v01-doesnt-do-yet"></a>
-
 ## 13. What v0.2 doesn't do yet
 
 - **No server, no sharing.** v0.2 is one person on one computer. Opalro can't yet copy a project from a server, or send and get changes (syncing is planned for v0.3).
@@ -1611,10 +1609,10 @@ The `--json` reference, published on https://opalro.com, describes every documen
 
 ### Where Git and Git LFS still do better
 
-Opalro is measured against Git and Git LFS on GitHub's Linux and Windows machines (its runners), doing the same steps on the same data. The numbers below are from those runs. Most were measured on 2026-11-10, on the code before lines and combining were built, and not measured again; the ones measured on v0.2's own code say "with v0.2". Your own computer will give others. On Git's own source code, Opalro's first save takes about a fifth of Git's time on Linux and a tenth to an eighth on Windows, and a small save is level with Git on Linux and quicker on Windows. Every case where Git or Git LFS came out ahead:
+Opalro is measured against Git and Git LFS on GitHub's Linux and Windows machines (its runners), doing the same steps on the same data. The numbers below are from those runs. Most were measured on 2026-11-10 and 2026-11-11, on the code before lines and combining were built, and not measured again; the ones measured on v0.2's own code say "with v0.2". Your own computer will give others. On Git's own source code, Opalro's first save takes about a fifth of Git's time on Linux and a tenth to an eighth on Windows, and a small save is level with Git on Linux and quicker on Windows. Every case where Git or Git LFS came out ahead:
 
-- **`opalro status`:** on 2026-11-10, on a code project it took 1.5 to 1.9 times Git's time on Linux and 1.4 to 2.2 times on Windows; about twice on a project with many folders (Godot's demo projects). On a project of only a few files it takes about a millisecond more than Git on Linux, which is Opalro starting up. With v0.2, in nine runs of Opalro's speed check on Linux (eight on the code as it was being built, one on the code as packaged), `status` with nothing changed took 1.68 to 2.29 times Git's time on a code project: over twice in five, and 1.824 in the run on the code as packaged. Four of those five were on one processor type, where Git took 6.1 to 6.6 ms: there Git's time decides the ratio, and Git got quicker when GitHub changed its machines' software.
-- **Going back to another save** (`opalro goto`): on 2026-11-10, it took 1.8 to 2.7 times Git's time on a code project on Linux, and about twice on Windows on a project with many folders. With v0.2, in the same nine runs on Linux, it took 1.93 to 2.74 times Git's time, and was under twice in one; in the run on the code as packaged, 2.125; on Windows it was under twice in every run that printed its numbers.
+- **`opalro status`:** on 2026-11-10 and 2026-11-11, on a code project it took 1.5 to 1.9 times Git's time on Linux and 1.4 to 2.2 times on Windows; about twice on a project with many folders (Godot's demo projects). On a project of only a few files it takes about a millisecond more than Git on Linux, which is Opalro starting up. With v0.2, in the nine runs of Opalro's speed check on v0.2's code that measured all three of its steps on Linux (eight while it was being built, one on the code as packaged), `status` with nothing changed took 1.68 to 2.29 times Git's time on a code project: over twice in five, and 1.824 in the run on the code as packaged. Four of those five were on one processor type, where Git took 6.1 to 6.6 ms: there Git's time decides the ratio, and Git got quicker when GitHub changed its machines' software.
+- **Going back to another save** (`opalro goto`): on 2026-11-10 and 2026-11-11, it took 1.8 to 2.7 times Git's time on a code project on Linux, and about twice on Windows on a project with many folders. With v0.2, in the same nine runs on Linux, it took 1.93 to 2.74 times Git's time, and was under twice in one; in the run on the code as packaged, 2.125; on Windows it was under twice in every run that printed its numbers.
 - **A switch that rewrites thousands of files** takes 1.8 to 3.1 seconds against Git's 0.46 to 0.75 for 3,557 files on Linux, and 3.9 to 4.4 against 1.4 to 1.7 on Windows. Opalro writes each file safely to the disk before putting it in place, so a crash can't leave half a file; Git doesn't.
 - **A small save** on a project with many folders is behind Git on Linux (30.6 ms against 23.9), though ahead on Windows.
 - **On a slow disk,** Git LFS is quicker at the first save of big files that don't compress (1.4 to 1.9 seconds against 4.9 to 5.1 for a gigabyte on Linux), and Git is quicker at going back to an old version of a big file (4.0 to 4.8 seconds against 2.4 to 3.2 for a gigabyte on Linux, 5.1 to 6.1 against 4.1 on Windows).
