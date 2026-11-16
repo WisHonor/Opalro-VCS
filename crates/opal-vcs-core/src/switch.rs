@@ -4,7 +4,7 @@
 use std::path::Path;
 
 use crate::diary::{Action, DiaryEntry, FolderChange, MAX_SHELVES, Position, State, is_plain};
-use crate::drive::{self, Drive};
+use crate::drive::Drive;
 use crate::history::{ResolveError, tip_of};
 use crate::id::Id;
 use crate::journal::{Change, Journal};
@@ -673,7 +673,7 @@ pub(crate) fn plan_switch(
     to: Id,
     git_excludes: Option<&Path>,
 ) -> Result<(Plan, Drive, Option<Vec<u8>>), SwitchError> {
-    let drive = drive::probe(repo.tmp_folder()).map_err(RepoError::from)?;
+    let drive = repo.drive()?;
     let (plan, cache) = writeout::plan_keeping_cache(repo, from, to, drive, git_excludes)?;
     if !plan.collisions.is_empty() {
         return Err(SwitchError::Collisions {

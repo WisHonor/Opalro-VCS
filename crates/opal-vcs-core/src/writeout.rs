@@ -15,7 +15,7 @@ use opal_platform::dir::{Dir, EntryMeta, EntryType, is_link_refusal};
 use crate::conflict::Listings;
 use crate::diary::DiaryEntry;
 use crate::diff::{for_each_change_with, for_each_entry_change_with};
-use crate::drive::{self, Drive};
+use crate::drive::Drive;
 use crate::filecache::FileCache;
 use crate::fsio::{self, BETWEEN_TRIES, Done, TRIES};
 use crate::history::{current_save, tip_of};
@@ -825,7 +825,7 @@ pub fn finish_interrupted(
         return Ok(Some(Applied::default()));
     }
     usable(repo, journal.target, journal.from, head)?;
-    let drive = drive::probe(repo.tmp_folder())?;
+    let drive = repo.drive()?;
     let mut done = carry_out(repo, lock, &journal, drive)?;
     if !done.in_use.is_empty() {
         return Err(RepoError::SwitchInUse {

@@ -187,7 +187,8 @@ pub enum RepoError {
         escape(&source.to_string(), false)
     )]
     CantWrite { path: PathBuf, source: io::Error },
-    /// The drive's name test couldn't make its file in `.opalro/tmp`, at `path`.
+    /// The drive's name test couldn't make its file in `.opalro/tmp`, at `path`. Its other errors
+    /// keep their own words.
     #[error(
         "Opalro couldn't make a file in {}: {}",
         escape(&path.display().to_string(), false),
@@ -1555,9 +1556,13 @@ impl Repository {
 
     /// How the project's drive compares names.
     pub fn drive(&self) -> Result<crate::drive::Drive, RepoError> {
-        crate::drive::probe(self.tmp_folder()).map_err(|source| RepoError::DriveUntested {
-            path: self.tmp.clone(),
-            source,
+        use crate::drive::ProbeError;
+        crate::drive::probe_telling(self.tmp_folder()).map_err(|e| match e {
+            ProbeError::CantMake(source) => RepoError::DriveUntested {
+                path: self.tmp.clone(),
+                source,
+            },
+            ProbeError::Other(e) => e.into(),
         })
     }
 

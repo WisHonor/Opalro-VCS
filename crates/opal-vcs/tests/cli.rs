@@ -46,7 +46,7 @@ fn warning_kinds(doc: &serde_json::Value) -> Vec<&str> {
 }
 
 #[test]
-fn version_is_the_package_s() {
+fn the_version_printed_is_the_package_version() {
     let env = Env::new();
     let out = env.opalro().arg("--version").output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));

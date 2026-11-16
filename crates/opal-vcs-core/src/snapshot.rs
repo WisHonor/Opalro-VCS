@@ -18,7 +18,7 @@ use crate::conflict::standing::as_it_stands;
 use crate::conflict::{self, Record, Recording, Settled, Summary, markers};
 use crate::diary::{Action, DiaryEntry, Position, State};
 use crate::diff::count_changes;
-use crate::drive::{self, Drive};
+use crate::drive::Drive;
 use crate::filecache::{self, FileCache, FileState};
 use crate::fsio;
 use crate::history;
@@ -827,7 +827,7 @@ pub(crate) fn read_and_build(
 ) -> Result<Walked, SaveError> {
     // Before the walk, as for `read_folder`; without it every file is read.
     let now = filecache::drive_now(repo).ok();
-    let drive = drive::probe(repo.tmp_folder()).map_err(RepoError::from)?;
+    let drive = repo.drive()?;
     let keeps_conflicts = repo.keeps_conflicts();
     let mut base = Base::new(repo.store(), parent.root, base_limits());
     base.conflicts = keeps_conflicts;
@@ -2543,7 +2543,7 @@ pub(crate) fn read_folder(
     let now = filecache::drive_now(repo).ok();
     let drive = match drive {
         Some(drive) => drive,
-        None => drive::probe(repo.tmp_folder()).map_err(RepoError::from)?,
+        None => repo.drive()?,
     };
     let keeps_conflicts = repo.keeps_conflicts();
     let walked = || {
@@ -2700,6 +2700,7 @@ impl Contents for Reading {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
+    use crate::drive;
     use crate::drive::Drive;
     use crate::id::{Flavor, hash_content, hash_record};
     use crate::listing::EntryKind;

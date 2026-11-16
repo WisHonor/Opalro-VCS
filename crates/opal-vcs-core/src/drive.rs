@@ -40,6 +40,21 @@ thread_local! {
 /// checks), and opening a project clears `tmp/` while the lock is free: a file taken away midway
 /// gives no answer, so it tests again.
 pub fn probe(tmp: &Dir) -> io::Result<Drive> {
+    probe_telling(tmp).map_err(|e| match e {
+        ProbeError::CantMake(e) | ProbeError::Other(e) => e,
+    })
+}
+
+/// Why `probe` gave no answer.
+#[derive(Debug)]
+pub(crate) enum ProbeError {
+    /// Its file couldn't be made in `tmp`.
+    CantMake(io::Error),
+    Other(io::Error),
+}
+
+/// `probe`, telling a file that couldn't be made from everything else.
+pub(crate) fn probe_telling(tmp: &Dir) -> Result<Drive, ProbeError> {
     #[cfg(test)]
     PROBES.set(PROBES.get() + 1);
     for _ in 0..TRIES {
@@ -47,15 +62,15 @@ pub fn probe(tmp: &Dir) -> io::Result<Drive> {
             return Ok(drive);
         }
     }
-    Err(io::Error::other(
+    Err(ProbeError::Other(io::Error::other(
         "the file Opalro tests the drive with kept disappearing from .opalro/tmp, which other Opalro \
          commands clear; run this one again",
-    ))
+    )))
 }
 
 /// One test of the drive, or `None` if its file went away before the answer was sure.
-fn probe_once(tmp: &Dir) -> io::Result<Option<Drive>> {
-    let (file, plain) = fsio::create_temp(tmp)?;
+fn probe_once(tmp: &Dir) -> Result<Option<Drive>, ProbeError> {
+    let (file, plain) = fsio::create_temp(tmp).map_err(ProbeError::CantMake)?;
     drop(file);
     let name = plain.to_string_lossy().into_owned();
     let accented = format!("{name}{}", fsio::ACCENTED_SUFFIX);
@@ -82,7 +97,7 @@ fn probe_once(tmp: &Dir) -> io::Result<Option<Drive>> {
     for left in [plain.as_os_str(), OsStr::new(&accented)] {
         let _ = fsio::remove_file(tmp, left);
     }
-    result
+    result.map_err(ProbeError::Other)
 }
 
 /// Whether the folder `dir` holds something under the name `name`, as this drive compares names.
@@ -168,5 +183,34 @@ mod tests {
         let gone = Dir::open_top(&tmp.path().join("gone")).unwrap();
         fs::remove_dir(tmp.path().join("gone")).unwrap();
         assert!(probe(&gone).is_err());
+        // No file could be made there.
+        assert!(matches!(probe_telling(&gone), Err(ProbeError::CantMake(_))));
+    }
+
+    /// A file made every time and taken away every time is not a file that couldn't be made.
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn a_probe_file_that_keeps_disappearing_keeps_its_own_words() {
+        use crate::fsio::fault;
+        fn clear_each_try(at: std::path::PathBuf, tries: usize) {
+            if tries == 0 {
+                return;
+            }
+            fault::act_at("drive:case", move || {
+                for left in fs::read_dir(&at).unwrap() {
+                    fs::remove_file(left.unwrap().path()).unwrap();
+                }
+                clear_each_try(at, tries - 1);
+            });
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        clear_each_try(tmp.path().to_owned(), TRIES);
+        match probe_telling(&held(&tmp)) {
+            Err(ProbeError::Other(e)) => {
+                assert!(e.to_string().contains("kept disappearing"), "{e}")
+            }
+            Err(ProbeError::CantMake(e)) => panic!("{e}"),
+            Ok(d) => panic!("{d:?}"),
+        }
     }
 }

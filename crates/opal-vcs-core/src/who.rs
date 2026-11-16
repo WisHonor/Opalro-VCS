@@ -173,17 +173,20 @@ type Stretches = Rc<Vec<(usize, usize, usize)>>;
 const REMEMBERED: usize = 256;
 const REMEMBERED_STRETCHES: usize = 1 << 20;
 
-/// Comparisons already made, by the two versions' content IDs, so lines that reach a version
-/// after its turn cost a lookup; the oldest is dropped first. No text is kept.
+/// Two versions compared: each one's content ID and the size its listing claims.
+type Pair = ((Id, u64), (Id, u64));
+
+/// Comparisons already made, by the two versions compared, so lines that reach a version after
+/// its turn cost a lookup; the oldest is dropped first. No text is kept.
 #[derive(Default)]
 struct Remembered {
-    found: HashMap<(Id, Id), Stretches>,
-    order: VecDeque<(Id, Id)>,
+    found: HashMap<Pair, Stretches>,
+    order: VecDeque<Pair>,
     stretches: usize,
 }
 
 impl Remembered {
-    fn keep(&mut self, key: (Id, Id), found: Stretches) {
+    fn keep(&mut self, key: Pair, found: Stretches) {
         self.stretches = self.stretches.saturating_add(found.len());
         if let Some(old) = self.found.insert(key, found) {
             self.stretches = self.stretches.saturating_sub(old.len());
@@ -205,6 +208,9 @@ impl Remembered {
 thread_local! {
     /// How many comparisons this thread's `who` made.
     static COMPARED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// How many times this thread's `who` read each older version, by its content ID.
+    static READ_OLDER: std::cell::RefCell<HashMap<Id, usize>> =
+        std::cell::RefCell::new(HashMap::new());
 }
 
 /// Names the save behind each line of the file at `req.path`, through every parent, the first
@@ -282,7 +288,7 @@ pub fn who(repo: &Repository, req: &WhoRequest<'_>) -> Result<Whose, WhoError> {
             let in_save = saved.is_some();
             if let Some((_, entry)) = saved {
                 let mut left = (0..changes::line_count(&text)).map(|i| (i, i)).collect();
-                let found = compare(store, Some(&text), &entry, &mut coarse)?.unwrap_or_default();
+                let found = compare(store, Some(&text), &entry, &mut coarse)?;
                 let lines = take(&found, &mut left);
                 if !lines.is_empty() {
                     heap.push(Turn {
@@ -344,7 +350,9 @@ pub fn who(repo: &Repository, req: &WhoRequest<'_>) -> Result<Whose, WhoError> {
             let taken = if e.id == entry.id {
                 std::mem::take(&mut lines)
             } else {
-                let pair = (entry.id, e.id);
+                // The sizes the listings claim decide whether a side is read at all, so they are
+                // part of what was compared.
+                let pair = ((entry.id, entry.size), (e.id, e.size));
                 let found = match remembered.found.get(&pair) {
                     Some(found) => Rc::clone(found),
                     None => {
@@ -352,15 +360,9 @@ pub fn who(repo: &Repository, req: &WhoRequest<'_>) -> Result<Whose, WhoError> {
                             here = Some(version(store, &entry, asked)?);
                         }
                         let text = here.as_ref().and_then(|h| h.as_deref());
-                        // A side not read is not remembered: another listing of the same
-                        // contents may claim a size that lets it be read.
-                        match compare(store, text, &e, &mut coarse)? {
-                            Some(found) => {
-                                remembered.keep(pair, Rc::clone(&found));
-                                found
-                            }
-                            None => Stretches::default(),
-                        }
+                        let found = compare(store, text, &e, &mut coarse)?;
+                        remembered.keep(pair, Rc::clone(&found));
+                        found
                     }
                 };
                 take(&found, &mut lines)
@@ -465,24 +467,27 @@ fn keys_of(text: &[u8]) -> Vec<&[u8]> {
         .collect()
 }
 
-/// Which lines of `here` the older version `older` has too; `None` when a side can't be compared
-/// line by line, so none of them.
+/// Which lines of `here` the older version `older` has too. A version that can't be compared line
+/// by line has none.
 fn compare(
     store: &Store,
     here: Option<&[u8]>,
     older: &Entry,
     coarse: &mut bool,
-) -> Result<Option<Stretches>, SaveError> {
+) -> Result<Stretches, SaveError> {
+    let none = || Rc::new(Vec::new());
     let Some(here) = here else {
-        return Ok(None);
+        return Ok(none());
     };
+    #[cfg(test)]
+    READ_OLDER.with_borrow_mut(|r| *r.entry(older.id).or_default() += 1);
     let Side::Bytes(old) =
         changes::stored(store, Some(older.kind), Some(older.id), Some(older.size))?
     else {
-        return Ok(None);
+        return Ok(none());
     };
     if changes::comparable(&old).is_err() {
-        return Ok(None);
+        return Ok(none());
     }
     #[cfg(test)]
     COMPARED.set(COMPARED.get() + 1);
@@ -499,7 +504,7 @@ fn compare(
             _ => None,
         })
         .collect();
-    Ok(Some(Rc::new(found)))
+    Ok(Rc::new(found))
 }
 
 /// The lines of `left` that `found` says the older version has, each with its line there; they
@@ -1005,6 +1010,63 @@ mod tests {
             at(&repo, honest_first, "a.txt").runs,
             runs(&[(2, by(honest)), (1, by(honest_first))])
         );
+    }
+
+    /// Two saves of the same text, one over an honest listing of the older text and one over a
+    /// listing claiming it is past the limit: the claim is kept whichever is compared first.
+    #[test]
+    fn a_comparison_remembered_is_not_used_for_a_listing_that_claims_another_size() {
+        for honest_first in [true, false] {
+            let (_dir, mut repo) = project();
+            let mut plant = Plant::new(&mut repo);
+            let base = plant.base;
+            let older: &[u8] = b"a\nb\n";
+            let honest = plant.save("Honest", &[base], &[("a.txt", older)], &[], 1);
+            let lie = Entry {
+                name: "a.txt".into(),
+                kind: EntryKind::File,
+                id: plant.packs.add_content(older).unwrap(),
+                size: changes::MAX_LINES_SIZE + 1,
+            };
+            let root = add_listing(&mut plant.packs, vec![lie]).0;
+            let lying = plant.save_root("Lying", &[base], root, &[], 2);
+            // The newer save's turn comes first.
+            let (t1, t2) = if honest_first { (4, 3) } else { (3, 4) };
+            let newer: &[u8] = b"a\nb\nx\n";
+            let x1 = plant.save("X1", &[honest], &[("a.txt", newer)], &[], t1);
+            let x2 = plant.save("X2", &[lying], &[("a.txt", newer)], &[], t2);
+            let p1 = plant.save("P1", &[x1], &[("a.txt", b"a\n")], &[], 5);
+            let p2 = plant.save("P2", &[x2], &[("a.txt", b"b\n")], &[], 6);
+            let m = plant.save("M", &[p1, p2], &[("a.txt", b"a\nb\n")], &[], 7);
+            plant.commit(&mut repo);
+            assert_eq!(
+                at(&repo, m, "a.txt").runs,
+                runs(&[(1, by(honest)), (1, by(x2))]),
+                "honest first: {honest_first}"
+            );
+        }
+    }
+
+    /// Lines reach two saves of the same text whose parent's version isn't text: that version
+    /// is read once, and what was found is remembered for the second.
+    #[test]
+    fn a_version_found_not_to_be_text_is_read_once() {
+        let (_dir, mut repo) = project();
+        let mut plant = Plant::new(&mut repo);
+        let base = plant.base;
+        let binary: &[u8] = b"\0bin";
+        let r = plant.save("Binary", &[base], &[("a.txt", binary)], &[], 1);
+        let q1 = plant.save("Q1", &[r], &[("a.txt", b"a\nb\n")], &[], 2);
+        let q2 = plant.save("Q2", &[r], &[("a.txt", b"a\nb\n")], &[], 3);
+        let p1 = plant.save("P1", &[q1], &[("a.txt", b"a\n")], &[], 4);
+        let p2 = plant.save("P2", &[q2], &[("a.txt", b"b\n")], &[], 5);
+        let m = plant.save("M", &[p1, p2], &[("a.txt", b"a\nb\n")], &[], 6);
+        plant.commit(&mut repo);
+        let reads = || READ_OLDER.with_borrow(|r| r.get(&crate::id::hash_content(binary)).copied());
+        let before = reads().unwrap_or(0);
+        let w = at(&repo, m, "a.txt");
+        assert_eq!(w.runs, runs(&[(1, by(q1)), (1, by(q2))]));
+        assert_eq!(reads().unwrap_or(0) - before, 1);
     }
 
     #[test]
