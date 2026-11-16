@@ -28,7 +28,7 @@ On five files of Git's own history, `opalro who` took 3 to 5 times `git blame`'s
 
 ## Files another program has open, on Windows
 
-On Windows, a program that holds a file open (an editor, a game engine, a preview) stops Opalro from writing over it. The commands that write files in your folder (`opalro goto`, `opalro discard`, `opalro shelf`, `opalro unshelf`, `opalro undo`, `opalro redo` and `opalro setup --preset`) write everything else, name the file, and stop.
+On Windows, a program that holds a file open (an editor, a game engine, a preview) stops Opalro from writing over it. The commands that write files in your folder (`opalro goto`, `opalro combine`, `opalro discard`, `opalro shelf`, `opalro unshelf`, `opalro undo`, `opalro redo` and `opalro setup --preset`) write everything else, name the file, and stop.
 
 `opalro save` stops too, when the program doesn't let others read the file (Opalro says "Can't read" and the file's name), or writes to it while Opalro reads it (Opalro says it "changed while Opalro was reading it").
 
