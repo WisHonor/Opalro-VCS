@@ -6,8 +6,6 @@ Almost every command that changes something can be taken back with `opalro undo`
 
 **This is an early version.** Opalro 0.2 is for one person on one computer: there is no server, so no sharing or locking yet. Keep another copy of anything that matters to you; Opalro is not a backup yet.
 
-**If you used Opalro 0.1:** a project made with it opens as it is. To keep conflicts it needs `opalro setup --upgrade` once, and after that Opalro 0.1 can't open it; nor can Opalro 0.1 open a project started with 0.2.
-
 ## The downloads
 
 Take the archive for your system:

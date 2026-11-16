@@ -8,15 +8,9 @@ Opalro 0.2 is for one person on one computer. It can't share a project, lock fil
 
 **What to do:** keep another copy of anything that matters, such as a copy of the whole project folder, `.opalro` included. If `opalro verify` reports damage, go back to that copy, and please tell us.
 
-## Opalro 0.1 can't open a project that keeps conflicts
-
-A project made with Opalro 0.1 opens in 0.2 as it is. To keep conflicts it needs `opalro setup --upgrade` once, which asks first; after that, Opalro 0.1 can't open it, and `opalro undo` can't turn it off. Opalro 0.1 can't open a project started with 0.2 either.
-
-**What to do:** if you still need Opalro 0.1 for a project, copy the project folder, `.opalro` included, before the upgrade.
-
 ## Going back to another save is slower than Git on Linux
 
-`opalro goto` takes about twice Git's time on Linux, often more: 1.93 to 2.74 times in nine runs on GitHub's Linux machines (2.125 in the one on the code as packaged), how much depending on the machine's processor. Opalro's own bar is twice Git's time; this version is held to three and a half times instead, as 0.1 was.
+`opalro goto` takes about twice Git's time on Linux, often more: 1.93 to 2.74 times in nine runs on GitHub's Linux machines (2.125 in the one on the code as packaged), how much depending on the machine's processor. Opalro's own bar is twice Git's time; this version is held to three and a half times instead.
 
 **What to do:** nothing; it is only slower.
 

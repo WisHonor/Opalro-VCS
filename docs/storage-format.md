@@ -1,6 +1,6 @@
 # Opalro Storage Format — Draft
 
-> **Status:** draft of repository format 1, written during the design phase (2026-10-31). The byte layouts follow decisions 004–016 and 019. Test vectors (§13) are added milestone by milestone, and format 1 freezes when v0.1 is released ([decision 121](decisions/121-format-1-freezes-at-v0.1.md) says what that covers and what it promises). Until then anything here may change, and repositories made by development builds are disposable (decision 019).
+> **Status:** draft of repository format 1, written during the design phase (2026-10-31). The byte layouts follow decisions 004–016 and 019. Test vectors (§13) are added milestone by milestone, and format 1 freezes when v0.2, the first published version, is published ([decision 190](decisions/190-v0.2-is-the-first-published-version.md), which moves [decision 121](decisions/121-format-1-freezes-at-v0.1.md)'s freeze from v0.1, never published, to v0.2): what decision 121 lists, and what v0.2 added, the `conflicts` feature and the conflict record. Until then anything here may change, and repositories made by development builds are disposable (decision 019); v0.1's draft release is one of those builds, and Opalro goes on reading what they wrote.
 
 **In plain words.** This document says exactly which bytes Opalro writes, so any program, or a future version of Opalro, can read an Opalro repository without guessing. Everything Opalro stores is either a piece of file content or a small structured record (a folder listing, a save, a diary entry…). Each one is named by its fingerprint, packed into pack files, and checked against its fingerprint every time it is read.
 
@@ -732,7 +732,7 @@ The first implementation generates, and the owner reviews, vectors in `crates/op
 - a small reference pack and a `.opalro/format` file;
 - invalid encodings that every reader must reject.
 
-Vectors are added milestone by milestone, for the records each milestone builds; format 1 freezes at the v0.1 release (decision 019).
+Vectors are added milestone by milestone, for the records each milestone builds; format 1 freezes when v0.2 is published (decision 019, moved to v0.2 by decision 190).
 
 **The files so far.** All are in `crates/opal-vcs-core/tests/vectors/`.
 - **Milestone 1:**

@@ -8,7 +8,7 @@ Opalro keeps every version of your project, the code and the big files together:
 
 ## It is early
 
-This is version 0.2. It is for one person on one computer: there is no server yet, so no sharing or locking. New in it: making, renaming and deleting lines, tags, combining one line into another, conflicts you fix when you choose (`opalro resolve`), and `opalro who`, which shows the save behind each line of a file. A project made with Opalro 0.1 opens as it is; to keep conflicts it needs `opalro setup --upgrade` once, and after that Opalro 0.1 can't open it. Nor can Opalro 0.1 open a project started with 0.2.
+This is version 0.2, the first one people outside are given. It is for one person on one computer: there is no server yet, so no sharing or locking. Besides saving and going back, it has lines of their own for ideas, tags, combining one line into another, conflicts you fix when you choose (`opalro resolve`), and `opalro who`, which shows the save behind each line of a file.
 
 Opalro has been built to never lose or damage your files, and tested hard for it. Still, it is new: **keep another copy of anything that matters to you.** Opalro is not a backup yet. A copy of the project folder made before you start is enough.
 
