@@ -601,12 +601,13 @@ Planned on 2026-11-15 after decisions [184](decisions/184-opalro-who-the-save-be
 - *Done when:* the table is in [benchmarks.md](benchmarks.md) and the gate is run before and after.
 - Two changes kept: the folder walk's lookups done once per folder, which took back about two thirds of what milestone 9 had cost `status` and `goto`; and the file cache a `goto` loaded twice, now once (its first form made `status` slower and was rebuilt). The ten flushes of a `goto`, what each is for and what it costs, are written up for the owner to rule on ([benchmarks.md](benchmarks.md) §15). The gate's run on the milestone's last code comes with the Nightly run that closes it.
 
-**9. The package** (Task 9)
+**9. The package** ✅ (2026-11-16; Task 9)
 - Version 0.2.0 with its notes; every document a release carries brought to v0.2; a page of what is left for the owner ([decision 187](decisions/187-v0.2s-package.md)). `USER-AGREEMENT.md` is not touched.
 - *Done when:* the program says `opalro 0.2.0` and the guide names this version's archives.
 
 **10. Docs, red team, review, merge, and the package's run** (Tasks 10 to 12)
 - The documents; a red-team session; a whole-branch review and one round of fixes; the merge into `v0.2`; the release workflow started by hand on `v0.2`, where its draft job does not run.
 - **Docs** ✅ (2026-11-16): the design, the guide, [security.md](security.md), [testing.md](testing.md), [benchmarks.md](benchmarks.md) §15 and the [follow-ups](plans/2026-11-01-milestone-1-follow-ups.md) say what is built, ruled and measured; [terminal.md](terminal.md), [json.md](json.md) and [storage-format.md](storage-format.md) were written with the code; what building corrected is in decisions [184](decisions/184-opalro-who-the-save-behind-each-line.md) and [185](decisions/185-save-amend-and-a-save-something-else-holds.md), and the calls made on the way are in [the rulings](plans/2026-11-15-milestone-10-rulings.md).
-- **Red team, review, merge and the package's run:** not done yet. The package is made (step 9, 2026-11-16); the branch waits for its red-team session and its whole-branch review before it is merged into `v0.2`.
+- **Red team, review and merge** ✅ (2026-11-16): two red-team sessions (RT23: nothing proved; RT24, after the fix wave: one Low finding, ruled in [decision 188](decisions/188-red-team-m10-rulings.md) and left for the owner), a whole-branch review by four readers (nothing Critical; what it found fixed in one wave), and the merge into `v0.2` on 2026-11-16.
+- **The package's run:** the release workflow's run on `v0.2` follows the merge, and is recorded in [the owner's page](releases/v0.2.0-before-you-publish.md).
 - *Done when:* every proven finding is fixed or ruled on, every document matches the code, the branch is merged into `v0.2`, and the workflow's run is green. Nothing is tagged, drafted, merged into `main` or opened as a pull request.

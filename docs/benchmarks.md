@@ -1168,7 +1168,7 @@ The Nightly workflow, started by hand on `a695479` ([run 43768324503](https://gi
 
 ## 15. v0.2, milestone 10: `who`, the amend check, and where `status` and `goto` spend their time
 
-**In plain words.** Four things were measured. First, §14 was wrong about time: milestone 9 made `status` and `goto` about a millisecond slower on GitHub's Linux runners, with or without conflicts. Milestone 10 found the commit, took about two thirds of it back, and stopped `goto` loading one cache twice; about 0.3 ms of `status` is still unexplained. Second, timers inside `status` and `goto` show where the time goes: mostly the walk of the folder, and, in a `goto`, ten waits for the disk (flushes) that make up a tenth of it on Linux. What each of those ten protects is written out below for the owner to rule on; nothing about them was changed ([decision 186](decisions/186-speed-before-v0.2.md)). Third, `opalro who` was run beside `git blame` on Git's own history: on four of five files the two named the same commit for 90 to 100 % of the lines, and on the fifth, which was renamed, for two thirds. Where they differ, no line was found where `who` named a save that neither wrote nor moved the line. `who` took 3 to 5 times `git blame`'s time. Fourth, the check before an amend: right after a save, an amend in a project with 300 old lines of 2,000 saves each took 4.35 ms on Linux, because it asks nothing of lines that haven't moved since the save was made; without its note of the save, 2.84 s.
+**In plain words.** Four things were measured. First, §14 was wrong about time: milestone 9 made `status` and `goto` about a millisecond slower on GitHub's Linux runners, with or without conflicts. Milestone 10 found the commit, took about two thirds of it back, and stopped `goto` loading one cache twice; about 0.3 ms of `status` is still unexplained. Second, timers inside `status` and `goto` show where the time goes: mostly the walk of the folder, and, in a `goto`, ten waits for the disk (flushes) that make up a tenth of it on Linux. What each of those ten protects is written out below for the owner to rule on; nothing about them was changed ([decision 186](decisions/186-speed-before-v0.2.md)). Third, `opalro who` was run beside `git blame` on Git's own history: on four of five files the two named the same commit for 90 to 100 % of the lines, and on the fifth, which was renamed, for two thirds. Where they differ, no line was found where `who` named a save that neither wrote nor moved the line. `who` took 3 to 5 times `git blame`'s time, in each of two runs. Fourth, the check before an amend: right after a save, an amend in a project with 300 old lines of 2,000 saves each took 4.35 ms on Linux, because it asks nothing of lines that haven't moved since the save was made; without its note of the save, 2.84 s.
 
 Everything here was measured on 2026-11-15 on GitHub's machines. The laptop of §1 was building all day, so none of it is the laptop's; where [decision 186](decisions/186-speed-before-v0.2.md) asked for the laptop, GitHub's Windows runner stands in.
 
@@ -1384,7 +1384,17 @@ The Nightly workflow's differential job (job 133075538391 in [run 43799383187](h
 | `README.md` | 75 | 0.93 s | 0.31 s | 66.7 % |
 | `t/t8002-blame.sh` | 173 | 4.62 s | 0.93 s | 100 % |
 
-**`who` took between 3.0 and 5.0 times `git blame`'s time** on these files. Both programs counted the same number of lines in each.
+The Nightly run on the milestone's last code ([run 43902433662](https://github.com/WisHonor/Opalro-VCS/actions/runs/43902433662), on `af19793`, 2026-11-16; its processor was not read either) gave the same shares, with these times:
+
+| File | `who` | `git blame` |
+|---|---|---|
+| `Makefile` | 3.90 s | 0.99 s |
+| `diff.c` | 3.93 s | 1.08 s |
+| `git-compat-util.h` | 2.39 s | 0.54 s |
+| `README.md` | 1.17 s | 0.32 s |
+| `t/t8002-blame.sh` | 5.07 s | 1.03 s |
+
+**`who` took between 3.0 and 5.0 times `git blame`'s time** on these files in the first run, and between 3.6 and 4.9 times in the second. Both programs counted the same number of lines in each.
 
 **Where they differ, and whether `who` is right there.** A side run looked at every line of the five on which the two differ: the branch `gate/m10-who-diff`, [run 43801020994](https://github.com/WisHonor/Opalro-VCS/actions/runs/43801020994) at `431d087` (the code of `11a2bb9`, the engine and the command unchanged, with a throwaway test and script) and a second look at the merges and moved lines in [run 43801701273](https://github.com/WisHonor/Opalro-VCS/actions/runs/43801701273) (Git only). Git's source was git/git's `master` at `7fb6055e678f800320d8ab8cd8f201d9493d1ba0`, the Nightly's own clone, imported whole: 86,289 commits (98 not exact, none skipped). `git blame` was Git 2.56.1's plain `git blame --porcelain <tip> -- <file>`, and `who` ran as `opalro who <file> --save master --json`, each save matched to its commit by the commit ID the import recorded; `who` was coarse on no file, and the share of lines that agree matched the Nightly's exactly. Each differing line was put into the first class that fits:
 
@@ -1427,7 +1437,15 @@ The Nightly workflow's differential job (job 133075538391 in [run 43799383187](h
 |---|---|---|---|
 | Linux, AMD EPYC 9V74 | 18.2 ms, 10.8 ms, 1.683 | 24.5 ms, 25.0 ms, 0.983 | 26.9 ms, 13.9 ms, 1.934 |
 
-- Both speed gates passed, Linux's and Windows'.
+The Nightly run on the milestone's last code, [run 43902433662](https://github.com/WisHonor/Opalro-VCS/actions/runs/43902433662) on `af19793` (2026-11-16; the last commit that changes the program is `6d9aeee`, and `af19793` only adds an ignored test), with both speed changes in: the code as packaged.
+
+| Runner | `status` | Small save | `goto` back to the first save |
+|---|---|---|---|
+| Linux, AMD EPYC 9V45 (4 CPUs) | 15.3 ms, 8.4 ms, 1.824 | 20.2 ms, 19.1 ms, 1.057 | 23.1 ms, 10.9 ms, 2.125 |
+| Windows (the processor was not read) | 72.8 ms, 44.8 ms, 1.625 | 81.0 ms, 127.4 ms, 0.636 | 88.1 ms, 53.3 ms, 1.654 |
+
+- Both speed gates passed, Linux's and Windows', in both runs.
+- **On the code as packaged, on one Linux runner (an AMD EPYC 9V45), `goto` took 2.125 times Git's time:** under its limit of 3.5 and over v0.2's goal of 2 (the run's own line says "over the v0.2 goal of 2"). `status` took 1.824. On Windows, 1.625 and 1.654. One run on one processor: it doesn't say what other processors give.
 - **`goto` was under twice Git's time on this runner (1.934),** where §14's run on the milestone before had it at 2.297 on a Xeon 6975P-C and 2.180 on an EPYC 7763. These are different processors, and §6 and §11 show the ratio depends on which one a runner has, so one run on an EPYC 9V74 doesn't show `goto` under twice Git's time on the others. Where a `goto`'s time goes, on another runner, is in the timers above.
 - `status` at 1.683 has room on this runner. On a Xeon 6975P-C, §11 has it at 1.842 and 1.945 with `main`'s code and at 2.029 and 2.076 with milestone 7's, §12 at 2.075 and §14 at 2.288; §11 found that Git's time, which changed with the runners' image, decides the ratio there.
 
@@ -1448,4 +1466,3 @@ The amend with no note is the slow case decision 185 accepts, paid once: the ame
 
 - The laptop's run of the timers, which decision 186 asked for beside GitHub's Linux runner: GitHub's Windows runner stands in, and the branch `gate/m10-timers` is kept with its one-line script for it.
 - The slow case of the amend on Git's own history, with its tags and server lines, which decision 185 point 5 also names.
-- The gate on the milestone's last code, after the cache was handed on: the Nightly run that closes the milestone.

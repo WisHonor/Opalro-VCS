@@ -16,13 +16,13 @@ A project made with Opalro 0.1 opens in 0.2 as it is. To keep conflicts it needs
 
 ## Going back to another save is slower than Git on Linux
 
-`opalro goto` takes about twice Git's time on Linux, often more: 1.93 to 2.74 times in eight runs on GitHub's Linux machines, how much depending on the machine's processor. Opalro's own bar is twice Git's time; this version is held to three and a half times instead, as 0.1 was.
+`opalro goto` takes about twice Git's time on Linux, often more: 1.93 to 2.74 times in nine runs on GitHub's Linux machines (2.125 in the one on the code as packaged), how much depending on the machine's processor. Opalro's own bar is twice Git's time; this version is held to three and a half times instead, as 0.1 was.
 
 **What to do:** nothing; it is only slower.
 
 ## `opalro who` is slower than `git blame`, and follows no rename in history from Git
 
-On five files of Git's own history, `opalro who` took 3 to 5 times `git blame`'s time. In a project imported from Git it doesn't follow a file that was renamed, since the import records no moves: the lines from before the rename are named for the save that renamed the file.
+On five files of Git's own history, `opalro who` took 3 to 5 times `git blame`'s time, in each of two runs. In a project imported from Git it doesn't follow a file that was renamed, since the import records no moves: the lines from before the rename are named for the save that renamed the file.
 
 **What to do:** for a file renamed in Git, `git blame` still works in the Git repository you imported from: the import never changes it.
 
@@ -34,7 +34,7 @@ A command that needs to know how the drive compares names (every command given a
 
 ## `opalro status` is at its limit on Linux on some machines
 
-With nothing changed, `opalro status` is held to twice Git's time. In eight runs of the speed check on GitHub's Linux machines, on v0.2's code as it was being built (none on the code as packaged), it took 1.68 to 2.29 times Git's time, over twice in five: a matter of milliseconds (13 to 22 ms against Git's 6 to 13).
+With nothing changed, `opalro status` is held to twice Git's time. In nine runs of the speed check on GitHub's Linux machines (eight on v0.2's code as it was being built, one on the code as packaged), it took 1.68 to 2.29 times Git's time, over twice in five, and 1.824 on the code as packaged: a matter of milliseconds (13 to 22 ms against Git's 6 to 13).
 
 **What to do:** nothing; it is only slower.
 
