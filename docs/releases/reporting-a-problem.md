@@ -4,7 +4,7 @@ Write to support@opalro.com. Every report helps, even "this felt wrong" or "I ex
 
 ## What to send
 
-- **The version:** what `opalro --version` prints, such as `opalro 0.1.0`.
+- **The version:** what `opalro --version` prints, such as `opalro 0.2.0`.
 - **Your system and its version:** Windows 11 24H2, macOS 15.1, Ubuntu 24.04, and so on. On Linux, also the first line `ldd --version` prints.
 - **What you typed:** the command, exactly, and what you did just before if it matters.
 - **What it printed:** all of it, copied as text rather than a screenshot when you can.

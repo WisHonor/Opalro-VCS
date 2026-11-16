@@ -1,18 +1,30 @@
-# Known problems in Opalro 0.1
+# Known problems in Opalro 0.2
 
-What is known not to work, or not to work well yet, and what to do about each. The user guide's section 13, What v0.1 doesn't do yet, has the full list of what is still to come.
+What is known not to work, or not to work well yet, and what to do about each. The user guide's section 13, What v0.2 doesn't do yet, has the full list of what is still to come.
 
-## Not there yet: a server, merging, locking, repair, export to Git
+## Not there yet: a server, locking, repair, export to Git
 
-Opalro 0.1 is for one person on one computer. It can't share a project, combine two lines (a line is Opalro's word for a branch), lock files for a team, or repair a damaged project: `opalro verify` finds damage but can't fix it. It can bring in a Git repository, but can't yet turn a project back into one; the import never changes the Git repository, so you can carry on in Git.
+Opalro 0.2 is for one person on one computer. It can't share a project, lock files for a team, or repair a damaged project: `opalro verify` finds damage but can't fix it. It can bring in a Git repository, but can't yet turn a project back into one; the import never changes the Git repository, so you can carry on in Git.
 
 **What to do:** keep another copy of anything that matters, such as a copy of the whole project folder, `.opalro` included. If `opalro verify` reports damage, go back to that copy, and please tell us.
 
+## Opalro 0.1 can't open a project that keeps conflicts
+
+A project made with Opalro 0.1 opens in 0.2 as it is. To keep conflicts it needs `opalro setup --upgrade` once, which asks first; after that, Opalro 0.1 can't open it, and `opalro undo` can't turn it off. Opalro 0.1 can't open a project started with 0.2 either.
+
+**What to do:** if you still need Opalro 0.1 for a project, copy the project folder, `.opalro` included, before the upgrade.
+
 ## Going back to another save is slower than Git on Linux
 
-`opalro goto` takes about twice Git's time on Linux, sometimes more (1.8 to 2.7 times in GitHub's runs). Opalro's own bar is twice Git's time. In this version `goto` is held to three and a half times Git's time instead; getting back within twice is a goal for v0.2.
+`opalro goto` takes about twice Git's time on Linux, often more: 1.93 to 2.74 times in eight runs on GitHub's Linux machines, how much depending on the machine's processor. Opalro's own bar is twice Git's time; this version is held to three and a half times instead, as 0.1 was.
 
 **What to do:** nothing; it is only slower.
+
+## `opalro who` is slower than `git blame`, and follows no rename in history from Git
+
+On five files of Git's own history, `opalro who` took 3 to 5 times `git blame`'s time. In a project imported from Git it doesn't follow a file that was renamed, since the import records no moves: the lines from before the rename are named for the save that renamed the file.
+
+**What to do:** for a file renamed in Git, `git blame` still works in the Git repository you imported from: the import never changes it.
 
 ## Files another program has open, on Windows
 

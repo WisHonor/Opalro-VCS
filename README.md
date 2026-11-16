@@ -4,7 +4,9 @@ Opalro is a version control system for code and large binary files together, wit
 
 ## State
 
-Opalro v0.1 is an early release, for one person on one computer: there is no server, so there is no sharing, merging or locking yet. It can import a Git repository, Git LFS files included. Keep another copy of anything that matters.
+Opalro v0.2 is an early release, for one person on one computer: there is no server, so there is no sharing or locking yet. You can combine one line's work into another, keep the conflicts and fix them when you choose, and see the save behind each line of a file with `opalro who`. It can import a Git repository, Git LFS files included. Keep another copy of anything that matters.
+
+A project made with Opalro 0.1 opens as it is. To keep conflicts it needs `opalro setup --upgrade` once, and after that Opalro 0.1 can't open it; nor can Opalro 0.1 open a project started with v0.2.
 
 What Opalro writes on disk is frozen from v0.1: every later Opalro reads what v0.1 wrote.
 

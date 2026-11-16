@@ -1,6 +1,6 @@
 # The Opalro user guide
 
-This guide is for Opalro v0.1. It assumes you have never used version control before. If you have used Git, the most widely used version control system, read it anyway, then see [Coming from Git](#9-coming-from-git).
+This guide is for Opalro v0.2. It assumes you have never used version control before. If you have used Git, the most widely used version control system, read it anyway, then see [Coming from Git](#9-coming-from-git).
 
 The commands you can type along with in the practice project (from [section 3](#3-the-first-five-minutes) on) are run by a test, in order, in one practice project, so they are commands Opalro really takes; the other examples, which need something the practice project doesn't have, are not. What Opalro prints is shown as a terminal shows it, without the colours; the change IDs (the short words like `kxqm`), times, names, sizes and counts will be your own. Where a terminal can't show symbols, Opalro prints plain ones instead: `->` for `→`, `<-` for `←`, `>` for `▸`, `*` for `•`, `...` for `…`, and `+` and `x` for `✓` and `✗`. The lines that start with `Next:` or `Changed your mind?` appear only in a terminal, not when a script runs Opalro. In a terminal, Opalro also wraps its longer sentences onto more lines, at 100 columns or at the window's edge if that comes first; here they are shown unwrapped.
 
@@ -18,7 +18,7 @@ The commands you can type along with in the practice project (from [section 3](#
 10. [Looking after a project](#10-looking-after-a-project)
 11. [Personal settings](#11-personal-settings)
 12. [Scripts](#12-scripts)
-13. [What v0.1 doesn't do yet](#13-what-v01-doesnt-do-yet)
+13. [What v0.2 doesn't do yet](#13-what-v02-doesnt-do-yet)
 14. [Stopping](#14-stopping)
 
 ## 1. What Opalro is
@@ -30,7 +30,9 @@ Opalro keeps every version of your project: the code and the big files together,
 - **Undo.** Opalro keeps a diary of every command that changed something. `opalro undo` takes back the last one, like Ctrl+Z in an editor. Before a command throws away work you haven't saved, Opalro keeps a copy of it, so undo can bring it back.
 - **Big files.** Files of 1 MiB or more are cut into pieces, called chunks. When you change part of a big file, only the pieces that changed are stored again.
 
-**What v0.1 is.** Opalro v0.1 is for one person on one computer. Everything stays in your project folder, in a hidden folder named `.opalro`. There is no server yet, so you can't share a project through Opalro or work on one with other people. You can bring one line's work into another with `opalro combine`; syncing with a server and locking files are planned for v0.3 (see [section 13](#13-what-v01-doesnt-do-yet)).
+**What v0.2 is.** Opalro v0.2 is for one person on one computer. Everything stays in your project folder, in a hidden folder named `.opalro`. There is no server yet, so you can't share a project through Opalro or work on one with other people. You can bring one line's work into another with `opalro combine`; syncing with a server and locking files are planned for v0.3 (see [section 13](#13-what-v02-doesnt-do-yet)).
+
+**If you used Opalro 0.1.** v0.2 opens a project made with 0.1 as it is, and reads everything 0.1 wrote. To keep conflicts, such a project needs `opalro setup --upgrade` once ([`opalro setup`](#opalro-setup)), and after that Opalro 0.1 can't open it. Opalro 0.1 can't open a project started with v0.2 either.
 
 ## 2. Installing
 
@@ -52,10 +54,10 @@ On https://opalro.com, take the archive for your system:
 
 | Your system | The archive |
 |---|---|
-| Windows | `opalro-0.1.0-x86_64-pc-windows-msvc.zip` |
-| Linux | `opalro-0.1.0-x86_64-unknown-linux-gnu.tar.gz` |
-| macOS on Apple silicon (M1 and later) | `opalro-0.1.0-aarch64-apple-darwin.tar.gz` |
-| macOS on Intel | `opalro-0.1.0-x86_64-apple-darwin.tar.gz` |
+| Windows | `opalro-0.2.0-x86_64-pc-windows-msvc.zip` |
+| Linux | `opalro-0.2.0-x86_64-unknown-linux-gnu.tar.gz` |
+| macOS on Apple silicon (M1 and later) | `opalro-0.2.0-aarch64-apple-darwin.tar.gz` |
+| macOS on Intel | `opalro-0.2.0-x86_64-apple-darwin.tar.gz` |
 
 Each archive holds six files:
 
@@ -72,26 +74,26 @@ The same page has a file named `SHA256SUMS`. It lists a fingerprint (a checksum)
 On Windows, in PowerShell:
 
 ```text
-(Get-FileHash .\opalro-0.1.0-x86_64-pc-windows-msvc.zip -Algorithm SHA256).Hash
+(Get-FileHash .\opalro-0.2.0-x86_64-pc-windows-msvc.zip -Algorithm SHA256).Hash
 ```
 
-It prints a long string of letters and digits. Open `SHA256SUMS` in Notepad and compare it with the line that ends with the same file name (upper or lower case doesn't matter). `certutil -hashfile opalro-0.1.0-x86_64-pc-windows-msvc.zip SHA256` prints the same fingerprint, if you prefer the older Command Prompt.
+It prints a long string of letters and digits. Open `SHA256SUMS` in Notepad and compare it with the line that ends with the same file name (upper or lower case doesn't matter). `certutil -hashfile opalro-0.2.0-x86_64-pc-windows-msvc.zip SHA256` prints the same fingerprint, if you prefer the older Command Prompt.
 
-On macOS, in Terminal (this is the Apple silicon archive; for an Intel Mac, use `opalro-0.1.0-x86_64-apple-darwin.tar.gz` in its place):
+On macOS, in Terminal (this is the Apple silicon archive; for an Intel Mac, use `opalro-0.2.0-x86_64-apple-darwin.tar.gz` in its place):
 
 ```text
-grep opalro-0.1.0-aarch64-apple-darwin.tar.gz SHA256SUMS | shasum -a 256 -c
+grep opalro-0.2.0-aarch64-apple-darwin.tar.gz SHA256SUMS | shasum -a 256 -c
 ```
 
 On Linux:
 
 ```text
-grep opalro-0.1.0-x86_64-unknown-linux-gnu.tar.gz SHA256SUMS | sha256sum -c
+grep opalro-0.2.0-x86_64-unknown-linux-gnu.tar.gz SHA256SUMS | sha256sum -c
 ```
 
-`grep` picks the one line for your archive out of `SHA256SUMS`, and the other command checks the file against it. It prints the file's name and `OK`, such as `opalro-0.1.0-x86_64-unknown-linux-gnu.tar.gz: OK`. If it prints `FAILED` instead (or, on Windows, the two fingerprints differ), the file isn't the one that was put on the page: don't run the program, delete it and download it again. Anything other than the file's name followed by `OK` means the same, whatever else it says (a complaint that it found no checksum lines, for example, means the name you typed isn't in `SHA256SUMS`).
+`grep` picks the one line for your archive out of `SHA256SUMS`, and the other command checks the file against it. It prints the file's name and `OK`, such as `opalro-0.2.0-x86_64-unknown-linux-gnu.tar.gz: OK`. If it prints `FAILED` instead (or, on Windows, the two fingerprints differ), the file isn't the one that was put on the page: don't run the program, delete it and download it again. Anything other than the file's name followed by `OK` means the same, whatever else it says (a complaint that it found no checksum lines, for example, means the name you typed isn't in `SHA256SUMS`).
 
-The fingerprints prove that the download wasn't damaged and matches what was put on the page. They don't prove who made it, because v0.1 isn't signed (below).
+The fingerprints prove that the download wasn't damaged and matches what was put on the page. They don't prove who made it, because v0.2 isn't signed (below).
 
 ### Put `opalro` on your PATH
 
@@ -101,7 +103,7 @@ Your PATH is the list of folders your terminal looks in when you type a command'
 - **macOS and Linux:** in a terminal, in the folder that holds the archive, unpack it, make a folder for your own programs, `~/.local/bin` (`~` is your home folder), and move `opalro` there. On Linux, for example:
 
   ```text
-  tar -xzf opalro-0.1.0-x86_64-unknown-linux-gnu.tar.gz
+  tar -xzf opalro-0.2.0-x86_64-unknown-linux-gnu.tar.gz
   mkdir -p ~/.local/bin
   mv opalro ~/.local/bin/
   ```
@@ -123,7 +125,7 @@ opalro --version
 It prints:
 
 ```text
-opalro 0.1.0
+opalro 0.2.0
 ```
 
 **If it prints anything else,** another `opalro` comes first on your PATH, such as an older copy. Put your folder ahead of it:
@@ -133,7 +135,7 @@ opalro 0.1.0
 
 ### Windows and macOS warn about Opalro
 
-v0.1 is not signed. Signing means a company or a developer buys a certificate and stamps the program with it, so that Windows and macOS can say who made it. Signing is planned for a later version. Until then, either system may warn you the first time.
+v0.2 is not signed. Signing means a company or a developer buys a certificate and stamps the program with it, so that Windows and macOS can say who made it. Signing is planned for a later version. Until then, either system may warn you the first time.
 
 The warning means only "nobody we know vouched for this program". It doesn't mean something bad was found. Check the download against `SHA256SUMS` first, as above; that is the check you can make yourself.
 
@@ -142,7 +144,7 @@ The warning means only "nobody we know vouched for this program". It doesn't mea
 
 ### Folders that sync (OneDrive and the like)
 
-Opalro works in a project inside OneDrive: Windows keeps OneDrive's online-only files (placeholders, which stand in for files kept online) out of view of programs like Opalro, and the v0.1 archive doesn't change that. This was tried on a real OneDrive folder.
+Opalro works in a project inside OneDrive: Windows keeps OneDrive's online-only files (placeholders, which stand in for files kept online) out of view of programs like Opalro, and the archive doesn't change that. This was tried on a real OneDrive folder, with v0.1.
 
 If another sync tool lets Opalro see a placeholder, Opalro can't read it yet, so `opalro save` and `opalro status` stop at it, as at any file Opalro can't read.
 
@@ -600,7 +602,7 @@ nylq  Ben Okafor  2023-11-15  7 │ fall:
 1 line isn't saved yet.
 ```
 
-Each row is the save's change ID (type it into `opalro show` to see the whole save), who made it, the day, the line's number, then the line. Rows of one save that follow each other repeat it, dimmed on a terminal. Opalro reads the file as it is in your folder, so the numbers are the ones your editor shows, and a line you haven't saved yet says so. `--save` reads the file as a save has it instead, the save named as `opalro goto` takes one:
+Each row is the save's change ID (type it into `opalro show` to see the whole save), who made it, the day, the line's number, then the line. Rows of one save that follow each other repeat it, dimmed on a terminal. Opalro reads the file as it is in your folder, so the numbers are the ones your editor shows, and a line you haven't saved yet says so. `--save` reads the file as a save has it instead, the save named as `opalro show` reads it:
 
 ```sh
 opalro who todo.txt --save main
@@ -723,7 +725,7 @@ On the server (origin):
   main@origin
 ```
 
-`Skyrunner` is the name of the project's folder. Lines "on the server" come only from a Git import in v0.1: they are the server branches Git last saw. Type one as it is listed (`opalro goto main@origin`, `opalro show main@origin`) to reach its save.
+`Skyrunner` is the name of the project's folder. Lines "on the server" come only from a Git import in v0.2: they are the server branches Git last saw. Type one as it is listed (`opalro goto main@origin`, `opalro show main@origin`) to reach its save.
 
 `opalro line new` starts a new line at the save you're on and moves you onto it; your files stay as they are. `opalro line rename` renames a line, and `opalro line delete` deletes one; `opalro undo` takes back each of them.
 
@@ -1351,7 +1353,7 @@ Next: look around with: opalro status
 - **Work you hadn't committed** isn't refused: it shows as unsaved changes and goes into your next save.
 - **Ignore rules** carry over by themselves, since Opalro reads `.gitignore` files.
 - **Git LFS files** come in as ordinary files, read from `.git/lfs/objects`, which must hold every version the history names. Opalro never downloads them: first run `git lfs fetch --all`.
-- **An import happens once.** Running it again is refused; bringing in Git's newer commits later comes after v0.1.
+- **An import happens once.** Running it again is refused; bringing in Git's newer commits later comes after v0.2.
 - **A project has no preset after an import.** Run `opalro setup --preset game` (or `code`) to give it one.
 
 **What stops an import, and why.** Opalro treats every repository it is given as possibly built to cause harm, so it stops, saying why and what to do, rather than guess:
@@ -1468,7 +1470,7 @@ hint: Opalro can't repair a project in this version. Saves that don't use the da
 
 Each problem names the object's fingerprint and, when a save needs it, which save and which file. At most 20 are listed of each kind; `opalro verify --json` lists up to 1,000.
 
-**v0.1 can't repair.** With no server, there is nowhere to fetch a good copy from. Saves that don't use the damaged data still work, so you can still go to them and copy files out. Keep any other copy of the project (a backup) safe.
+**v0.2 can't repair.** With no server, there is nowhere to fetch a good copy from. Saves that don't use the damaged data still work, so you can still go to them and copy files out. Keep any other copy of the project (a backup) safe.
 
 `opalro verify` changes nothing Opalro stored and takes no lock, so other commands can run while it checks. Like every command, it makes the two empty working folders `.opalro/tmp` and `.opalro/cache` if a copy of the project lost them. In a terminal, a bar shows how far it has read.
 
@@ -1554,7 +1556,7 @@ hint: If you trust it, add its folder to safe-folders at the top of /home/ana/.c
       safe-folders = ["/srv/work"]
 ```
 
-**On Windows, a project on a FAT32 or exFAT drive (most USB sticks and SD cards) can't be used in v0.1.** Opalro can't tell such a drive's folders apart, so `safe-folders` can't vouch for one: Opalro refuses the project, offers no line, and says so. Work on a copy on the computer's own drive.
+**On Windows, a project on a FAT32 or exFAT drive (most USB sticks and SD cards) can't be used in v0.2.** Opalro can't tell such a drive's folders apart, so `safe-folders` can't vouch for one: Opalro refuses the project, offers no line, and says so. Work on a copy on the computer's own drive.
 
 Add the line only if you know the project is yours or someone's you trust. Each entry must be a full path, and names one exact folder: the project's own, not a folder above it. Copy the line Opalro's hint prints, rather than typing it: it is already written the right way, which matters on Windows, where a path in double quotes needs every backslash doubled (`"D:\\Shared\\game"`), or the whole path in single quotes (`'D:\Shared\game'`); otherwise Opalro can't read the settings file at all.
 
@@ -1587,26 +1589,30 @@ Every command ends with one of three exit codes:
 | 1 | It failed, or `opalro verify` found a problem. |
 | 2 | Opalro couldn't use the command line: an unknown command or option, `opalro` with no command, or a Git word Opalro explains instead of running. |
 
-The `--json` reference, published on https://opalro.com, describes every document, field and warning. Every document says its format's version in `opalro_json`, `1` in v0.1. Within one version, a field is never removed, renamed or given another meaning, though new ones may be added; a change that would break that gets the next version number. The words of messages and hints, which are for people, may change at any time.
+The `--json` reference, published on https://opalro.com, describes every document, field and warning. Every document says its format's version in `opalro_json`, `1` in v0.2, as in v0.1. Within one version, a field is never removed, renamed or given another meaning, though new ones may be added; a change that would break that gets the next version number. The words of messages and hints, which are for people, may change at any time.
 
-## 13. What v0.1 doesn't do yet
+<a id="13-what-v01-doesnt-do-yet"></a>
 
-- **No server, no sharing.** v0.1 is one person on one computer. Opalro can't yet copy a project from a server, or send and get changes (syncing is planned for v0.3).
+## 13. What v0.2 doesn't do yet
+
+- **No server, no sharing.** v0.2 is one person on one computer. Opalro can't yet copy a project from a server, or send and get changes (syncing is planned for v0.3).
+- **No moving saves between lines.** Opalro can't yet copy a save from one line onto another, or replay a line's saves on top of another (Git's `cherry-pick` and `rebase`).
+- **No guessed moves.** A save records that a file moved only when the file arrived unchanged; a file moved and changed in the same save is recorded as one file removed and another added, and a combine and `opalro who` don't follow it.
 - **Conflicts, as far as they go.** A combine keeps its conflicts and `opalro resolve` records your fixes ([`opalro combine`](#opalro-combine)), but Opalro can't yet: mark in `opalro history` a save that holds conflicts (`opalro status` and `opalro show` say so); combine two lines that both changed a place one of them holds in conflict (fix it on that line first); merge line by line a file that the saves the two lines started from disagree about (you get both lines' versions whole); start a merge program (copy a version out with `opalro resolve <file> --copy theirs --to <somewhere>` and open it in yours); or take one file out of any save.
-- **`opalro who` follows a moved file only where a save recorded the move,** on the line it was moved on: lines changed under the file's old name on another line, then combined in, are named as the combined save's.
+- **`opalro who` follows a moved file only where a save recorded the move,** on the line it was moved on: lines changed under the file's old name on another line, then combined in, are named as the combined save's. In a project imported from Git it follows no rename, since the import records no moves.
 - **No locking.** Rules can mark files lockable, but nothing locks them until syncing arrives (v0.3).
 - **No repair.** `opalro verify` finds damage but can't fix it.
-- **No export to Git yet,** and an import happens once: bringing in Git's newer commits later comes after v0.1.
+- **No export to Git yet,** and an import happens once: bringing in Git's newer commits later comes after v0.2.
 - **Not yet:** shelving only some files, dropping a shelf, a warning about files that look like secrets, and installers or package managers.
 - **Not signed.** The programs aren't signed yet, so Windows and macOS warn about them ([section 2](#windows-and-macos-warn-about-opalro)).
 - **Closed source.** Opalro's source code isn't published. You may use Opalro under the user agreement, `USER-AGREEMENT.md`, which comes in the same archive as this guide.
 
 ### Where Git and Git LFS still do better
 
-Opalro is measured against Git and Git LFS on GitHub's Linux and Windows machines (its runners), doing the same steps on the same data. The numbers below are from those runs; your own computer will give others. On Git's own source code, Opalro's first save takes about a fifth of Git's time on Linux and a tenth to an eighth on Windows, and a small save is level with Git on Linux and quicker on Windows. Every case where Git or Git LFS came out ahead:
+Opalro is measured against Git and Git LFS on GitHub's Linux and Windows machines (its runners), doing the same steps on the same data. The numbers below are from those runs, made with v0.1 except where they say v0.2; your own computer will give others. On Git's own source code, Opalro's first save takes about a fifth of Git's time on Linux and a tenth to an eighth on Windows, and a small save is level with Git on Linux and quicker on Windows. Every case where Git or Git LFS came out ahead:
 
-- **`opalro status`** on a code project takes 1.5 to 1.9 times Git's time on Linux and 1.4 to 2.2 times on Windows; about twice on a project with many folders (Godot's demo projects). On a project of only a few files it takes about a millisecond more than Git on Linux, which is Opalro starting up.
-- **Going back to another save** (`opalro goto`) takes 1.8 to 2.7 times Git's time on a code project on Linux, and about twice on Windows on a project with many folders.
+- **`opalro status`** on a code project takes 1.5 to 1.9 times Git's time on Linux and 1.4 to 2.2 times on Windows; about twice on a project with many folders (Godot's demo projects). On a project of only a few files it takes about a millisecond more than Git on Linux, which is Opalro starting up. With v0.2, in eight runs of Opalro's speed check on Linux, `status` with nothing changed took 1.68 to 2.29 times Git's time on a code project: over twice in five, on runners whose processor makes Git quick.
+- **Going back to another save** (`opalro goto`) takes 1.8 to 2.7 times Git's time on a code project on Linux, and about twice on Windows on a project with many folders. With v0.2, in the same eight runs on Linux, it took 1.93 to 2.74 times Git's time, and was under twice in one; on Windows it was under twice in every run that printed its numbers.
 - **A switch that rewrites thousands of files** takes 1.8 to 3.1 seconds against Git's 0.46 to 0.75 for 3,557 files on Linux, and 3.9 to 4.4 against 1.4 to 1.7 on Windows. Opalro writes each file safely to the disk before putting it in place, so a crash can't leave half a file; Git doesn't.
 - **A small save** on a project with many folders is behind Git on Linux (30.6 ms against 23.9), though ahead on Windows.
 - **On a slow disk,** Git LFS is quicker at the first save of big files that don't compress (1.4 to 1.9 seconds against 4.9 to 5.1 for a gigabyte on Linux), and Git is quicker at going back to an old version of a big file (4.0 to 4.8 seconds against 2.4 to 3.2 for a gigabyte on Linux, 5.1 to 6.1 against 4.1 on Windows).
@@ -1614,7 +1620,7 @@ Opalro is measured against Git and Git LFS on GitHub's Linux and Windows machine
 - **A long history takes more space** than Git's: 64.6 GB against 6.6 GB for the history of Linux (the operating system's source), and 369 MB against 314 MB for Git's own, since Opalro doesn't yet store a version as its difference from the one before.
 - **Importing a very long history takes a lot of memory:** 3.4 GB at its peak for Linux's.
 
-Opalro's own bar is to stay within twice Git's time. v0.1 ships without meeting it for `opalro goto`: Opalro's speed check holds it to three and a half times Git's time until v0.2, and twice is the goal for v0.2. `opalro status` with nothing changed and a small save stay held to it: Opalro's speed check fails when either takes more than twice Git's time.
+Opalro's own bar is to stay within twice Git's time. v0.2 ships without meeting it for `opalro goto` on Linux, as v0.1 did: Opalro's speed check holds `goto` to three and a half times Git's time, and twice is still the goal. `opalro status` with nothing changed and a small save stay held to twice: Opalro's speed check fails when either takes longer, and on Linux runners where Git is quick it has failed for `status`.
 
 ### Reporting a problem
 

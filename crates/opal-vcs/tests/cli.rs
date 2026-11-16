@@ -50,7 +50,7 @@ fn version_is_0_1_0() {
     let env = Env::new();
     let out = env.opalro().arg("--version").output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    assert_eq!(text(&out.stdout), "opalro 0.1.0\n");
+    assert_eq!(text(&out.stdout), "opalro 0.2.0\n");
 }
 
 #[test]
