@@ -51,6 +51,7 @@ pub(crate) mod timeline;
 pub mod undo;
 pub mod verify;
 pub mod warning;
+pub mod who;
 pub mod workers;
 pub mod writeout;
 

@@ -501,10 +501,6 @@ fn on_disk(disk: &mut Folders, c: &PathChange) -> Result<Side, SaveError> {
 
 /// The folder's file at `path`, never through a link: its bytes, `TooBig` past
 /// `MAX_LINES_SIZE`, or `None` when no regular file is there.
-#[cfg_attr(
-    not(test),
-    expect(dead_code, reason = "for `opalro who`, not yet built")
-)]
 pub(crate) fn in_folder(disk: &mut Folders, path: &str) -> Result<Option<Side>, SaveError> {
     match read_file(disk, path) {
         Ok(side) => Ok(Some(side)),
