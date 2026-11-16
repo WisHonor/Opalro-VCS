@@ -1010,17 +1010,7 @@ Next: edit opalro.toml or .opalroignore to change a rule, or switch presets with
 
 `opalro setup` alone changes nothing. `opalro setup --preset <name>` switches to another preset: it shows the exact lines it would change in both files, asks `Apply these changes? [y/N]`, and changes them only on a yes. `--yes` skips the question. See [section 5](#5-presets-opalrotoml-and-opalroignore).
 
-A project made with a build from before 0.2 doesn't keep conflicts yet: there, `opalro setup` ends its list with `Upgrade available: conflicts (opalro setup --upgrade)`. `opalro setup --upgrade` says what each new feature allows and what it costs, then asks:
-
-```text
-This version of Opalro can turn on 1 feature in this project:
-  conflicts: a combine can keep conflicts, and you fix them when you choose.
-Once it is on, Opalro 0.1 can't open this project, and opalro undo can't turn it off.
-Turn it on? [y/N] y
-Turned on conflicts: this project can keep conflicts now.
-```
-
-`--yes` answers the question. A project made with this version has every feature from the start, and `opalro setup --upgrade` there says `Nothing to turn on`.
+A project made with a build from before 0.2 doesn't keep conflicts yet: there, `opalro setup` ends its list with `Upgrade available: conflicts (opalro setup --upgrade)`. `opalro setup --upgrade` says what each new feature allows and what it costs, then asks `Turn it on? [y/N]`; on a yes it says `Turned on conflicts: this project can keep conflicts now.` `--yes` answers the question. Once a feature is on, an Opalro from before that feature can't open the project, and `opalro undo` can't turn it off. A project made with this version has every feature from the start, and `opalro setup --upgrade` there says `Nothing to turn on`.
 
 ### `opalro import`
 
