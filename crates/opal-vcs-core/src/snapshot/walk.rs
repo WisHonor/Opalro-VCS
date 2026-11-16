@@ -1936,10 +1936,7 @@ fn look_at_untimed(job: Job) -> Looked {
     fsio::act_point("walk:looking");
     let mut found = Vec::with_capacity(job.looks.len());
     for look in job.looks {
-        let meta = match crate::timed!(
-            "lookers:   look at one file (metadata), summed over threads",
-            job.dir.metadata(OsStr::new(&look.name))
-        ) {
+        let meta = match job.dir.metadata(OsStr::new(&look.name)) {
             Ok(meta) => meta,
             Err(source) => {
                 let path = path_in(&job.folder, &look.name);
@@ -2038,12 +2035,10 @@ fn walk_folders(
                 path: rel.clone(),
                 reason: "its name is not valid UTF-8".into(),
             })?;
-            crate::timed!("walk: check each name (validate_name)", validate_name(name)).map_err(
-                |e| SaveError::InvalidName {
-                    path: rel.clone(),
-                    reason: e.to_string(),
-                },
-            )?;
+            validate_name(name).map_err(|e| SaveError::InvalidName {
+                path: rel.clone(),
+                reason: e.to_string(),
+            })?;
             limits
                 .check_path(rel.len())
                 .map_err(|why| too_long(why, &rel))?;

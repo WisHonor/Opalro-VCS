@@ -99,10 +99,13 @@ function most(list,    a, i, k, m) { k = split(list, a, " "); m = a[1] + 0; for 
 		ms[k, r] += $7; calls[k, r] += $6
 		if ($5 ~ /^whole command/) whole[c, r] = $7
 	} else {
-		k = c SUBSEP $4 SUBSEP $5
-		if (!(k in eseen)) { eseen[k] = 1; ne[c, $4]++; whatof[k] = $6 }
-		else if (whatof[k] != $6) varies[k] = 1
+		# Lined up across runs by what it is (and which time of it), not by its number: a run
+		# may make one more or one fewer.
+		o = ++occ[c, $4, r, $6]
+		k = c SUBSEP $4 SUBSEP $6 SUBSEP o
+		if (!(k in eseen)) { eseen[k] = 1; ne[c, $4]++; ekey[c, $4, ne[c, $4]] = k; whatof[k] = $6 (o > 1 ? " (time " o ")" : "") }
 		ems[k] = ems[k] " " $7
+		epos[k] = epos[k] " " $5
 		count[c, $4, r]++
 	}
 }
@@ -127,12 +130,19 @@ END {
 			cl = ""
 			for (j = 1; j <= nr[c]; j++) cl = cl " " (count[c, kind, runs[c, j]] + 0)
 			printf "\n%s: the %s in order (per run: %d to %d):\n\n", c, (e == 1 ? "flushes" : "renames"), least(cl), most(cl)
-			print "| # | What | Median ms | Least to most ms | Runs |"
+			print "| Place (median) | What | Median ms | Least to most ms | Runs it happened in |"
 			print "|---|---|---|---|---|"
-			for (i = 1; i <= ne[c, kind]; i++) {
-				k = c SUBSEP kind SUBSEP i
-				n = split(substr(ems[k], 2), dummy, " ")
-				printf "| %d | %s%s | %.3f | %.3f to %.3f | %d |\n", i, whatof[k], ((k in varies) ? " (varies)" : ""), median(ems[k]), least(ems[k]), most(ems[k]), n
+			# In the order they happen: by their median place in a run.
+			n = ne[c, kind]
+			for (i = 1; i <= n; i++) { order[i] = ekey[c, kind, i]; pos[i] = median(epos[order[i]]) }
+			for (i = 2; i <= n; i++) {
+				t = order[i]; tp = pos[i]
+				for (j = i - 1; j >= 1 && pos[j] > tp; j--) { order[j + 1] = order[j]; pos[j + 1] = pos[j] }
+				order[j + 1] = t; pos[j + 1] = tp
+			}
+			for (i = 1; i <= n; i++) {
+				k = order[i]
+				printf "| %s | %s | %.3f | %.3f to %.3f | %d |\n", pos[i], whatof[k], median(ems[k]), least(ems[k]), most(ems[k]), split(substr(ems[k], 2), dummy, " ")
 			}
 		}
 	}
