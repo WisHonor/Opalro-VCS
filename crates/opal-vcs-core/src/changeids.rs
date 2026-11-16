@@ -133,7 +133,8 @@ impl ChangeIds {
     }
 
     /// Writes the cache back, sealed with the handle's key, if it changed, keeping only the lines
-    /// `state` has and, at a save, the position's list; nothing when the handle has no key. A
+    /// `state` has and, at a save, the position's list; nothing when the handle has no key or
+    /// stores no caches. A
     /// cache that can't be written is just not there next time, so a failure is ignored.
     pub(crate) fn store(&mut self, repo: &Repository, state: &State) {
         self.store_within(repo, state, MAX_BYTES);

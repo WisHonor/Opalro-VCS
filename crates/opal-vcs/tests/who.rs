@@ -521,6 +521,10 @@ fn who_changes_nothing() {
     for file in std::fs::read_dir(&cache).unwrap() {
         std::fs::remove_file(file.unwrap().path()).unwrap();
     }
+    // A leftover of an interrupted command, named as Opalro names its own, which the clean-up
+    // of an ordinary opening would remove.
+    let leftover = env.root().join(".opalro/tmp/tmp-0123456789abcdef");
+    std::fs::write(&leftover, b"left").unwrap();
     // Every path with what it holds, the folder's and `.opalro`'s: one that appeared, vanished
     // or changed fails.
     let everything = || {
@@ -530,6 +534,7 @@ fn who_changes_nothing() {
         )
     };
     let before = everything();
+    assert!(before.1.contains_key("tmp/tmp-0123456789abcdef"));
     assert!(
         before.1.keys().all(|p| !p.starts_with("cache/")),
         "{:?}",

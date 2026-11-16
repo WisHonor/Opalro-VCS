@@ -119,7 +119,8 @@ impl LastMade {
 
     /// Notes `save`, made by the diary entry `entry` whose state is `state`, keeping only the
     /// notes of saves that are some line's newest in `state`; past the limit, only this one. A
-    /// file that can't be written is just not there next time, so a failure is ignored.
+    /// file that can't be written is just not there next time, so a failure is ignored. Nothing
+    /// when the handle has no key or stores no caches.
     pub(crate) fn store(repo: &Repository, state: &State, save: Id, entry: Id) {
         let Some(key) = repo.storing_key() else {
             return;

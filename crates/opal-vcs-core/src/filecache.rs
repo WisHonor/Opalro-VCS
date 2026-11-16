@@ -362,7 +362,8 @@ impl FileCache {
     }
 
     /// Writes what this scan vouched for and recorded, sealed, replacing the old cache whole;
-    /// nothing when the handle has no key, or when that is what the file already holds. `now_ns`
+    /// nothing when the handle has no key or stores no caches, or when that is what the file
+    /// already holds. `now_ns`
     /// is the drive's time at the start of the scan (`drive_now`): a file whose modified time
     /// isn't at least 2 s older is kept as racy, never matched, since it may change again within
     /// one tick of the drive's clock.

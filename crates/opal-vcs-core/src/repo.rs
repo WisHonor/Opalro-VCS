@@ -917,8 +917,8 @@ pub struct Repository {
     head: Option<Id>,
     /// The user's own key, which seals the caches; without it none is read or written.
     cache_key: Option<[u8; KEY_LEN]>,
-    /// Caches are read and never stored: the handle of a command that promises to write nothing.
-    reads_only: bool,
+    /// Caches are read and never stored, as [`Repository::store_no_caches`] asks.
+    store_no_caches: bool,
     /// The project's `opalro.toml`, as the change lock last read it.
     rules: RulesRead,
 }
@@ -1259,7 +1259,7 @@ impl Repository {
             format: parse_format(FORMAT_TEXT)?,
             head: None,
             cache_key: None,
-            reads_only: false,
+            store_no_caches: false,
             rules: RulesRead::default(),
         };
         // `state/lock-info` is never shown before there is a `format`, so an import's says
@@ -1373,8 +1373,8 @@ impl Repository {
         Repository::discover_with(start, &check_owner)
     }
 
-    /// [`Repository::discover`] for a command that changes nothing, `verify`: the leftovers in
-    /// `tmp/` are left as they are, and the lock file isn't touched.
+    /// [`Repository::discover`] for a command that changes nothing, `verify` and `who`: the
+    /// leftovers in `tmp/` are left as they are, and the lock file isn't touched.
     pub fn discover_untouched(start: &Path) -> Result<Repository, RepoError> {
         Repository::search(start, &check_owner, Repository::open_untouched)
     }
@@ -1473,7 +1473,7 @@ impl Repository {
             store,
             head,
             cache_key: None,
-            reads_only: false,
+            store_no_caches: false,
             rules: RulesRead::default(),
         })
     }
@@ -1557,9 +1557,10 @@ impl Repository {
         &self.held.opalro
     }
 
-    /// The key that seals this project's caches, if `set_cache_key` gave one.
+    /// The key that seals this project's caches, if `set_cache_key` gave one: for reading a
+    /// cache only; a cache is written with [`Repository::storing_key`].
     #[must_use]
-    pub fn cache_key(&self) -> Option<&[u8; KEY_LEN]> {
+    pub(crate) fn cache_key(&self) -> Option<&[u8; KEY_LEN]> {
         self.cache_key.as_ref()
     }
 
@@ -1573,13 +1574,13 @@ impl Repository {
     /// From now on this handle reads its caches and stores none, for a command that writes
     /// nothing at all.
     pub fn store_no_caches(&mut self) {
-        self.reads_only = true;
+        self.store_no_caches = true;
     }
 
-    /// The key to seal a cache being stored with: none when the handle stores no caches, or has
-    /// no key. Every cache's store asks this, never [`Repository::cache_key`].
+    /// The key to seal a cache being written with: none when the handle stores no caches, or has
+    /// no key. For writing only; reading a cache asks [`Repository::cache_key`].
     pub(crate) fn storing_key(&self) -> Option<&[u8; KEY_LEN]> {
-        self.cache_key.as_ref().filter(|_| !self.reads_only)
+        self.cache_key.as_ref().filter(|_| !self.store_no_caches)
     }
 
     /// `state/`, held open.
