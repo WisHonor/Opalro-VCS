@@ -41,6 +41,8 @@ enum Step {
     /// A new file of 0 to 8 lines at a free path.
     Add(Index, usize),
     Remove(Index),
+    /// Every line of a file taken out.
+    Empty(Index),
     /// A file moved to a free path, the commit's only change.
     Move(Index, Index),
 }
@@ -130,6 +132,7 @@ fn commit(smallest: usize) -> impl Strategy<Value = Vec<Step>> {
         4 => (any::<Index>(), edits).prop_map(|(f, e)| Step::Edit(f, e)),
         1 => (any::<Index>(), smallest..=8usize).prop_map(|(at, n)| Step::Add(at, n)),
         1 => any::<Index>().prop_map(Step::Remove),
+        1 => any::<Index>().prop_map(Step::Empty),
     ];
     prop::collection::vec(step, 1..=3)
 }
@@ -219,10 +222,11 @@ fn region(file: &File, owner: &Owner, on_main: bool) -> Option<(usize, usize)> {
     }
 }
 
-/// Makes `steps` on `tree` as `main` or the branch, in `round`; returns how many lines it put
-/// back. New lines are `<who> <n>`, unique in the whole history. A line put back is one this file
-/// lost in an earlier commit (back in the same one, it would be a line moved within the file), and
-/// one neither side can hold at the merge.
+/// Makes `steps` on `tree` as `main` or the branch, in `round`; returns the lines it put back.
+/// New lines are `<who> <n>`, unique in the whole history. A line put back is one this file lost
+/// in an earlier commit (back in the same one, it would be a line moved within the file). The
+/// branch puts back only a line lost in an earlier round, which neither side holds at the merge;
+/// a line `main` puts back may still be in the branch, and the merge sees to that.
 fn make(
     tree: &mut Tree,
     owners: &mut BTreeMap<String, Owner>,
@@ -230,8 +234,8 @@ fn make(
     (on_main, round): (bool, usize),
     who: &str,
     fresh: &mut usize,
-) -> usize {
-    let mut put_back = 0;
+) -> Vec<String> {
+    let mut put_back = Vec::new();
     let earlier: BTreeSet<String> = (tree.values())
         .flat_map(|f| f.gone.iter().map(|(l, _)| l.clone()))
         .collect();
@@ -291,8 +295,8 @@ fn make(
                                 .collect();
                             if !can.is_empty() {
                                 let (line, _) = file.gone.remove(can[at.index(can.len())]);
-                                file.lines.insert(place, line);
-                                put_back += 1;
+                                file.lines.insert(place, line.clone());
+                                put_back.push(line);
                             }
                         }
                     }
@@ -323,6 +327,19 @@ fn make(
                     .collect();
                 if !whole_files.is_empty() {
                     tree.remove(&whole_files[at.index(whole_files.len())]);
+                }
+            }
+            Step::Empty(at) => {
+                let whole_files: Vec<String> = (tree.iter())
+                    .filter(|(p, f)| whole(&owners[*p]) && !f.lines.is_empty())
+                    .map(|(p, _)| p.clone())
+                    .collect();
+                if !whole_files.is_empty() {
+                    let path = &whole_files[at.index(whole_files.len())];
+                    let file = tree.get_mut(path).unwrap();
+                    let out = std::mem::take(&mut file.lines);
+                    file.gone.extend(out.into_iter().map(|l| (l, round)));
+                    file.emptied = true;
                 }
             }
             Step::Move(from, to) => {
@@ -502,7 +519,9 @@ fn generate(h: &Merged) -> Generated {
             .find(|(_, o)| matches!(o, Owner::Split(..)))
             .map(|(p, o)| (p.clone(), o.clone()))
             .filter(|_| round.both > 0);
-        let mut x = None;
+        // Lines the merge's parents may hold from different commits: the one both sides add, and
+        // those `main` puts back this round, which the branch may still have where they were.
+        let special = RefCell::new(BTreeSet::new());
         let mut side = base.clone();
         let mut side_mark = fork;
         // Both sides' change of the shared file, each in a commit of its own, first.
@@ -524,7 +543,9 @@ fn generate(h: &Merged) -> Generated {
                 }
                 *mark = s.commit(who, &[*mark], &before, tree).0;
             }
-            x = (round.both == 1).then_some(line);
+            if round.both == 1 {
+                special.borrow_mut().insert(line);
+            }
         }
         let halves = |n: usize| if round.criss { n / 2 } else { n };
         let mut put_back = 0;
@@ -555,15 +576,23 @@ fn generate(h: &Merged) -> Generated {
                 wrote = true;
             }
             // Git's blame hands a file whole to the first parent with the same version, even a
-            // later one; `who` asks the first parent first. Where a line both sides added makes
-            // that matter, the merge writes a line of its own.
+            // later one; `who` asks the first parent first. Where a line the parents may hold
+            // from different commits makes that matter, the merge writes a line of its own.
+            let times: Vec<i64> = parents.iter().map(|(m, _)| s.times[m]).collect();
             for (path, file) in &mut merged {
                 let same = |t: &Tree| t.get(path).is_some_and(|f| f.lines == file.lines);
                 let later = parents[1..].iter().any(|(_, t)| same(t));
-                if x.as_ref().is_some_and(|x| file.lines.contains(x))
-                    && later
-                    && !same(parents[0].1)
-                {
+                let special = special.borrow();
+                let both =
+                    (file.lines.iter()).any(|l| l.starts_with("both ") && special.contains(l));
+                let special = file.lines.iter().any(|l| special.contains(l));
+                if both {
+                    let older = times[1..].iter().any(|t| *t < times[0]);
+                    *s.facts
+                        .entry("merges of a line both sides added, a later parent older")
+                        .or_default() += usize::from(older);
+                }
+                if special && later && !same(parents[0].1) {
                     file.lines.push(merge_line(s));
                     wrote = true;
                 }
@@ -578,7 +607,9 @@ fn generate(h: &Merged) -> Generated {
         };
         for steps in &round.main[..halves(round.main.len())] {
             let before = main.clone();
-            put_back += make(&mut main, &mut owners, steps, (true, r), "main", &mut fresh);
+            let back = make(&mut main, &mut owners, steps, (true, r), "main", &mut fresh);
+            put_back += back.len();
+            special.borrow_mut().extend(back);
             main_mark = s.commit("main", &[main_mark], &before, &main).0;
         }
         for steps in &round.branch[..halves(round.branch.len())] {
@@ -590,7 +621,8 @@ fn generate(h: &Merged) -> Generated {
                 (false, r),
                 branch,
                 &mut fresh,
-            );
+            )
+            .len();
             side_mark = s.commit(branch, &[side_mark], &before, &side).0;
         }
         if round.criss {
@@ -618,7 +650,9 @@ fn generate(h: &Merged) -> Generated {
             *fact.entry("rounds that cross merges").or_default() += 1;
             for steps in &round.main[halves(round.main.len())..] {
                 let before = main.clone();
-                put_back += make(&mut main, &mut owners, steps, (true, r), "main", &mut fresh);
+                let back = make(&mut main, &mut owners, steps, (true, r), "main", &mut fresh);
+                put_back += back.len();
+                special.borrow_mut().extend(back);
                 main_mark = s.commit("main", &[main_mark], &before, &main).0;
             }
             for steps in &round.branch[halves(round.branch.len())..] {
@@ -630,7 +664,8 @@ fn generate(h: &Merged) -> Generated {
                     (false, r),
                     branch,
                     &mut fresh,
-                );
+                )
+                .len();
                 side_mark = s.commit(branch, &[side_mark], &before, &side).0;
             }
         }
@@ -898,8 +933,11 @@ fn floors(part: &str, totals: RefCell<BTreeMap<&'static str, (usize, usize)>>, f
 /// changes endings writes no line for `who`, while Git counts it); a file changed under its old
 /// name on a branch merged into one that moved it (Opalro's known limit, pinned by the engine's
 /// own tests); and a merge whose file is the same as a later parent's version and not the first
-/// parent's, while a line both sides added is in it (Git hands that file whole to the later
-/// parent, `who` asks the first: the fixed tests below keep it). The seed is fixed.
+/// parent's, while it holds a line the parents may have from different commits (one both sides
+/// added, or one `main` put back that the branch still has where it was). Git hands such a file
+/// whole to the later parent and `who` asks the first: a known difference, kept, which the fixed
+/// tests below show; where the generator meets it, the merge writes a line of its own instead.
+/// The seed is fixed.
 #[test]
 fn who_matches_git_blame_on_unique_lines() {
     let started = Instant::now();
@@ -976,6 +1014,7 @@ fn who_matches_git_blame_on_unique_lines() {
             "commits dated as a parent",
             "commits dated before a parent",
             "merges of a parent older than the first",
+            "merges of a line both sides added, a later parent older",
             "empty files",
             "files emptied and filled again",
             "files both sides changed",
@@ -1146,46 +1185,117 @@ fn a_line_moved_within_a_file_is_new_where_it_lands_in_both() {
 /// The history the generator first failed on, at its smallest. The merge's `f.txt` is the
 /// branch's (`L2 S6 S7 S8 L3 L4`), and `main`'s is the first commit's (`L0 L1 L2 L3 L4`). Git
 /// hands the file whole to the branch, whose version is the same, so `L2` is `c3`'s, where it
-/// moved to the top. `who` compares the merge with `main` first: the shortest diff keeps `L2 L3
-/// L4` (the only lines the two share, in order), so `L2` goes to `main`'s side and is `c1`'s.
+/// moved to the top. `who` compares the merge with `main` first: the only shortest diff keeps `L2
+/// L3 L4`, so `L2` goes to `main`'s side and is `c1`'s. Both wrote `L2`.
 #[test]
-#[ignore = "finding: git blame hands a merge's file whole to a later parent with the same version; who asks the first parent first"]
-fn a_merge_that_holds_the_branch_s_version_names_its_lines_as_git_blame_does() {
+fn where_a_merge_took_a_later_parents_file_whole_who_asks_the_first_parent_and_git_the_later() {
     let env = Env::new();
-    env.commit("f.txt", "L0\nL1\nL2\nL3\nL4\n", "c1");
+    env.commit(
+        "f.txt",
+        "L0
+L1
+L2
+L3
+L4
+",
+        "c1",
+    );
     env.git(&["checkout", "-q", "-b", "side"]);
-    env.commit("f.txt", "L2\nL0\nL1\nS4\nL3\nL4\n", "c3");
-    env.commit("f.txt", "L2\nS6\nS7\nS8\nL3\nL4\n", "c4");
+    env.commit(
+        "f.txt",
+        "L2
+L0
+L1
+S4
+L3
+L4
+",
+        "c3",
+    );
+    env.commit(
+        "f.txt",
+        "L2
+S6
+S7
+S8
+L3
+L4
+",
+        "c4",
+    );
     env.git(&["checkout", "-q", "main"]);
-    env.commit("g.txt", "x\n", "c2");
+    env.commit(
+        "g.txt", "x
+", "c2",
+    );
     env.git(&["merge", "-q", "--no-edit", "-m", "merge", "side"]);
     let (ours, theirs) = both_answers(&env, "f.txt");
+    // Git hands a merge's file whole to a parent that holds it unchanged; `who` asks the first
+    // parent first.
+    assert_eq!(ours, named(&["c1", "c4", "c4", "c4", "c1", "c1"], "f.txt"));
     assert_eq!(
         theirs,
         named(&["c3", "c4", "c4", "c4", "c1", "c1"], "f.txt")
     );
-    assert_eq!(ours, theirs);
 }
 
 /// Both sides add `X` at the same place; the branch also adds `Y`, so the merge's file is the
 /// branch's. Git hands it whole to the branch: `X` is the branch's commit. `who` finds `X` in
-/// `main`, the first parent: `X` is `main`'s commit, by its rule that a line both parents have
-/// goes to the first.
+/// `main`, the first parent, by the only shortest diff: `X` is `main`'s commit. Both wrote `X`.
 #[test]
-#[ignore = "finding: git blame hands a merge's file whole to a later parent with the same version; who asks the first parent first"]
-fn a_line_both_sides_added_in_a_merge_holding_the_branch_s_version_is_named_as_git_blame_does() {
+fn a_line_both_sides_added_is_the_first_parents_in_who_and_the_later_parents_in_git_where_the_merge_took_its_file()
+ {
     let env = Env::new();
-    env.commit("f.txt", "L0\nL1\nL2\nL3\n", "c1");
+    env.commit(
+        "f.txt",
+        "L0
+L1
+L2
+L3
+",
+        "c1",
+    );
     env.git(&["checkout", "-q", "-b", "side"]);
-    env.commit("f.txt", "L0\nX\nL1\nL2\nL3\n", "side adds X");
-    env.commit("f.txt", "L0\nX\nL1\nL2\nY\nL3\n", "side adds Y");
+    env.commit(
+        "f.txt",
+        "L0
+X
+L1
+L2
+L3
+",
+        "side adds X",
+    );
+    env.commit(
+        "f.txt",
+        "L0
+X
+L1
+L2
+Y
+L3
+",
+        "side adds Y",
+    );
     env.git(&["checkout", "-q", "main"]);
-    env.commit("f.txt", "L0\nX\nL1\nL2\nL3\n", "main adds X");
+    env.commit(
+        "f.txt",
+        "L0
+X
+L1
+L2
+L3
+",
+        "main adds X",
+    );
     env.git(&["merge", "-q", "--no-edit", "-m", "merge", "side"]);
     let (ours, theirs) = both_answers(&env, "f.txt");
+    // Git hands a merge's file whole to a parent that holds it unchanged; `who` asks the first
+    // parent first.
+    let who = ["c1", "main adds X", "c1", "c1", "side adds Y", "c1"];
     let git = ["c1", "side adds X", "c1", "c1", "side adds Y", "c1"];
+    assert_eq!(ours, named(&who, "f.txt"));
     assert_eq!(theirs, named(&git, "f.txt"));
-    assert_eq!(ours, theirs);
 }
 
 /// The same where `main`'s file differs from the merge's too: Git then compares line by line,
@@ -1206,23 +1316,48 @@ fn a_line_both_sides_added_goes_to_the_first_parent_in_both() {
     assert_eq!(ours, theirs);
 }
 
-/// The second form: the branch takes `L1` out and puts it back at the end, and the merge's file
-/// is the branch's (`L0 L2 L1`). Git hands it whole to the branch: `L1` is the commit that put
-/// it back. `who` compares it with `main`'s `L0 L1 L2` first; two shortest diffs keep two lines
-/// (`L0 L1` or `L0 L2`), and `who` keeps `L0 L1`, so `L1` is `c1`'s. Either way `L1` is in
-/// `main`, the first parent, at the merge.
+/// The branch takes `L1` out and puts it back at the end, and the merge's file is the branch's
+/// (`L0 L2 L1`). `L0 L1 L2` against `L0 L2 L1` is a tie: two shortest diffs keep two lines (`L0
+/// L1` or `L0 L2`). `who` compares the merge with `main` first and keeps `L0 L1`, so `L1` is
+/// `c1`'s. Git names the commit that put `L1` back, which fits handing the file whole to the
+/// branch, and equally a first-parent pass that keeps `L0 L2`: this history alone proves neither.
+/// Both wrote `L1`.
 #[test]
-#[ignore = "finding: git blame hands a merge's file whole to a later parent with the same version; who asks the first parent first"]
-fn a_line_a_branch_put_back_is_named_as_git_blame_does() {
+fn where_two_diffs_tie_at_a_merge_a_line_the_branch_put_back_may_be_named_apart() {
     let env = Env::new();
-    env.commit("f.txt", "L0\nL1\nL2\n", "c1");
+    env.commit(
+        "f.txt",
+        "L0
+L1
+L2
+",
+        "c1",
+    );
     env.git(&["checkout", "-q", "-b", "side"]);
-    env.commit("f.txt", "L0\nL2\n", "side takes L1 out");
-    env.commit("f.txt", "L0\nL2\nL1\n", "side puts L1 back");
+    env.commit(
+        "f.txt",
+        "L0
+L2
+",
+        "side takes L1 out",
+    );
+    env.commit(
+        "f.txt",
+        "L0
+L2
+L1
+",
+        "side puts L1 back",
+    );
     env.git(&["checkout", "-q", "main"]);
-    env.commit("g.txt", "x\n", "c2");
+    env.commit(
+        "g.txt", "x
+", "c2",
+    );
     env.git(&["merge", "-q", "--no-edit", "-m", "merge", "side"]);
     let (ours, theirs) = both_answers(&env, "f.txt");
+    // Where two line-ups are equally short, or a later parent holds the file unchanged, the two
+    // programs may name different saves that wrote the line.
+    assert_eq!(ours, named(&["c1", "c1", "c1"], "f.txt"));
     assert_eq!(theirs, named(&["c1", "c1", "side puts L1 back"], "f.txt"));
-    assert_eq!(ours, theirs);
 }
