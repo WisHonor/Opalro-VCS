@@ -224,6 +224,39 @@ mod tests {
     }
 
     #[test]
+    fn an_entry_that_is_not_a_conflict_stands_as_stored_even_under_a_records_id() {
+        // A hostile listing can name a record's ID under another kind.
+        let id = file_of(b"record").id;
+        let records = HashMap::from([(id, Summary::of(&mine_theirs(Some(file_of(b"mine")))))]);
+        let entry = |kind| Entry {
+            name: "c".to_owned(),
+            kind,
+            id,
+            size: 6,
+        };
+        let others = [
+            EntryKind::File,
+            EntryKind::Executable,
+            EntryKind::Symlink,
+            EntryKind::Folder,
+            EntryKind::ProjectLink,
+        ];
+        for kind in others {
+            let stored = entry(kind);
+            let stood = as_it_stands(&stored, &records);
+            assert!(
+                matches!(stood, Some(Cow::Borrowed(e)) if *e == stored),
+                "{kind:?}"
+            );
+        }
+        // The record is there to be found: under its own kind, the entry stands as it says.
+        let mine = file_of(b"mine");
+        let conflict = entry(EntryKind::Conflict);
+        let stood = as_it_stands(&conflict, &records).unwrap();
+        assert_eq!((stood.kind, stood.id), (EntryKind::File, mine.id));
+    }
+
+    #[test]
     fn a_conflict_standing_as_nothing_leaves_no_name() {
         let (_dir, mut repo) = project();
         let root = plant_conflicted(&mut repo, &[], &[("c", mine_theirs(None))]);
