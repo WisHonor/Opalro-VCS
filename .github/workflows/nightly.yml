@@ -45,7 +45,8 @@ jobs:
           if-no-files-found: ignore
 
   # Imports Git's own repository, then compares every commit, tree, file and ref with Git. The
-  # test prints how long the import took and its peak memory. Nightly and by hand, not on pushes.
+  # test prints how long the import took and its peak memory, and times `opalro who` against
+  # `git blame` on five files. Nightly and by hand, not on pushes.
   differential:
     if: github.event_name != 'push'
     runs-on: ubuntu-latest

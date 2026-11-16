@@ -664,6 +664,8 @@ fn who_against_git_blame(repo: &Repository, dir: &Path) {
                 header = true;
             }
         }
+        // A save for every line of the file, which has as many lines as Git reads in it.
+        assert_eq!(ours.len(), theirs.len(), "{file}");
         let same = ours.iter().zip(&theirs).filter(|(a, b)| a == b).count();
         println!(
             "who {file}: {} lines, {:.2} s; git blame: {} lines, {:.2} s; the same commit on \
