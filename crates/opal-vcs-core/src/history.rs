@@ -223,26 +223,14 @@ pub struct LineIds {
 }
 
 impl LineIds {
-    /// Reads the current line, or the saves back from the one the project is at, and keeps the
-    /// cache up to date.
+    /// Reads the current line, or the saves back from the one the project is at.
     pub fn read(repo: &Repository) -> Result<LineIds, RepoError> {
-        LineIds::reading(repo, true)
-    }
-
-    /// [`LineIds::read`], for a command that writes nothing: the cache is used, never stored.
-    pub fn read_only(repo: &Repository) -> Result<LineIds, RepoError> {
-        LineIds::reading(repo, false)
-    }
-
-    fn reading(repo: &Repository, store: bool) -> Result<LineIds, RepoError> {
         let (_, entry) = repo.current()?;
         let mut cache = ChangeIds::load(repo);
         let line = cache.chain(repo, line_of(&entry), tip_of(&entry)?)?;
         let mut change_ids: Vec<ChangeId> = line.iter().map(|(_, c)| *c).collect();
         let saves = line.iter().map(|(id, _)| *id).collect();
-        if store {
-            cache.store(repo, &entry.state);
-        }
+        cache.store(repo, &entry.state);
         change_ids.sort_unstable();
         Ok(LineIds { change_ids, saves })
     }

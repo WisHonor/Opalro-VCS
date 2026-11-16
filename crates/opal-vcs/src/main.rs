@@ -1844,7 +1844,10 @@ fn who_command(
     opened: &mut Option<Repository>,
 ) -> Result<(), Failure> {
     let here = resolved(&std::env::current_dir()?);
-    let repo: &Repository = opened.insert(with_users_key(Repository::discover(&here)?));
+    let mut handle = with_users_key(Repository::discover(&here)?);
+    // `who` writes nothing, so its handle stores no cache, whichever lookup it reaches.
+    handle.store_no_caches();
+    let repo: &Repository = opened.insert(handle);
     let path = project_path(repo.root(), &here, given, repo.drive()?)?;
     let asked = match save {
         Some(t) => Asked::Save(resolve(repo, t)?),
@@ -1853,8 +1856,8 @@ fn who_command(
     let request = WhoRequest { path: &path, asked };
     let found = whose::who(repo, &request).map_err(|e| who_output::failure(e, given))?;
     let mut warnings: Vec<Warning> = unfinished_warning(repo).into_iter().collect();
-    // One read of the line shortens every ID, and stores no cache: `who` writes nothing.
-    let line = LineIds::read_only(repo);
+    // One read of the line shortens every ID.
+    let line = LineIds::read(repo);
     if let Err(problem) = &line {
         warnings.push(not_shortened(problem));
     }

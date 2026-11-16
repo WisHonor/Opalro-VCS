@@ -140,7 +140,7 @@ impl ChangeIds {
     }
 
     fn store_within(&mut self, repo: &Repository, state: &State, cap: u64) {
-        let Some(key) = repo.cache_key() else {
+        let Some(key) = repo.storing_key() else {
             return;
         };
         let keep = kept(state);

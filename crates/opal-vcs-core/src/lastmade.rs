@@ -121,7 +121,7 @@ impl LastMade {
     /// notes of saves that are some line's newest in `state`; past the limit, only this one. A
     /// file that can't be written is just not there next time, so a failure is ignored.
     pub(crate) fn store(repo: &Repository, state: &State, save: Id, entry: Id) {
-        let Some(key) = repo.cache_key() else {
+        let Some(key) = repo.storing_key() else {
             return;
         };
         let mut made = LastMade::load(repo);

@@ -140,7 +140,7 @@ pub fn shown(whose: &Whose, asked: bool, saves: &Saves) -> String {
         .zip(by_line)
         .enumerate()
     {
-        // A row that repeats the save above it, or not saved yet as it is, is dim.
+        // A row is dim when the row above names the same save, or is not saved yet too.
         let id = read.as_ref().map(|r| r.named.id);
         let again = before == Some(id);
         before = Some(id);

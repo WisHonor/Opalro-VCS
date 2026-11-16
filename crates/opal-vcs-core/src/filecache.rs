@@ -367,7 +367,7 @@ impl FileCache {
     /// isn't at least 2 s older is kept as racy, never matched, since it may change again within
     /// one tick of the drive's clock.
     pub fn store(self, repo: &Repository, now_ns: i128) -> Result<(), RepoError> {
-        let Some(key) = repo.cache_key() else {
+        let Some(key) = repo.storing_key() else {
             return Ok(());
         };
         let trusted_before = now_ns.saturating_sub(RACY_NS);

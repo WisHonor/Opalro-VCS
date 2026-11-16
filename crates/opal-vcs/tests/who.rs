@@ -509,6 +509,13 @@ fn who_changes_nothing() {
     env.overwrite("a.txt", "one\nmain\nthree\n");
     run(&env, &["save", "On main"], 0);
     run(&env, &["combine", "side"], 0);
+    // IDs as `who` prints them, to reach its lookups by change ID and by fingerprint.
+    let doc = json(&env, &["who", "a.txt"], 0);
+    let saves = doc["saves"].as_array().unwrap();
+    let first = saves.iter().find(|s| s["message"] == "A").unwrap();
+    let change_id = first["change_id_short"].as_str().unwrap().to_owned();
+    let side = saves.iter().find(|s| s["message"] == "On side").unwrap();
+    let fingerprint = side["id"].as_str().unwrap()[..12].to_owned();
     // With no cache, a command that stores one leaves a file that wasn't there.
     let cache = env.root().join(".opalro/cache");
     for file in std::fs::read_dir(&cache).unwrap() {
@@ -528,13 +535,18 @@ fn who_changes_nothing() {
         "{:?}",
         before.1.keys()
     );
-    for args in [
-        &["who", "a.txt"][..],
-        &["who", "a.txt", "--save", "side"],
-        &["who", "a.txt", "--json"],
-        &["who", "none.txt"],
+    for (args, code) in [
+        (&["who", "a.txt"][..], 0),
+        (&["who", "a.txt", "--save", "side"], 0),
+        (&["who", "a.txt", "--json"], 0),
+        (&["who", "none.txt"], 1),
+        (&["who", "a.txt", "--save", &change_id], 0),
+        (&["who", "a.txt", "--save", &fingerprint], 0),
+        (&["who", "a.txt", "--save", "0123456789ab"], 1),
+        (&["who", "a.txt", "--save", "zzzzzzzzzzzz"], 1),
+        (&["blame", "a.txt", "--save", &fingerprint], 0),
     ] {
-        let _ = env.opalro().args(args).output().unwrap();
+        run(&env, args, code);
         assert_eq!(everything(), before, "{args:?}");
     }
     let (shown, _) = run(&env, &["who", "a.txt"], 0);
