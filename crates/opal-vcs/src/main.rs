@@ -1844,8 +1844,9 @@ fn who_command(
     opened: &mut Option<Repository>,
 ) -> Result<(), Failure> {
     let here = resolved(&std::env::current_dir()?);
-    // `who` writes nothing: it leaves the leftovers in `.opalro/tmp` as `verify` does, and its
-    // handle stores no cache, whichever lookup it reaches.
+    // `who` writes nothing of its own: only the drive's test file, removed again, and
+    // `.opalro/tmp` and `.opalro/cache` when they are missing. It leaves the leftovers in
+    // `.opalro/tmp` as `verify` does, and its handle stores no cache, whichever lookup it reaches.
     let mut handle = with_users_key(Repository::discover_untouched(&here)?);
     handle.store_no_caches();
     let repo: &Repository = opened.insert(handle);

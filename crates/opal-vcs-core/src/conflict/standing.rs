@@ -224,7 +224,7 @@ mod tests {
     }
 
     #[test]
-    fn an_entry_that_is_not_a_conflict_stands_as_stored_even_under_a_records_id() {
+    fn an_entry_that_is_not_a_conflict_stands_as_stored_even_under_a_record_s_id() {
         // A hostile listing can name a record's ID under another kind.
         let id = file_of(b"record").id;
         let records = HashMap::from([(id, Summary::of(&mine_theirs(Some(file_of(b"mine")))))]);

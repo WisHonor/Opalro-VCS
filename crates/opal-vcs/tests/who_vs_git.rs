@@ -593,6 +593,10 @@ fn generate(h: &Merged) -> Generated {
                         .or_default() += usize::from(older);
                 }
                 if special && later && !same(parents[0].1) {
+                    // Printed, to show how much the guard takes from the comparison.
+                    *s.facts
+                        .entry("merges that wrote a line only to step round the known difference")
+                        .or_default() += 1;
                     file.lines.push(merge_line(s));
                     wrote = true;
                 }
@@ -1019,6 +1023,7 @@ fn who_matches_git_blame_on_unique_lines() {
             "files emptied and filled again",
             "files both sides changed",
             "lines put back",
+            "merges checked with git merge-tree",
         ],
     );
     floors(
@@ -1190,44 +1195,12 @@ fn a_line_moved_within_a_file_is_new_where_it_lands_in_both() {
 #[test]
 fn where_a_merge_took_a_later_parents_file_whole_who_asks_the_first_parent_and_git_the_later() {
     let env = Env::new();
-    env.commit(
-        "f.txt",
-        "L0
-L1
-L2
-L3
-L4
-",
-        "c1",
-    );
+    env.commit("f.txt", "L0\nL1\nL2\nL3\nL4\n", "c1");
     env.git(&["checkout", "-q", "-b", "side"]);
-    env.commit(
-        "f.txt",
-        "L2
-L0
-L1
-S4
-L3
-L4
-",
-        "c3",
-    );
-    env.commit(
-        "f.txt",
-        "L2
-S6
-S7
-S8
-L3
-L4
-",
-        "c4",
-    );
+    env.commit("f.txt", "L2\nL0\nL1\nS4\nL3\nL4\n", "c3");
+    env.commit("f.txt", "L2\nS6\nS7\nS8\nL3\nL4\n", "c4");
     env.git(&["checkout", "-q", "main"]);
-    env.commit(
-        "g.txt", "x
-", "c2",
-    );
+    env.commit("g.txt", "x\n", "c2");
     env.git(&["merge", "-q", "--no-edit", "-m", "merge", "side"]);
     let (ours, theirs) = both_answers(&env, "f.txt");
     // Git hands a merge's file whole to a parent that holds it unchanged; `who` asks the first
@@ -1246,48 +1219,12 @@ L4
 fn a_line_both_sides_added_is_the_first_parents_in_who_and_the_later_parents_in_git_where_the_merge_took_its_file()
  {
     let env = Env::new();
-    env.commit(
-        "f.txt",
-        "L0
-L1
-L2
-L3
-",
-        "c1",
-    );
+    env.commit("f.txt", "L0\nL1\nL2\nL3\n", "c1");
     env.git(&["checkout", "-q", "-b", "side"]);
-    env.commit(
-        "f.txt",
-        "L0
-X
-L1
-L2
-L3
-",
-        "side adds X",
-    );
-    env.commit(
-        "f.txt",
-        "L0
-X
-L1
-L2
-Y
-L3
-",
-        "side adds Y",
-    );
+    env.commit("f.txt", "L0\nX\nL1\nL2\nL3\n", "side adds X");
+    env.commit("f.txt", "L0\nX\nL1\nL2\nY\nL3\n", "side adds Y");
     env.git(&["checkout", "-q", "main"]);
-    env.commit(
-        "f.txt",
-        "L0
-X
-L1
-L2
-L3
-",
-        "main adds X",
-    );
+    env.commit("f.txt", "L0\nX\nL1\nL2\nL3\n", "main adds X");
     env.git(&["merge", "-q", "--no-edit", "-m", "merge", "side"]);
     let (ours, theirs) = both_answers(&env, "f.txt");
     // Git hands a merge's file whole to a parent that holds it unchanged; `who` asks the first
@@ -1325,35 +1262,12 @@ fn a_line_both_sides_added_goes_to_the_first_parent_in_both() {
 #[test]
 fn where_two_diffs_tie_at_a_merge_a_line_the_branch_put_back_may_be_named_apart() {
     let env = Env::new();
-    env.commit(
-        "f.txt",
-        "L0
-L1
-L2
-",
-        "c1",
-    );
+    env.commit("f.txt", "L0\nL1\nL2\n", "c1");
     env.git(&["checkout", "-q", "-b", "side"]);
-    env.commit(
-        "f.txt",
-        "L0
-L2
-",
-        "side takes L1 out",
-    );
-    env.commit(
-        "f.txt",
-        "L0
-L2
-L1
-",
-        "side puts L1 back",
-    );
+    env.commit("f.txt", "L0\nL2\n", "side takes L1 out");
+    env.commit("f.txt", "L0\nL2\nL1\n", "side puts L1 back");
     env.git(&["checkout", "-q", "main"]);
-    env.commit(
-        "g.txt", "x
-", "c2",
-    );
+    env.commit("g.txt", "x\n", "c2");
     env.git(&["merge", "-q", "--no-edit", "-m", "merge", "side"]);
     let (ours, theirs) = both_answers(&env, "f.txt");
     // Where two line-ups are equally short, or a later parent holds the file unchanged, the two

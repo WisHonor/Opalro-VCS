@@ -2051,6 +2051,7 @@ fn save_only(repo: &mut Repository, m: &mut Model, path: &str) {
     while let Some((above, _)) = up.rsplit_once('/') {
         let gone = !m.folder.folders.contains(above);
         if gone && holds_below(&tip, above) && !holds_below(&stored, above) {
+            met("save <path> took the last of a folder gone from the folder");
             stored.remove(above);
         }
         up = above;

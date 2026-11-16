@@ -282,7 +282,7 @@ pub fn who(repo: &Repository, req: &WhoRequest<'_>) -> Result<Whose, WhoError> {
             let in_save = saved.is_some();
             if let Some((_, entry)) = saved {
                 let mut left = (0..changes::line_count(&text)).map(|i| (i, i)).collect();
-                let found = compare(store, Some(&text), &entry, &mut coarse)?;
+                let found = compare(store, Some(&text), &entry, &mut coarse)?.unwrap_or_default();
                 let lines = take(&found, &mut left);
                 if !lines.is_empty() {
                     heap.push(Turn {
@@ -352,9 +352,15 @@ pub fn who(repo: &Repository, req: &WhoRequest<'_>) -> Result<Whose, WhoError> {
                             here = Some(version(store, &entry, asked)?);
                         }
                         let text = here.as_ref().and_then(|h| h.as_deref());
-                        let found = compare(store, text, &e, &mut coarse)?;
-                        remembered.keep(pair, Rc::clone(&found));
-                        found
+                        // A side not read is not remembered: another listing of the same
+                        // contents may claim a size that lets it be read.
+                        match compare(store, text, &e, &mut coarse)? {
+                            Some(found) => {
+                                remembered.keep(pair, Rc::clone(&found));
+                                found
+                            }
+                            None => Stretches::default(),
+                        }
                     }
                 };
                 take(&found, &mut lines)
@@ -459,25 +465,24 @@ fn keys_of(text: &[u8]) -> Vec<&[u8]> {
         .collect()
 }
 
-/// Which lines of `here` the older version `older` has too. A version that can't be compared line
-/// by line has none.
+/// Which lines of `here` the older version `older` has too; `None` when a side can't be compared
+/// line by line, so none of them.
 fn compare(
     store: &Store,
     here: Option<&[u8]>,
     older: &Entry,
     coarse: &mut bool,
-) -> Result<Stretches, SaveError> {
-    let none = || Rc::new(Vec::new());
+) -> Result<Option<Stretches>, SaveError> {
     let Some(here) = here else {
-        return Ok(none());
+        return Ok(None);
     };
     let Side::Bytes(old) =
         changes::stored(store, Some(older.kind), Some(older.id), Some(older.size))?
     else {
-        return Ok(none());
+        return Ok(None);
     };
     if changes::comparable(&old).is_err() {
-        return Ok(none());
+        return Ok(None);
     }
     #[cfg(test)]
     COMPARED.set(COMPARED.get() + 1);
@@ -494,7 +499,7 @@ fn compare(
             _ => None,
         })
         .collect();
-    Ok(Rc::new(found))
+    Ok(Some(Rc::new(found)))
 }
 
 /// The lines of `left` that `found` says the older version has, each with its line there; they
@@ -733,6 +738,17 @@ mod tests {
                 .map(|&(p, b)| (p, EntryKind::File, b))
                 .collect();
             let (root, _) = add_tree(&mut self.packs, &entries, &[]);
+            self.save_root(message, parents, root, notes, time_ms)
+        }
+
+        fn save_root(
+            &mut self,
+            message: &str,
+            parents: &[Id],
+            root: Id,
+            notes: &[(&str, &str)],
+            time_ms: i64,
+        ) -> Id {
             let mut move_notes: Vec<MoveNote> = notes
                 .iter()
                 .map(|&(from, to)| MoveNote {
@@ -958,6 +974,36 @@ mod tests {
         assert_eq!(
             at(&repo, combined, "a.txt").runs,
             runs(&[(1, by(start)), (1, by(one)), (1, by(two))])
+        );
+    }
+
+    /// One parent's listing claims a size past the limit for the contents the other holds as
+    /// they are: which parent comes first doesn't change what the other is compared to.
+    #[test]
+    fn a_listing_that_lies_about_a_size_is_not_remembered_for_the_next() {
+        let (_dir, mut repo) = project();
+        let mut plant = Plant::new(&mut repo);
+        let base = plant.base;
+        let honest = plant.save("Honest", &[base], &[("a.txt", b"a\nb\n")], &[], 1);
+        let lie = Entry {
+            name: "a.txt".into(),
+            kind: EntryKind::File,
+            id: plant.packs.add_content(b"a\nb\n").unwrap(),
+            size: changes::MAX_LINES_SIZE + 1,
+        };
+        let root = add_listing(&mut plant.packs, vec![lie]).0;
+        let lying = plant.save_root("Lying", &[base], root, &[], 2);
+        let text: &[u8] = b"a\nb\nc\n";
+        let lie_first = plant.save("Lie first", &[lying, honest], &[("a.txt", text)], &[], 3);
+        let honest_first = plant.save("Honest first", &[honest, lying], &[("a.txt", text)], &[], 4);
+        plant.commit(&mut repo);
+        assert_eq!(
+            at(&repo, lie_first, "a.txt").runs,
+            runs(&[(2, by(honest)), (1, by(lie_first))])
+        );
+        assert_eq!(
+            at(&repo, honest_first, "a.txt").runs,
+            runs(&[(2, by(honest)), (1, by(honest_first))])
         );
     }
 
@@ -1525,8 +1571,9 @@ mod tests {
         plant.commit(&mut repo);
         let before = COMPARED.get();
         let w = at(&repo, m, "a.txt");
-        // One for each pair of a version and a parent: m with each of the eight, each of them
-        // with v, v with the save before it, and nine more down to the first.
+        // One for each pair of a version and a parent's that a diff compared: m with each of the
+        // eight, each of them with v, v with the save before it, and nine more down to the first.
+        // A pair a side of which isn't text, or is too big, is not counted.
         assert_eq!(COMPARED.get() - before, 8 + 8 + 10);
         assert_eq!(w.runs, runs(&[(8, by(oldest.unwrap()))]));
     }
@@ -1612,8 +1659,24 @@ mod tests {
         out
     }
 
-    /// Paths as stored never ask the drive. A path no save has exactly (`none.txt` here, or one
-    /// typed in another letter case) does, and its probe file under `.opalro/tmp` is gone again.
+    #[test]
+    fn only_a_path_no_save_has_exactly_asks_the_drive() {
+        let (fx, [_, _, _, combined]) = conflicted();
+        let probes = |ask: &dyn Fn()| {
+            let before = crate::drive::PROBES.get();
+            ask();
+            crate::drive::PROBES.get() - before
+        };
+        assert_eq!(probes(&|| drop(fx.folder("a.txt"))), 0);
+        assert_eq!(probes(&|| drop(fx.at(combined, "a.txt"))), 0);
+        assert_eq!(
+            probes(&|| drop(fx.who("none.txt", Asked::Folder).unwrap_err())),
+            1
+        );
+    }
+
+    /// Nothing in the project changes, for paths as stored and for one no save has, whose probe
+    /// file under `.opalro/tmp` is gone again.
     #[test]
     fn who_writes_nothing() {
         let (mut fx, [_, _, _, combined]) = conflicted();

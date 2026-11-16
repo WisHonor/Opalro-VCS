@@ -291,6 +291,75 @@ fn an_empty_file_and_one_no_save_has() {
     assert_eq!(doc["runs"][0]["save"], serde_json::Value::Null);
 }
 
+/// Where the drive's name test can't make its file, the error says where and why.
+#[cfg(unix)]
+#[test]
+fn a_project_whose_tmp_folder_cannot_be_written_says_so() {
+    use std::os::unix::fs::PermissionsExt;
+    let env = started();
+    let tmp = env.root().join(".opalro/tmp");
+    let everything = || {
+        let opalro = support::entries(&env.root().join(".opalro"));
+        (support::entries(env.root()), opalro)
+    };
+    let before = everything();
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o555)).unwrap();
+    // root writes everywhere, so there is nothing to test.
+    let root_user = std::fs::write(tmp.join("probe"), "").is_ok();
+    let out = env.opalro().args(["who", "a.txt"]).output().unwrap();
+    std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o755)).unwrap();
+    if root_user {
+        return;
+    }
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(text(&out.stdout), "");
+    let said = text(&out.stderr);
+    let (error, hint) = said.split_once("\n\n").unwrap();
+    assert!(
+        error.starts_with("error: Opalro couldn't make a file in ")
+            && error.ends_with(".opalro/tmp: Permission denied (os error 13)"),
+        "{said}"
+    );
+    assert_eq!(
+        hint,
+        "hint: Opalro makes a file there for a moment, and removes it again, to learn how this \
+         drive compares names (whether README and readme are one file, say).\n"
+    );
+    assert_eq!(everything(), before);
+}
+
+#[test]
+fn json_names_the_path_from_the_project_folder() {
+    let env = started();
+    support::write(&env, "sub/notes.txt", "n\n");
+    let (out, _) = run_in(
+        &env,
+        &env.root().join("sub"),
+        &["who", "notes.txt", "--json"],
+        0,
+    );
+    let doc: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(doc["path"], "sub/notes.txt", "{doc}");
+}
+
+#[test]
+fn json_for_a_file_no_save_holds() {
+    let env = started();
+    env.overwrite("new.txt", "x\ny\n");
+    let history = json(&env, &["history"], 0);
+    let doc = json(&env, &["who", "new.txt"], 0);
+    assert_eq!(doc["path"], "new.txt", "{doc}");
+    assert_eq!(doc["from"], "folder");
+    assert_eq!(doc["save"]["id"], history["saves"][0]["id"]);
+    assert_eq!(doc["lines"], 2);
+    assert_eq!(
+        doc["runs"],
+        serde_json::json!([{"first": 1, "lines": 2, "save": null, "was": null}])
+    );
+    assert_eq!(doc["saves"], serde_json::json!([]));
+    assert_eq!(doc["coarse"], false);
+}
+
 #[test]
 fn a_path_is_named_from_the_folder_you_are_in_and_never_a_pattern() {
     let env = started();

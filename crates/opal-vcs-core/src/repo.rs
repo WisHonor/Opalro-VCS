@@ -187,6 +187,13 @@ pub enum RepoError {
         escape(&source.to_string(), false)
     )]
     CantWrite { path: PathBuf, source: io::Error },
+    /// The drive's name test couldn't make its file in `.opalro/tmp`, at `path`.
+    #[error(
+        "Opalro couldn't make a file in {}: {}",
+        escape(&path.display().to_string(), false),
+        escape(&source.to_string(), false)
+    )]
+    DriveUntested { path: PathBuf, source: io::Error },
     #[error(transparent)]
     Io(#[from] io::Error),
     #[error(transparent)]
@@ -266,6 +273,10 @@ impl RepoError {
                      finish."
                 }
                 RepoError::BeingMade { .. } => "Run the command again once it has finished.",
+                RepoError::DriveUntested { .. } => {
+                    "Opalro makes a file there for a moment, and removes it again, to learn how \
+                     this drive compares names (whether README and readme are one file, say)."
+                }
                 RepoError::OpalChanged { .. } => "Run the command again.",
                 RepoError::ImportUnfinished => "Run `opalro import` again to finish the import.",
                 RepoError::NewerFormat { .. } => "Update Opalro to open it.",
@@ -1544,7 +1555,10 @@ impl Repository {
 
     /// How the project's drive compares names.
     pub fn drive(&self) -> Result<crate::drive::Drive, RepoError> {
-        Ok(crate::drive::probe(self.tmp_folder())?)
+        crate::drive::probe(self.tmp_folder()).map_err(|source| RepoError::DriveUntested {
+            path: self.tmp.clone(),
+            source,
+        })
     }
 
     /// `tmp/`, held open.

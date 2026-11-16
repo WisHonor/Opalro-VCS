@@ -388,10 +388,9 @@ impl FileCache {
 
     /// Writes what this scan vouched for and recorded, sealed, replacing the old cache whole;
     /// nothing when the handle has no key or stores no caches, or when that is what the file
-    /// already holds. `now_ns`
-    /// is the drive's time at the start of the scan (`drive_now`): a file whose modified time
-    /// isn't at least 2 s older is kept as racy, never matched, since it may change again within
-    /// one tick of the drive's clock.
+    /// already holds. `now_ns` is the drive's time at the start of the scan (`drive_now`): a file
+    /// whose modified time isn't at least 2 s older is kept as racy, never matched, since it may
+    /// change again within one tick of the drive's clock.
     pub fn store(self, repo: &Repository, now_ns: i128) -> Result<(), RepoError> {
         self.store_giving_body(repo, now_ns).map(|_| ())
     }
@@ -403,6 +402,15 @@ impl FileCache {
         self,
         repo: &Repository,
         now_ns: i128,
+    ) -> Result<Option<Vec<u8>>, RepoError> {
+        self.store_within(repo, now_ns, MAX_BYTES)
+    }
+
+    fn store_within(
+        self,
+        repo: &Repository,
+        now_ns: i128,
+        cap: u64,
     ) -> Result<Option<Vec<u8>>, RepoError> {
         let Some(key) = repo.storing_key() else {
             return Ok(None);
@@ -425,7 +433,7 @@ impl FileCache {
             return Ok(Some(body));
         }
         let sealed = keyed::seal(key, &body);
-        if sealed.len() as u64 > MAX_BYTES {
+        if sealed.len() as u64 > cap {
             return Err(RepoError::Io(io::Error::other(
                 "the file-state cache would be bigger than 256 MiB",
             )));
@@ -580,6 +588,15 @@ mod tests {
 
     fn stored(dir: &tempfile::TempDir) -> std::path::PathBuf {
         dir.path().join(".opalro").join("cache").join("files")
+    }
+
+    #[test]
+    fn a_cache_too_big_to_write_is_not_written() {
+        let (dir, repo) = project();
+        let mut cache = FileCache::load(&repo);
+        cache.record("a.txt", &file(3, THEN), Id([1; 32]));
+        assert!(cache.store_within(&repo, THEN + 60 * SECOND, 10).is_err());
+        assert!(!stored(&dir).exists());
     }
 
     #[test]

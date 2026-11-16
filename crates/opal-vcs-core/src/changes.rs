@@ -215,6 +215,8 @@ pub fn unsaved_changes<E: From<SaveError> + From<StoreError>>(
     let save = store.save(&tip, repo.signatures_allowed())?;
     let mut now = read_folder(repo, save.root, false, git_excludes, None)
         .map_err(|e| e.in_save(tip, true))?;
+    // No switch follows, so the cache's body isn't needed.
+    now.cache_body = None;
     for w in std::mem::take(&mut now.warnings)
         .into_iter()
         .chain(writeout::unfinished_warning(repo))

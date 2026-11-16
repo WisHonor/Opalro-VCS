@@ -662,8 +662,8 @@ pub fn apply(
     apply_with(repo, lock, journal, drive, None)
 }
 
-/// `apply`, with `cache_body` as the body of the file-state cache if given: it must be what
-/// `cache/files` holds now.
+/// `apply`, with `cache_body` as the body of the file-state cache if given: what a load would
+/// give, unless another program wrote the cache since.
 fn apply_with(
     repo: &Repository,
     _lock: &ChangeLock,
@@ -764,8 +764,8 @@ pub fn carry_out(
     carry_out_with(repo, lock, journal, drive, None)
 }
 
-/// `carry_out`, with `cache_body` as the body of the file-state cache if given: it must be what
-/// `cache/files` holds now.
+/// `carry_out`, with `cache_body` as the body of the file-state cache if given: what a load
+/// would give, unless another program wrote the cache since.
 pub(crate) fn carry_out_with(
     repo: &mut Repository,
     lock: &ChangeLock,
@@ -1584,7 +1584,8 @@ fn made_on_the_way(actions: &mut Vec<Action>, only: &Scope) {
 }
 
 /// Whether the entry at `path` belongs to a switch limited to `only`: it is at or below one of
-/// them, or is a folder that must be made on the way to one.
+/// them, or is a folder on the way to one, planned for now; `made_on_the_way` keeps it only if
+/// something is written below it.
 fn in_scope(path: &str, only: Option<&Scope>, t: Option<&Entry>) -> bool {
     let folder = t.is_some_and(|e| e.kind == EntryKind::Folder);
     only.is_none_or(|only| only.holds(path) || (folder && only.reaches_below(path)))

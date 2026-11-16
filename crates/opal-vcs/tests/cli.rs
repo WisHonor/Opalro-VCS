@@ -46,7 +46,7 @@ fn warning_kinds(doc: &serde_json::Value) -> Vec<&str> {
 }
 
 #[test]
-fn version_is_0_1_0() {
+fn version_is_the_package_s() {
     let env = Env::new();
     let out = env.opalro().arg("--version").output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
@@ -2614,7 +2614,8 @@ fn a_save_of_the_last_place_in_a_deleted_folder_takes_the_folder_with_it() {
         .args(["save", "Only", "d/e"])
         .assert()
         .success();
-    // No empty `d` that the person never had, so nothing is left for a later save.
+    // No empty `d` that the person never had: nothing of it is in the save, nothing shows as
+    // changed, a later save has nothing to save, and the folder is what a goto there gives.
     let paths = support::saved_paths(&env, main_tip(&env));
     let in_d = |p: &&String| *p == "d" || p.starts_with("d/");
     assert_eq!(paths.keys().find(in_d), None, "{paths:?}");

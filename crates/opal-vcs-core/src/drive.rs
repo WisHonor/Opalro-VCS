@@ -29,11 +29,19 @@ impl Drive {
 /// How many times `probe` tests the drive before giving up on a file that keeps going away.
 const TRIES: usize = 5;
 
+#[cfg(test)]
+thread_local! {
+    /// How many times this thread asked the drive.
+    pub(crate) static PROBES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Tests the drive that holds the folder `tmp` with a throwaway file there, which it removes
 /// again. It runs without the change lock too (`status`, `changes`, the command line's early
 /// checks), and opening a project clears `tmp/` while the lock is free: a file taken away midway
 /// gives no answer, so it tests again.
 pub fn probe(tmp: &Dir) -> io::Result<Drive> {
+    #[cfg(test)]
+    PROBES.set(PROBES.get() + 1);
     for _ in 0..TRIES {
         if let Some(drive) = probe_once(tmp)? {
             return Ok(drive);
