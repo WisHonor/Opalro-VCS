@@ -578,13 +578,13 @@ Listed from anywhere but your own line, the change IDs are 12 letters long, so e
 
 ### `opalro who`
 
-Show the save behind each line of a file: who wrote the line, and when.
+Show the save behind each line of a file: who wrote the line, and when. Try it on your list:
 
 ```sh
 opalro who todo.txt
 ```
 
-In a game project, for example:
+In a game project where two people wrote `moves.txt` and you have added a line, `opalro who moves.txt` prints, for example:
 
 ```text
 Each line of moves.txt and the save it is from:

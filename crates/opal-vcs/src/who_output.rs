@@ -3,6 +3,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::rc::Rc;
 
 use opal_core::id::Id;
 use opal_core::names::GivenPathError;
@@ -17,43 +18,85 @@ use crate::style::{self, Role, Sym};
 
 /// A save the rows name, and its short change ID as `opalro show` prints it.
 pub struct Named {
+    pub id: Id,
     pub save: Save,
     pub short: String,
 }
 
+/// The saves an answer names, each read once: the one asked about, each save the runs name in
+/// the order of its first run, and each run's own.
+pub struct Saves {
+    at: Rc<Read>,
+    named: Vec<Rc<Read>>,
+    runs: Vec<Option<Rc<Read>>>,
+}
+
+/// A save read, and its three columns as a row shows them: escaped, the name cut on a terminal.
+struct Read {
+    named: Named,
+    cells: [String; 3],
+}
+
+impl Read {
+    fn of(named: Named) -> Read {
+        let s = style::out();
+        let author = &named.save.author;
+        let cells = [
+            named.short.clone(),
+            s.cut_end(&escape(&author.name, false), NAME_ROOM),
+            output::date(author.time_ms, author.tz_offset_min),
+        ];
+        Read { named, cells }
+    }
+}
+
+impl Saves {
+    /// Reads, with `read`, the saves `whose` names.
+    pub fn read(
+        whose: &Whose,
+        mut read: impl FnMut(&Id) -> Result<Named, Failure>,
+    ) -> Result<Saves, Failure> {
+        let mut by_id: HashMap<Id, Rc<Read>> = HashMap::new();
+        let mut named = Vec::new();
+        let mut once = |id: &Id, named: &mut Vec<Rc<Read>>, listed: bool| {
+            if let Some(known) = by_id.get(id) {
+                return Ok(Rc::clone(known));
+            }
+            let save = Rc::new(Read::of(read(id)?));
+            by_id.insert(*id, Rc::clone(&save));
+            if listed {
+                named.push(Rc::clone(&save));
+            }
+            Ok::<_, Failure>(save)
+        };
+        let mut runs = Vec::new();
+        for run in &whose.runs {
+            runs.push(match &run.by {
+                By::Save { id, .. } => Some(once(id, &mut named, true)?),
+                By::Unsaved => None,
+            });
+        }
+        let at = once(&whose.at, &mut named, false)?;
+        Ok(Saves { at, named, runs })
+    }
+}
+
 /// The most of an author's name a terminal shows.
 const NAME_ROOM: usize = 20;
-
-/// The saves `runs` names, each once, in the order of its first run.
-pub fn named_in(whose: &Whose) -> Vec<Id> {
-    let mut ids: Vec<Id> = Vec::new();
-    for run in &whose.runs {
-        if let By::Save { id, .. } = run.by
-            && !ids.contains(&id)
-        {
-            ids.push(id);
-        }
-    }
-    ids
-}
 
 fn line_count(whose: &Whose) -> usize {
     whose.runs.iter().map(|r| r.lines).sum()
 }
 
 /// `opalro who`'s outcome line and rows; `asked` when `--save` named the save.
-pub fn shown(whose: &Whose, asked: bool, saves: &HashMap<Id, Named>) -> String {
+pub fn shown(whose: &Whose, asked: bool, saves: &Saves) -> String {
     let s = style::out();
     let path = s.paint(Role::Path, &escape(&whose.path, false));
     let n = line_count(whose);
     if n == 0 {
         return format!("{path} is empty.\n");
     }
-    let unsaved: usize = (whose.runs.iter())
-        .filter(|r| r.by == By::Unsaved)
-        .map(|r| r.lines)
-        .sum();
-    if unsaved == n {
+    if !whose.in_save {
         return match n {
             1 => format!("{path} isn't saved yet: its 1 line isn't from a save.\n"),
             n => format!(
@@ -63,35 +106,17 @@ pub fn shown(whose: &Whose, asked: bool, saves: &HashMap<Id, Named>) -> String {
         };
     }
     let mut text = if asked {
-        let short = saves
-            .get(&whose.at)
-            .map_or_else(|| whose.at.short_hex(), |named| named.short.clone());
         format!(
             "Each line of {path} as save {} has it, and the save it is from:\n\n",
-            s.paint(Role::ChangeId, &short)
+            s.paint(Role::ChangeId, &saves.at.named.short)
         )
     } else {
         format!("Each line of {path} and the save it is from:\n\n")
     };
 
-    // The three columns of each save, escaped, the name cut on a terminal.
-    let cells: HashMap<Id, [String; 3]> = named_in(whose)
-        .into_iter()
-        .map(|id| {
-            let cells = match saves.get(&id) {
-                Some(Named { save, short }) => [
-                    short.clone(),
-                    s.cut_end(&escape(&save.author.name, false), NAME_ROOM),
-                    output::date(save.author.time_ms, save.author.tz_offset_min),
-                ],
-                None => [id.short_hex(), String::new(), String::new()],
-            };
-            (id, cells)
-        })
-        .collect();
     let mut widths = [0; 3];
-    for row in cells.values() {
-        for (width, cell) in widths.iter_mut().zip(row) {
+    for read in &saves.named {
+        for (width, cell) in widths.iter_mut().zip(&read.cells) {
             *width = (*width).max(style::columns(cell));
         }
     }
@@ -105,18 +130,23 @@ pub fn shown(whose: &Whose, asked: bool, saves: &HashMap<Id, Named>) -> String {
     let number = n.to_string().len();
     let bar = s.paint(Role::Dim, s.sym(Sym::Bar));
 
-    let by_line = (whose.runs.iter()).flat_map(|r| std::iter::repeat_n(&r.by, r.lines));
-    let mut before: Option<&By> = None;
-    for (i, (line, by)) in whose
+    let by_line = (whose.runs.iter().zip(&saves.runs))
+        .flat_map(|(r, read)| std::iter::repeat_n(read, r.lines));
+    let mut before = None;
+    let mut unsaved = 0;
+    for (i, (line, read)) in whose
         .text
         .split_inclusive(|b| *b == b'\n')
         .zip(by_line)
         .enumerate()
     {
-        let again = before.is_some_and(|b| same_save(b, by));
-        before = Some(by);
-        let left = match saved(by).and_then(|id| cells.get(&id)) {
-            Some([short, name, date]) => {
+        // A row that repeats the save above it, or not saved yet as it is, is dim.
+        let id = read.as_ref().map(|r| r.named.id);
+        let again = before == Some(id);
+        before = Some(id);
+        let left = match read {
+            Some(read) => {
+                let [short, name, date] = &read.cells;
                 let plain = [
                     pad(short, widths[0]),
                     pad(name, widths[1]),
@@ -130,6 +160,7 @@ pub fn shown(whose: &Whose, asked: bool, saves: &HashMap<Id, Named>) -> String {
                 }
             }
             None => {
+                unsaved += 1;
                 let plain = pad("not saved yet", across);
                 if again {
                     s.paint(Role::Dim, &plain)
@@ -152,18 +183,6 @@ pub fn shown(whose: &Whose, asked: bool, saves: &HashMap<Id, Named>) -> String {
     text
 }
 
-fn saved(by: &By) -> Option<Id> {
-    match by {
-        By::Save { id, .. } => Some(*id),
-        By::Unsaved => None,
-    }
-}
-
-/// Whether two rows name the same save, or both are not saved yet.
-fn same_save(a: &By, b: &By) -> bool {
-    saved(a) == saved(b)
-}
-
 /// What a comparison past its deadline means for the answer, said once after it.
 pub fn coarse_warning() -> Warning {
     Warning::new(
@@ -174,16 +193,10 @@ pub fn coarse_warning() -> Warning {
 }
 
 /// `opalro who --json`'s document (docs/json.md).
-pub fn document(
-    whose: &Whose,
-    asked: bool,
-    saves: &HashMap<Id, Named>,
-    warnings: &[Warning],
-) -> Value {
-    let save_json = |id: &Id| {
-        saves
-            .get(id)
-            .map(|named| output::save_json(id, &named.save, &named.short))
+pub fn document(whose: &Whose, asked: bool, saves: &Saves, warnings: &[Warning]) -> Value {
+    let save_json = |read: &Read| {
+        let named = &read.named;
+        output::save_json(&named.id, &named.save, &named.short)
     };
     let runs: Vec<Value> = whose
         .runs
@@ -200,10 +213,10 @@ pub fn document(
         "opalro_json": OPALRO_JSON,
         "path": whose.path,
         "from": if asked { "save" } else { "folder" },
-        "save": save_json(&whose.at),
+        "save": save_json(&saves.at),
         "lines": line_count(whose),
         "runs": runs,
-        "saves": named_in(whose).iter().filter_map(save_json).collect::<Vec<_>>(),
+        "saves": saves.named.iter().map(|read| save_json(read)).collect::<Vec<_>>(),
         "coarse": whose.coarse,
         "warnings": output::warnings_json(warnings),
     })

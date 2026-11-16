@@ -303,18 +303,8 @@ fn a_path_is_named_from_the_folder_you_are_in_and_never_a_pattern() {
     );
     let (shown, _) = run_in(&env, &env.root().join("sub"), &["who", "../a.txt"], 0);
     assert!(shown.starts_with("Each line of a.txt and"), "{shown}");
-    // `*` is a character of the name: `a.txt` isn't matched, and the name is refused as typed.
-    let said = refused(&env, &["who", "*.txt"]);
-    assert!(said.starts_with("error: "), "{said}");
-    assert!(said.contains("*.txt"), "{said}");
-    assert!(!said.contains("a.txt"), "{said}");
-}
-
-/// Windows refuses a name holding `*` itself: there is no file there.
-#[cfg(windows)]
-#[test]
-fn a_name_windows_cant_hold_is_no_file_in_the_folder() {
-    let env = started();
+    // `*` is a character of the name: `a.txt` isn't matched, on every system (where Windows
+    // can't hold such a name, there is no file there either).
     assert_eq!(
         refused(&env, &["who", "*.txt"]),
         "error: *.txt isn't a file in your folder.\n\nhint: To read it as a save has it: opalro \
@@ -333,11 +323,32 @@ fn a_name_holding_a_star_is_read_as_itself() {
         shown,
         "a*.txt isn't saved yet: its 1 line isn't from a save.\n"
     );
+}
+
+#[test]
+fn a_saved_file_rewritten_from_top_to_bottom_has_its_rows() {
+    let env = started();
+    env.overwrite("a.txt", "uno\ndos\n");
+    let (shown, _) = run(&env, &["who", "a.txt"], 0);
     assert_eq!(
-        refused(&env, &["who", "*.txt"]),
-        "error: *.txt isn't a file in your folder.\n\nhint: To read it as a save has it: opalro \
-         who <file> --save <save>\n"
+        shown,
+        "Each line of a.txt and the save it is from:\n\nnot saved yet  1 | uno\nnot saved yet  2 \
+         | dos\n\n2 lines aren't saved yet.\n"
     );
+}
+
+/// A file moved by a save of its own is followed, and `was` is the path as it is, unescaped.
+#[test]
+fn a_moved_file_says_where_it_was() {
+    let env = started();
+    let old = "old\u{202e}.txt";
+    env.overwrite(old, "kept\n");
+    run(&env, &["save", "Old"], 0);
+    std::fs::rename(env.root().join(old), env.root().join("new.txt")).unwrap();
+    run(&env, &["save", "Moved"], 0);
+    let doc = json(&env, &["who", "new.txt"], 0);
+    assert_eq!(doc["runs"][0]["was"], old, "{doc}");
+    assert_eq!(doc["saves"][0]["message"], "Old", "{doc}");
 }
 
 #[test]
@@ -447,11 +458,15 @@ fn on_a_terminal_a_long_name_is_cut_and_a_repeated_save_is_dim() {
             "{row}"
         );
     }
+    env.overwrite("a.txt", "one\ntwo\nthree\nfour\n");
     let (painted, _) = on_a_terminal(&env, &["who", "a.txt"], true);
     let rows: Vec<&str> = painted.lines().skip(2).collect();
-    // The first row's ID is the change ID's colour; the second, repeating it, is dim.
+    // The first row's ID is the change ID's colour; the second, repeating it, is dim. One rule,
+    // `not saved yet` too: plain on the first row of its run, dim on the next.
     assert!(rows[0].starts_with("\x1b[1;35m"), "{rows:?}");
     assert!(rows[1].starts_with("\x1b[2m"), "{rows:?}");
+    assert!(rows[2].starts_with("not saved yet "), "{rows:?}");
+    assert!(rows[3].starts_with("\x1b[2mnot saved yet "), "{rows:?}");
 }
 
 #[cfg(feature = "fault-injection")]
@@ -494,6 +509,13 @@ fn who_changes_nothing() {
     env.overwrite("a.txt", "one\nmain\nthree\n");
     run(&env, &["save", "On main"], 0);
     run(&env, &["combine", "side"], 0);
+    // With no cache, a command that stores one leaves a file that wasn't there.
+    let cache = env.root().join(".opalro/cache");
+    for file in std::fs::read_dir(&cache).unwrap() {
+        std::fs::remove_file(file.unwrap().path()).unwrap();
+    }
+    // Every path with what it holds, the folder's and `.opalro`'s: one that appeared, vanished
+    // or changed fails.
     let everything = || {
         (
             support::entries(env.root()),
@@ -501,6 +523,11 @@ fn who_changes_nothing() {
         )
     };
     let before = everything();
+    assert!(
+        before.1.keys().all(|p| !p.starts_with("cache/")),
+        "{:?}",
+        before.1.keys()
+    );
     for args in [
         &["who", "a.txt"][..],
         &["who", "a.txt", "--save", "side"],
@@ -508,9 +535,27 @@ fn who_changes_nothing() {
         &["who", "none.txt"],
     ] {
         let _ = env.opalro().args(args).output().unwrap();
+        assert_eq!(everything(), before, "{args:?}");
     }
     let (shown, _) = run(&env, &["who", "a.txt"], 0);
     // The markers of the kept conflict are the combine's lines.
     assert!(shown.contains("<<<<<<<"), "{shown}");
     assert_eq!(everything(), before);
+}
+
+/// The guide's example is the `folder` snapshot as a terminal with symbols shows it, so a change
+/// in the rows can't leave the guide behind.
+#[test]
+fn the_guides_example_is_the_snapshot() {
+    let read = |rel: &str| {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
+        std::fs::read_to_string(path).unwrap().replace("\r\n", "\n")
+    };
+    let snapshot = read("tests/snapshots/who__folder.snap");
+    let (_, shown) = snapshot.split_once("\n---\n").unwrap();
+    let guide = read("../../docs/guide.md");
+    let (_, section) = guide.split_once("### `opalro who`\n").unwrap();
+    let (_, block) = section.split_once("```text\n").unwrap();
+    let (block, _) = block.split_once("```").unwrap();
+    assert_eq!(block, shown.replace(" | ", " │ "));
 }

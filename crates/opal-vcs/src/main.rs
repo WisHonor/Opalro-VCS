@@ -1853,15 +1853,23 @@ fn who_command(
     let request = WhoRequest { path: &path, asked };
     let found = whose::who(repo, &request).map_err(|e| who_output::failure(e, given))?;
     let mut warnings: Vec<Warning> = unfinished_warning(repo).into_iter().collect();
-    let mut saves = HashMap::new();
-    for id in std::iter::once(found.at).chain(who_output::named_in(&found)) {
-        if saves.contains_key(&id) {
-            continue;
-        }
-        let save = repo.store().save(&id, repo.signatures_allowed())?;
-        let short = short_or_whole(repo, &id, &save.change_id, &mut warnings);
-        saves.insert(id, who_output::Named { save, short });
+    // One read of the line shortens every ID, and stores no cache: `who` writes nothing.
+    let line = LineIds::read_only(repo);
+    if let Err(problem) = &line {
+        warnings.push(not_shortened(problem));
     }
+    let saves = who_output::Saves::read(&found, |id| {
+        let save = repo.store().save(id, repo.signatures_allowed())?;
+        let short = match &line {
+            Ok(line) => line.short(id, &save.change_id),
+            Err(_) => save.change_id.to_letters(),
+        };
+        Ok(who_output::Named {
+            id: *id,
+            save,
+            short,
+        })
+    })?;
     let from_save = save.is_some();
     warnings.extend(repo.store().warnings());
     if json {
