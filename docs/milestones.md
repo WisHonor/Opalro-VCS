@@ -447,7 +447,7 @@ The owner decided that Opalro is closed source ([decision 140](decisions/140-bol
 
 ## v0.2: lines and combining
 
-Planned on 2026-11-14 ([decision 157](decisions/157-v0.2-in-four-milestones.md)). Claude decided 157 to 160 at the owner's request while the owner was away, and 161 to 163 while building milestone 7; each can be reversed. v0.2 is built on the branch `v0.2`: each milestone on a branch of its own, merged into `v0.2` after its red-team session. `main` stays what v0.1 is released from, and `v0.2` goes into it only by the owner's hand.
+Planned on 2026-11-14 ([decision 157](decisions/157-v0.2-in-four-milestones.md)). Claude decided 157 to 160 at the owner's request while the owner was away, and 161 to 163 while building milestone 7; each can be reversed. v0.2 was built on the branch `v0.2`: each milestone on a branch of its own, merged into `v0.2` after its red-team session. While it was built, `main` kept v0.1's code, which was never published ([decision 190](decisions/190-v0.2-is-the-first-published-version.md)); `v0.2` goes into `main` only by the owner's hand.
 
 | # | Milestone | Done when |
 |---|---|---|
