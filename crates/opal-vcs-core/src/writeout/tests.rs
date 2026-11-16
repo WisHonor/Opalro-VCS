@@ -690,6 +690,54 @@ fn unsaved_work_in_the_way_collides_and_the_rest_comes_along() {
     );
 }
 
+/// A project at a save holding `keep`, `d/x` and `d/e/y`, written, then the folder `d` deleted.
+fn folder_deleted() -> (tempfile::TempDir, Repository, Id) {
+    let (dir, mut repo) = project();
+    let empty = current_save(&repo).unwrap();
+    let a = planted(
+        &mut repo,
+        &files(&[("keep", b"k"), ("d/x", b"x"), ("d/e/y", b"y")]),
+    );
+    switch(&mut repo, empty, a);
+    fs::remove_dir_all(dir.path().join("d")).unwrap();
+    (dir, repo, a.0)
+}
+
+/// The paths a discard of `only` would act on, in order.
+fn acted_on(repo: &mut Repository, save: Id, only: Option<&[&str]>) -> Vec<String> {
+    let _lock = repo.lock_for_change("discard", &mut |_| {}).unwrap();
+    let drive = drive::probe(repo.tmp_folder()).unwrap();
+    let only: Option<Vec<String>> = only.map(|o| o.iter().map(|p| (*p).to_owned()).collect());
+    let plan = plan(repo, save, save, only.as_deref(), true, drive, None).unwrap();
+    assert!(plan.collisions.is_empty(), "{:?}", plan.collisions);
+    plan.actions.into_iter().map(|a| a.path).collect()
+}
+
+#[test]
+fn a_plan_for_some_paths_makes_a_folder_only_named_or_on_the_way_to_what_it_writes() {
+    let (_dir, mut repo, a) = folder_deleted();
+    // Above a named path, with nothing to write below it: left as the person has it.
+    assert!(acted_on(&mut repo, a, Some(&["d/z"])).is_empty());
+    // A file written into it.
+    assert_eq!(acted_on(&mut repo, a, Some(&["d/x"])), ["d", "d/x"]);
+    // Two levels above a written file: both.
+    assert_eq!(
+        acted_on(&mut repo, a, Some(&["d/e/y"])),
+        ["d", "d/e", "d/e/y"]
+    );
+    // Named itself.
+    assert_eq!(
+        acted_on(&mut repo, a, Some(&["d"])),
+        ["d", "d/e", "d/e/y", "d/x"]
+    );
+    assert_eq!(
+        acted_on(&mut repo, a, Some(&["d/e"])),
+        ["d", "d/e", "d/e/y"]
+    );
+    // Not limited to paths: everything the folder lacks, as before.
+    assert_eq!(acted_on(&mut repo, a, None), ["d", "d/e", "d/e/y", "d/x"]);
+}
+
 #[test]
 fn nothing_below_a_folder_in_the_way_is_planned() {
     let (dir, mut repo) = project();

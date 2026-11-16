@@ -263,6 +263,9 @@ fn planned(
         .map(|p| (*p).to_owned())
         .collect();
     plan.actions.sort_by(|a, b| a.path.cmp(&b.path));
+    if let Some(only) = &only {
+        made_on_the_way(&mut plan.actions, only);
+    }
     if drive.ignores_case || drive.composes_unicode {
         take_over_renamed(&mut plan.actions, drive);
     }
@@ -1525,6 +1528,21 @@ fn named_as_typed<'l>(listing: &'l Listing, name: &str, drive: Drive) -> Option<
             _ => None,
         }
     })
+}
+
+/// Drops from `actions`, sorted by path, each folder made only because a path of `only` lies
+/// below it, where nothing is written into it or below it: such a folder stays as the person has
+/// it.
+fn made_on_the_way(actions: &mut Vec<Action>, only: &Scope) {
+    let mut kept = BTreeSet::new();
+    // Deepest first: what is below a path comes after it in path order.
+    for a in actions.iter().rev() {
+        let on_the_way = a.change == Change::MakeFolder && !only.holds(&a.path);
+        if !on_the_way || any_below(&a.path, &kept) {
+            kept.insert(a.path.clone());
+        }
+    }
+    actions.retain(|a| kept.contains(&a.path));
 }
 
 /// Whether the entry at `path` belongs to a switch limited to `only`: it is at or below one of
