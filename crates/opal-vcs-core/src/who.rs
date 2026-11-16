@@ -1,10 +1,12 @@
 //! `opalro who`: the save behind each line of a file. It reads and never writes.
 
-use std::collections::{BinaryHeap, HashMap};
+use std::borrow::Cow;
+use std::collections::{BinaryHeap, HashMap, VecDeque};
+use std::rc::Rc;
 
 use similar::DiffOp;
 
-use crate::changes::{self, Side};
+use crate::changes::{self, NotLines, Side};
 use crate::conflict::Listings;
 use crate::history;
 use crate::id::Id;
@@ -61,6 +63,8 @@ pub struct Whose {
     pub runs: Vec<Run>,
     /// Some comparison ran past its deadline, so a line may be named for a newer save.
     pub coarse: bool,
+    /// Whether the save asked about, or the one the project is at, holds a file at the path.
+    pub in_save: bool,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -124,11 +128,82 @@ fn kind_words(kind: EntryKind) -> &'static str {
     }
 }
 
-/// One version of the file waiting for its turn: the lines that reached it, each as its line in
-/// the version asked about and its line here.
-struct Waiting {
+/// One version of the file waiting for its turn: where it is, and the lines that reached it, each
+/// as its line in the version asked about and its line here. Newest save first, then by ID.
+struct Turn {
+    time_ms: i64,
+    id: Id,
+    path: String,
     entry: Entry,
     lines: Vec<(usize, usize)>,
+}
+
+impl Turn {
+    fn key(&self) -> (i64, Id, &str) {
+        (self.time_ms, self.id, &self.path)
+    }
+}
+
+impl PartialEq for Turn {
+    fn eq(&self, other: &Turn) -> bool {
+        self.key() == other.key()
+    }
+}
+
+impl Eq for Turn {}
+
+impl PartialOrd for Turn {
+    fn partial_cmp(&self, other: &Turn) -> Option<std::cmp::Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl Ord for Turn {
+    fn cmp(&self, other: &Turn) -> std::cmp::Ordering {
+        self.key().cmp(&other.key())
+    }
+}
+
+/// What one comparison found: the stretches `(here, there, len)` of the newer version's lines
+/// that the older one has too, in order.
+type Stretches = Rc<Vec<(usize, usize, usize)>>;
+
+/// The most comparisons one command remembers, and the most stretches they may hold in all.
+const REMEMBERED: usize = 256;
+const REMEMBERED_STRETCHES: usize = 1 << 20;
+
+/// Comparisons already made, by the two versions' content IDs, so lines that reach a version
+/// after its turn cost a lookup; the oldest is dropped first. No text is kept.
+#[derive(Default)]
+struct Remembered {
+    found: HashMap<(Id, Id), Stretches>,
+    order: VecDeque<(Id, Id)>,
+    stretches: usize,
+}
+
+impl Remembered {
+    fn keep(&mut self, key: (Id, Id), found: Stretches) {
+        self.stretches = self.stretches.saturating_add(found.len());
+        if let Some(old) = self.found.insert(key, found) {
+            self.stretches = self.stretches.saturating_sub(old.len());
+        } else {
+            self.order.push_back(key);
+        }
+        while self.order.len() > REMEMBERED || self.stretches > REMEMBERED_STRETCHES {
+            let Some(oldest) = self.order.pop_front() else {
+                break;
+            };
+            if let Some(gone) = self.found.remove(&oldest) {
+                self.stretches = self.stretches.saturating_sub(gone.len());
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// How many comparisons this thread's `who` made.
+    static COMPARED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// Names the save behind each line of the file at `req.path`, through every parent, the first
@@ -148,12 +223,16 @@ pub fn who(repo: &Repository, req: &WhoRequest<'_>) -> Result<Whose, WhoError> {
         Asked::Folder => history::current_save(repo)?,
     };
     let root = read_save(repo, at)?.root;
-    let found = Tree::new(&standing, root, kept::EXACT).entry_as_typed(typed, repo.drive()?)?;
+    let mut tree = Tree::new(&standing, root, kept::EXACT);
+    // The drive is asked (it probes with files under .opalro/tmp) only for another spelling.
+    let found = match tree.entry(typed)? {
+        Some(e) => Some((typed.to_owned(), e)),
+        None => tree.entry_as_typed(typed, repo.drive()?)?,
+    };
 
     let mut coarse = false;
-    let mut waiting: HashMap<(Id, String), Waiting> = HashMap::new();
     let mut heap = BinaryHeap::new();
-    let (path, text, mut by) = match req.asked {
+    let (path, text, in_save) = match req.asked {
         Asked::Save(_) => {
             let (path, entry) = found.ok_or_else(|| WhoError::NoFile {
                 path: typed.to_owned(),
@@ -167,96 +246,133 @@ pub fn who(repo: &Repository, req: &WhoRequest<'_>) -> Result<Whose, WhoError> {
             }
             let side = changes::stored(store, Some(entry.kind), Some(entry.id), Some(entry.size))?;
             let text = asked_text(side, &path)?;
-            let n = changes::line_count(&text);
-            let lines = (0..n).map(|i| (i, i)).collect();
-            heap.push((0, at, path.clone()));
-            waiting.insert((at, path.clone()), Waiting { entry, lines });
-            (path, text, vec![By::Unsaved; n])
+            let lines = (0..changes::line_count(&text)).map(|i| (i, i)).collect();
+            heap.push(Turn {
+                time_ms: 0,
+                id: at,
+                path: path.clone(),
+                entry,
+                lines,
+            });
+            (path, text, true)
         }
         Asked::Folder => {
-            let saved = found.filter(|(_, e)| is_file(e.kind));
-            let path = saved.as_ref().map_or(typed, |(p, _)| p.as_str()).to_owned();
             let mut disk = Folders::open(repo.root()).map_err(|source| SaveError::Unreadable {
                 path: "the project folder".to_owned(),
                 source,
             })?;
-            let side = changes::in_folder(&mut disk, typed)?.ok_or_else(|| WhoError::NoFile {
-                path: path.clone(),
-                save: None,
-            })?;
-            let text = asked_text(side, &path)?;
-            let n = changes::line_count(&text);
-            if let Some((_, entry)) = saved {
-                let keys = keys_of(&text);
-                let mut left = (0..n).map(|i| (i, i)).collect();
-                let taken = shared(store, &entry, None, &keys, &mut left, &mut coarse)?;
-                if !taken.is_empty() {
-                    heap.push((0, at, path.clone()));
-                    waiting.insert(
-                        (at, path.clone()),
-                        Waiting {
-                            entry,
-                            lines: taken,
+            let side = match changes::in_folder(&mut disk, typed)? {
+                Some(side) => side,
+                None => {
+                    return Err(match found {
+                        Some((path, e)) if is_not_a_file(e.kind) => {
+                            WhoError::NotAFile { path, kind: e.kind }
+                        }
+                        other => WhoError::NoFile {
+                            path: other.map_or_else(|| typed.to_owned(), |(p, _)| p),
+                            save: None,
                         },
-                    );
+                    });
+                }
+            };
+            let saved = found.filter(|(_, e)| is_file(e.kind));
+            let path = saved.as_ref().map_or(typed, |(p, _)| p.as_str()).to_owned();
+            let text = asked_text(side, &path)?;
+            let in_save = saved.is_some();
+            if let Some((_, entry)) = saved {
+                let mut left = (0..changes::line_count(&text)).map(|i| (i, i)).collect();
+                let found = compare(store, Some(&text), &entry, &mut coarse)?;
+                let lines = take(&found, &mut left);
+                if !lines.is_empty() {
+                    heap.push(Turn {
+                        time_ms: 0,
+                        id: at,
+                        path: path.clone(),
+                        entry,
+                        lines,
+                    });
                 }
             }
-            (path, text, vec![By::Unsaved; n])
+            (path, text, in_save)
         }
     };
+    let asked = match req.asked {
+        Asked::Save(_) => heap.peek().map(|t| (t.entry.id, text.as_slice())),
+        Asked::Folder => None,
+    };
 
-    // Newest save first, so lines reaching one version by two ways are mostly taken together.
-    // A date that lies costs a second look, never a wrong answer.
-    while let Some((_, id, at_path)) = heap.pop() {
-        let Some(w) = waiting.remove(&(id, at_path.clone())) else {
-            continue;
-        };
+    let mut by = vec![By::Unsaved; changes::line_count(&text)];
+    let mut waiting: HashMap<(Id, String), Vec<(usize, usize)>> = HashMap::new();
+    let mut remembered = Remembered::default();
+    // Newest save first, so lines reaching one version by two ways are mostly taken together; a
+    // date that lies costs a lookup of what was found, never a wrong answer.
+    while let Some(turn) = heap.pop() {
+        let Turn {
+            id,
+            path: at_path,
+            entry,
+            mut lines,
+            ..
+        } = turn;
+        lines.extend(waiting.remove(&(id, at_path.clone())).unwrap_or_default());
         let save = read_save(repo, id)?;
-        let mut left = w.lines;
-        if let Side::Bytes(here) = changes::stored(
-            store,
-            Some(w.entry.kind),
-            Some(w.entry.id),
-            Some(w.entry.size),
-        )? && is_text(&here)
-        {
-            let keys = keys_of(&here);
-            for (i, parent_id) in save.parents.iter().enumerate() {
-                if left.is_empty() {
-                    break;
-                }
-                let parent = read_save(repo, *parent_id)?;
-                let mut there = at_path.clone();
-                if i == 0
-                    && let Some(from) = moved_from(&stored, &save, &parent, &at_path)?
-                {
-                    there = from;
-                }
-                let Some(e) = Tree::new(&standing, parent.root, kept::EXACT).entry(&there)? else {
-                    continue;
-                };
-                let taken = shared(store, &e, Some(w.entry.id), &keys, &mut left, &mut coarse)?;
-                if taken.is_empty() {
-                    continue;
-                }
-                let key = (*parent_id, there);
-                match waiting.get_mut(&key) {
-                    Some(other) => other.lines.extend(taken),
+        // Read only when a parent holds other contents than this version's.
+        let mut here: Option<Option<Cow<'_, [u8]>>> = None;
+        for (i, parent_id) in save.parents.iter().enumerate() {
+            if lines.is_empty() {
+                break;
+            }
+            let parent = read_save(repo, *parent_id)?;
+            let mut there = at_path.clone();
+            if i == 0
+                && let Some(from) = moved_from(&stored, &save, &parent, &at_path)?
+            {
+                there = from;
+            }
+            let Some(e) = Tree::new(&standing, parent.root, kept::EXACT).entry(&there)? else {
+                continue;
+            };
+            if !is_file(e.kind) {
+                continue;
+            }
+            let taken = if e.id == entry.id {
+                std::mem::take(&mut lines)
+            } else {
+                let pair = (entry.id, e.id);
+                let found = match remembered.found.get(&pair) {
+                    Some(found) => Rc::clone(found),
                     None => {
-                        heap.push((parent.saver.time_ms, key.0, key.1.clone()));
-                        waiting.insert(
-                            key,
-                            Waiting {
-                                entry: e,
-                                lines: taken,
-                            },
-                        );
+                        if here.is_none() {
+                            here = Some(version(store, &entry, asked)?);
+                        }
+                        let text = here.as_ref().and_then(|h| h.as_deref());
+                        let found = compare(store, text, &e, &mut coarse)?;
+                        remembered.keep(pair, Rc::clone(&found));
+                        found
                     }
+                };
+                take(&found, &mut lines)
+            };
+            if taken.is_empty() {
+                continue;
+            }
+            let key = (*parent_id, there);
+            match waiting.get_mut(&key) {
+                Some(other) => other.extend(taken),
+                None => {
+                    heap.push(Turn {
+                        time_ms: parent.saver.time_ms,
+                        id: key.0,
+                        path: key.1.clone(),
+                        entry: e,
+                        lines: Vec::new(),
+                    });
+                    waiting.insert(key, taken);
                 }
             }
         }
         let was = (at_path != path).then_some(at_path);
-        for (origin, _) in left {
+        for (origin, _) in lines {
             if let Some(slot) = by.get_mut(origin) {
                 *slot = By::Save {
                     id,
@@ -273,6 +389,7 @@ pub fn who(repo: &Repository, req: &WhoRequest<'_>) -> Result<Whose, WhoError> {
         text,
         runs,
         coarse,
+        in_save,
     })
 }
 
@@ -284,21 +401,44 @@ fn is_file(kind: EntryKind) -> bool {
     matches!(kind, EntryKind::File | EntryKind::Executable)
 }
 
-fn is_text(bytes: &[u8]) -> bool {
-    !changes::is_binary(bytes) && changes::line_count(bytes) <= changes::MAX_LINES
+/// What a save holds where the folder has no file, named as what it is.
+fn is_not_a_file(kind: EntryKind) -> bool {
+    matches!(
+        kind,
+        EntryKind::Folder | EntryKind::Symlink | EntryKind::ProjectLink
+    )
 }
 
 /// The version asked about, or why it has no lines to name.
 fn asked_text(side: Side, path: &str) -> Result<Vec<u8>, WhoError> {
     let path = path.to_owned();
-    match side {
-        Side::TooBig => Err(WhoError::TooBig { path }),
-        Side::Bytes(b) if changes::is_binary(&b) => Err(WhoError::NotText { path }),
-        Side::Bytes(b) if changes::line_count(&b) > changes::MAX_LINES => {
-            Err(WhoError::TooManyLines { path })
-        }
-        Side::Bytes(b) => Ok(b),
+    let Side::Bytes(bytes) = side else {
+        return Err(WhoError::TooBig { path });
+    };
+    match changes::comparable(&bytes) {
+        Ok(()) => Ok(bytes),
+        Err(NotLines::TooBig) => Err(WhoError::TooBig { path }),
+        Err(NotLines::Binary) => Err(WhoError::NotText { path }),
+        Err(NotLines::TooManyLines) => Err(WhoError::TooManyLines { path }),
     }
+}
+
+/// A version's text when it can be compared line by line: the one asked about is already held.
+fn version<'a>(
+    store: &Store,
+    entry: &Entry,
+    asked: Option<(Id, &'a [u8])>,
+) -> Result<Option<Cow<'a, [u8]>>, SaveError> {
+    if let Some((id, text)) = asked
+        && id == entry.id
+    {
+        return Ok(Some(Cow::Borrowed(text)));
+    }
+    let side = changes::stored(store, Some(entry.kind), Some(entry.id), Some(entry.size))?;
+    Ok(match side {
+        Side::Bytes(b) if changes::comparable(&b).is_ok() => Some(Cow::Owned(b)),
+        _ => None,
+    })
 }
 
 /// Each line without one final `\n`, then without one final `\r`: a save that only changed
@@ -313,57 +453,59 @@ fn keys_of(text: &[u8]) -> Vec<&[u8]> {
         .collect()
 }
 
-/// The lines of `left` (each as its line in the version asked about and in `keys`) that the
-/// older version `older` has too, each with its line there; they leave `left`. A version that is
-/// not a file, or past the limits, has none; one whose contents are `same` has them all.
-fn shared(
+/// Which lines of `here` the older version `older` has too. A version that can't be compared line
+/// by line has none.
+fn compare(
     store: &Store,
+    here: Option<&[u8]>,
     older: &Entry,
-    same: Option<Id>,
-    keys: &[&[u8]],
-    left: &mut Vec<(usize, usize)>,
     coarse: &mut bool,
-) -> Result<Vec<(usize, usize)>, SaveError> {
-    if !is_file(older.kind) {
-        return Ok(Vec::new());
-    }
-    if same == Some(older.id) {
-        return Ok(std::mem::take(left));
-    }
+) -> Result<Stretches, SaveError> {
+    let none = || Rc::new(Vec::new());
+    let Some(here) = here else {
+        return Ok(none());
+    };
     let Side::Bytes(old) =
         changes::stored(store, Some(older.kind), Some(older.id), Some(older.size))?
     else {
-        return Ok(Vec::new());
+        return Ok(none());
     };
-    if !is_text(&old) {
-        return Ok(Vec::new());
+    if changes::comparable(&old).is_err() {
+        return Ok(none());
     }
-    let (ops, late) = changes::line_ops(&keys_of(&old), keys, changes::deadline());
+    #[cfg(test)]
+    COMPARED.set(COMPARED.get() + 1);
+    let (ops, late) = changes::line_ops(&keys_of(&old), &keys_of(here), changes::deadline());
     *coarse |= late;
-    let mut there = vec![None; keys.len()];
-    for op in ops {
-        if let DiffOp::Equal {
-            old_index,
-            new_index,
-            len,
-        } = op
-        {
-            for k in 0..len {
-                if let Some(slot) = there.get_mut(new_index + k) {
-                    *slot = Some(old_index + k);
-                }
-            }
-        }
-    }
+    let found = ops
+        .into_iter()
+        .filter_map(|op| match op {
+            DiffOp::Equal {
+                old_index,
+                new_index,
+                len,
+            } => Some((new_index, old_index, len)),
+            _ => None,
+        })
+        .collect();
+    Ok(Rc::new(found))
+}
+
+/// The lines of `left` that `found` says the older version has, each with its line there; they
+/// leave `left`.
+fn take(found: &[(usize, usize, usize)], left: &mut Vec<(usize, usize)>) -> Vec<(usize, usize)> {
     let mut taken = Vec::new();
-    left.retain(|&(origin, here)| match there.get(here).copied().flatten() {
-        Some(old) => {
-            taken.push((origin, old));
-            false
+    left.retain(|&(origin, here)| {
+        let i = found.partition_point(|&(new, _, len)| new.saturating_add(len) <= here);
+        match found.get(i) {
+            Some(&(new, old, _)) if new <= here => {
+                taken.push((origin, old + (here - new)));
+                false
+            }
+            _ => true,
         }
-        None => true,
     });
-    Ok(taken)
+    taken
 }
 
 /// The path `path` had at `parent`, the save's first parent, where the save's move notes say it
@@ -982,6 +1124,12 @@ mod tests {
             ])
         );
         assert_eq!(w.at, first);
+        assert!(w.in_save);
+        // Every line new, but the save still has the file.
+        fx.write("a.txt", b"x\ny\n");
+        let w = fx.folder("a.txt");
+        assert_eq!(w.runs, runs(&[(2, By::Unsaved)]));
+        assert!(w.in_save);
     }
 
     #[test]
@@ -993,17 +1141,18 @@ mod tests {
         let w = fx.folder("new.txt");
         assert_eq!(w.runs, runs(&[(2, By::Unsaved)]));
         assert_eq!((w.path.as_str(), w.at), ("new.txt", first));
+        assert!(!w.in_save);
         // An empty file has no runs.
         fx.write("empty.txt", b"");
         assert_eq!(fx.folder("empty.txt").runs, []);
     }
 
+    /// Windows and macOS drives ignore letter case; Linux's don't, so it doesn't run there.
+    #[cfg(any(windows, target_os = "macos"))]
     #[test]
     fn a_path_typed_in_another_case_finds_the_saved_file() {
         let mut fx = Fx::new();
-        if !fx.repo.drive().unwrap().ignores_case {
-            return;
-        }
+        assert!(fx.repo.drive().unwrap().ignores_case);
         fx.write("Dir/a.txt", b"a\nb\n");
         let first = fx.save("First");
         let w = fx.folder("dir/A.TXT");
@@ -1029,7 +1178,19 @@ mod tests {
             no_file(fx.who("none.txt", Asked::Save(first))),
             ("none.txt".into(), Some(first))
         );
-        assert_eq!(no_file(fx.who("d", Asked::Folder)), ("d".into(), None));
+        assert_eq!(
+            no_file(fx.who("d/e.txt/f", Asked::Folder)),
+            ("d/e.txt/f".into(), None)
+        );
+        // A folder in the folder, where the save has one too, is named as one.
+        let e = fx.who("d", Asked::Folder).unwrap_err();
+        assert!(
+            matches!(&e, WhoError::NotAFile { path, kind: EntryKind::Folder } if path == "d"),
+            "{e:?}"
+        );
+        // One the save doesn't have is no file.
+        fs::create_dir(fx.root().join("new")).unwrap();
+        assert_eq!(no_file(fx.who("new", Asked::Folder)), ("new".into(), None));
         assert_eq!(
             no_file(fx.who("d/e.txt/f", Asked::Save(first))),
             ("d/e.txt/f".into(), Some(first))
@@ -1061,20 +1222,81 @@ mod tests {
             ],
         );
         let tip = history::current_save(&repo).unwrap();
-        for (path, kind) in [("l", EntryKind::Symlink), ("p", EntryKind::ProjectLink)] {
-            let e = who(
-                &repo,
-                &WhoRequest {
-                    path,
-                    asked: Asked::Save(tip),
-                },
-            )
-            .unwrap_err();
-            assert!(
-                matches!(&e, WhoError::NotAFile { path: p, kind: k } if p == path && *k == kind),
-                "{e:?}"
-            );
+        // At the save, and in the folder (which has nothing there) as the save has it.
+        for asked in [Asked::Save(tip), Asked::Folder] {
+            for (path, kind) in [("l", EntryKind::Symlink), ("p", EntryKind::ProjectLink)] {
+                let e = who(&repo, &WhoRequest { path, asked }).unwrap_err();
+                assert!(
+                    matches!(&e, WhoError::NotAFile { path: p, kind: k } if p == path && *k == kind),
+                    "{e:?}"
+                );
+            }
         }
+    }
+
+    /// Windows refuses a name such as `*.txt` itself: no file is there.
+    #[cfg(windows)]
+    #[test]
+    fn a_name_the_system_cant_hold_is_no_file() {
+        let mut fx = Fx::new();
+        fx.write("a.txt", b"a\n");
+        fx.save("First");
+        let e = fx.who("*.txt", Asked::Folder).unwrap_err();
+        assert!(
+            matches!(&e, WhoError::NoFile { path, save: None } if path == "*.txt"),
+            "{e:?}"
+        );
+    }
+
+    /// In a project that doesn't keep conflicts, a conflict's entry is no file: asked about, it
+    /// is refused, and as an older version it takes no lines. Where conflicts are kept, it is
+    /// what it stands as.
+    #[test]
+    fn a_conflict_entry_where_conflicts_are_not_kept_is_no_file() {
+        let (dir, mut repo) = project();
+        let mine = crate::conflict::tests::file_of(b"a\nb\n");
+        let record = crate::conflict::Record {
+            terms: vec![
+                Some(mine),
+                None,
+                Some(crate::conflict::tests::file_of(b"x\n")),
+            ],
+            own: None,
+        };
+        // `keep.txt` stores the bytes the conflict stands as.
+        crate::test_support::plant_with(
+            &mut repo,
+            &[("keep.txt", EntryKind::File, b"a\nb\n")],
+            &[("c.txt", record)],
+        );
+        let conflicted = history::current_save(&repo).unwrap();
+        plant_save(&mut repo, &[("c.txt", EntryKind::File, b"a\nb\nc\n")]);
+        let after = history::current_save(&repo).unwrap();
+        assert_eq!(
+            at(&repo, after, "c.txt").runs,
+            runs(&[(2, by(conflicted)), (1, by(after))])
+        );
+        drop(repo);
+        let repo = crate::test_support::without_conflicts_feature(dir.path());
+        assert_eq!(at(&repo, after, "c.txt").runs, runs(&[(3, by(after))]));
+        let e = who(
+            &repo,
+            &WhoRequest {
+                path: "c.txt",
+                asked: Asked::Save(conflicted),
+            },
+        )
+        .unwrap_err();
+        assert!(
+            matches!(
+                &e,
+                WhoError::NotAFile {
+                    kind: EntryKind::Conflict,
+                    ..
+                }
+            ),
+            "{e:?}"
+        );
     }
 
     #[test]
@@ -1148,16 +1370,103 @@ mod tests {
         let mut all = b"start\n".to_vec();
         for i in 0..64 {
             let line = format!("line {i}\n");
-            let text = [b"start\n", line.as_bytes()].concat();
+            // Every parent adds `common` too.
+            let text = [b"start\n", line.as_bytes(), b"common\n"].concat();
             let message = format!("Adds {i}");
             parents.push(plant.save(&message, &[start], &[("a.txt", &text)], &[], 2 + i));
             all.extend_from_slice(line.as_bytes());
         }
+        all.extend_from_slice(b"common\n");
         let combined = plant.save("Combined", &parents, &[("a.txt", &all)], &[], 100);
         plant.commit(&mut repo);
         let mut expected = vec![(1, by(start))];
         expected.extend(parents.iter().map(|p| (1, by(*p))));
+        expected.push((1, by(parents[0])));
         assert_eq!(at(&repo, combined, "a.txt").runs, runs(&expected));
+    }
+
+    /// Of three parents, only the second and third have a line: it is the second's.
+    #[test]
+    fn a_line_the_first_parent_lacks_goes_to_the_next_that_has_it() {
+        let (_dir, mut repo) = project();
+        let mut plant = Plant::new(&mut repo);
+        let base = plant.base;
+        let start = plant.save("Start", &[base], &[("a.txt", b"start\n")], &[], 1);
+        let one = plant.save("One", &[start], &[("a.txt", b"start\none\n")], &[], 2);
+        let two = plant.save("Two", &[start], &[("a.txt", b"start\nboth\n")], &[], 3);
+        let three = plant.save("Three", &[start], &[("a.txt", b"start\nboth\n3\n")], &[], 4);
+        let combined = plant.save(
+            "Combined",
+            &[one, two, three],
+            &[("a.txt", b"start\none\nboth\n3\n")],
+            &[],
+            5,
+        );
+        plant.commit(&mut repo);
+        assert_eq!(
+            at(&repo, combined, "a.txt").runs,
+            runs(&[(1, by(start)), (1, by(one)), (1, by(two)), (1, by(three))])
+        );
+    }
+
+    /// The file changes in the first two saves, then not for 40: it is read for the version asked
+    /// about (the same contents as the save that last changed it) and for that save's parent.
+    #[test]
+    fn a_file_that_did_not_change_is_not_read_again() {
+        let (_dir, mut repo) = project();
+        let mut plant = Plant::new(&mut repo);
+        let base = plant.base;
+        let first = plant.save("First", &[base], &[("a.txt", b"a\n")], &[], 1);
+        let changed = plant.save("Changed", &[first], &[("a.txt", b"a\nb\n")], &[], 2);
+        let mut tip = changed;
+        for i in 0..40 {
+            let other = format!("{i}\n");
+            let files: [(&str, &[u8]); 2] = [("a.txt", b"a\nb\n"), ("o.txt", other.as_bytes())];
+            tip = plant.save("Other", &[tip], &files, &[], 3 + i);
+        }
+        plant.commit(&mut repo);
+        let before = crate::store::counted::contents();
+        let w = at(&repo, tip, "a.txt");
+        assert_eq!(crate::store::counted::contents() - before, 2);
+        assert_eq!(w.runs, runs(&[(1, by(first)), (1, by(changed))]));
+    }
+
+    /// Lines that reach a version after its turn: `m` combines eight saves each keeping one of
+    /// its lines from `v`, and `v` has ten saves behind it, each dated newer than the one after
+    /// it, so `v` is reached eight times.
+    #[test]
+    fn lines_that_arrive_late_are_not_compared_again() {
+        let (_dir, mut repo) = project();
+        let mut plant = Plant::new(&mut repo);
+        let all: String = (1..=8).map(|i| format!("line {i}\n")).collect();
+        let mut below = plant.base;
+        let mut oldest = None;
+        for j in (1..=10).rev() {
+            let text = format!("{all}older {j}\n");
+            below = plant.save(
+                "Older",
+                &[below],
+                &[("a.txt", text.as_bytes())],
+                &[],
+                100 + j,
+            );
+            oldest.get_or_insert(below);
+        }
+        let v = plant.save("V", &[below], &[("a.txt", all.as_bytes())], &[], 50);
+        let kept: Vec<Id> = (1..=8)
+            .map(|i| {
+                let one = format!("line {i}\n");
+                plant.save("Keeps one", &[v], &[("a.txt", one.as_bytes())], &[], 20)
+            })
+            .collect();
+        let m = plant.save("M", &kept, &[("a.txt", all.as_bytes())], &[], 10);
+        plant.commit(&mut repo);
+        let before = COMPARED.get();
+        let w = at(&repo, m, "a.txt");
+        // One for each pair of a version and a parent: m with each of the eight, each of them
+        // with v, v with the save before it, and nine more down to the first.
+        assert_eq!(COMPARED.get() - before, 8 + 8 + 10);
+        assert_eq!(w.runs, runs(&[(8, by(oldest.unwrap()))]));
     }
 
     /// One history, planted twice: once with honest dates, once with dates that run backwards.
@@ -1241,6 +1550,8 @@ mod tests {
         out
     }
 
+    /// Paths as stored never ask the drive. A path no save has exactly (`none.txt` here, or one
+    /// typed in another letter case) does, and its probe file under `.opalro/tmp` is gone again.
     #[test]
     fn who_writes_nothing() {
         let (mut fx, [_, _, _, combined]) = conflicted();

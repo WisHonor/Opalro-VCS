@@ -207,10 +207,16 @@ fn each_refusal_says_why_and_ends_with_1() {
         refused(&env, &["who", "art", "--save", "main"]),
         "error: art is a folder, and opalro who reads one file.\n"
     );
-    // In the folder, a folder is no file.
+    // In the folder too, where the save the project is at holds a folder there.
     assert_eq!(
         refused(&env, &["who", "art"]),
-        "error: art isn't a file in your folder.\n\nhint: To read it as a save has it: opalro \
+        "error: art is a folder, and opalro who reads one file.\n"
+    );
+    // A folder no save holds is no file.
+    std::fs::create_dir(env.root().join("empty")).unwrap();
+    assert_eq!(
+        refused(&env, &["who", "empty"]),
+        "error: empty isn't a file in your folder.\n\nhint: To read it as a save has it: opalro \
          who <file> --save <save>\n"
     );
     support::write(&env, "pic.dat", b"PNG\0data\n");
@@ -302,6 +308,18 @@ fn a_path_is_named_from_the_folder_you_are_in_and_never_a_pattern() {
     assert!(said.starts_with("error: "), "{said}");
     assert!(said.contains("*.txt"), "{said}");
     assert!(!said.contains("a.txt"), "{said}");
+}
+
+/// Windows refuses a name holding `*` itself: there is no file there.
+#[cfg(windows)]
+#[test]
+fn a_name_windows_cant_hold_is_no_file_in_the_folder() {
+    let env = started();
+    assert_eq!(
+        refused(&env, &["who", "*.txt"]),
+        "error: *.txt isn't a file in your folder.\n\nhint: To read it as a save has it: opalro \
+         who <file> --save <save>\n"
+    );
 }
 
 /// Where a name may hold `*`, a file so named is read as itself.

@@ -522,7 +522,7 @@ fn read_file(disk: &mut Folders, path: &str) -> Result<Side, Unread> {
         // A folder on the way that is missing, a file, or a link.
         let gone = matches!(
             e.kind(),
-            io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+            io::ErrorKind::NotFound | io::ErrorKind::NotADirectory | io::ErrorKind::InvalidFilename
         ) || is_link_refusal(&e);
         return Err(if gone {
             Unread::NoFile(unreadable(path, e))
@@ -534,11 +534,14 @@ fn read_file(disk: &mut Folders, path: &str) -> Result<Side, Unread> {
     let name = OsStr::new(name);
     // Opening never follows a link; what failed to open is looked at for what it is.
     let file = dir.open_file(name).map_err(|e| {
-        let no_file = e.kind() == io::ErrorKind::NotFound
-            || match dir.metadata(name) {
-                Ok(now) => now.kind != EntryType::File,
-                Err(now) => now.kind() == io::ErrorKind::NotFound,
-            };
+        // A name the system can't hold at all is no file there either.
+        let no_file = matches!(
+            e.kind(),
+            io::ErrorKind::NotFound | io::ErrorKind::InvalidFilename
+        ) || match dir.metadata(name) {
+            Ok(now) => now.kind != EntryType::File,
+            Err(now) => now.kind() == io::ErrorKind::NotFound,
+        };
         if no_file {
             Unread::NoFile(unreadable(path, e))
         } else {
@@ -561,6 +564,30 @@ fn unreadable(path: &str, source: io::Error) -> SaveError {
         path: path.to_owned(),
         source,
     }
+}
+
+/// Why a text can't be compared line by line, the first reason first: too big, not text, too
+/// many lines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) enum NotLines {
+    TooBig,
+    Binary,
+    TooManyLines,
+}
+
+/// Whether `bytes` can be compared line by line, and if not, why.
+pub(crate) fn comparable(bytes: &[u8]) -> Result<(), NotLines> {
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > MAX_LINES_SIZE {
+        return Err(NotLines::TooBig);
+    }
+    if is_binary(bytes) {
+        return Err(NotLines::Binary);
+    }
+    // Counted before anything is held per line.
+    if line_count(bytes) > MAX_LINES {
+        return Err(NotLines::TooManyLines);
+    }
+    Ok(())
 }
 
 pub(crate) fn is_binary(bytes: &[u8]) -> bool {
