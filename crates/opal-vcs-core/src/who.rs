@@ -36,8 +36,9 @@ pub struct WhoRequest<'a> {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum By {
-    /// The save the line is from, and the path the file had there when it was another.
-    Save { id: Id, was: Option<String> },
+    /// The save the line is from, and the path the file had there when it was another. The path
+    /// is shared by every line that had it, so a long one is held once.
+    Save { id: Id, was: Option<Rc<str>> },
     /// In the folder only.
     Unsaved,
 }
@@ -133,7 +134,7 @@ fn kind_words(kind: EntryKind) -> &'static str {
 struct Turn {
     time_ms: i64,
     id: Id,
-    path: String,
+    path: Rc<str>,
     entry: Entry,
     lines: Vec<(usize, usize)>,
 }
@@ -250,7 +251,7 @@ pub fn who(repo: &Repository, req: &WhoRequest<'_>) -> Result<Whose, WhoError> {
             heap.push(Turn {
                 time_ms: 0,
                 id: at,
-                path: path.clone(),
+                path: path.as_str().into(),
                 entry,
                 lines,
             });
@@ -287,7 +288,7 @@ pub fn who(repo: &Repository, req: &WhoRequest<'_>) -> Result<Whose, WhoError> {
                     heap.push(Turn {
                         time_ms: 0,
                         id: at,
-                        path: path.clone(),
+                        path: path.as_str().into(),
                         entry,
                         lines,
                     });
@@ -302,7 +303,8 @@ pub fn who(repo: &Repository, req: &WhoRequest<'_>) -> Result<Whose, WhoError> {
     };
 
     let mut by = vec![By::Unsaved; changes::line_count(&text)];
-    let mut waiting: HashMap<(Id, String), Vec<(usize, usize)>> = HashMap::new();
+    // Lines waiting at a version, by its save and path.
+    let mut waiting: HashMap<_, Vec<(usize, usize)>> = HashMap::new();
     let mut remembered = Remembered::default();
     // Newest save first, so lines reaching one version by two ways are mostly taken together; a
     // date that lies costs a lookup of what was found, never a wrong answer.
@@ -314,7 +316,11 @@ pub fn who(repo: &Repository, req: &WhoRequest<'_>) -> Result<Whose, WhoError> {
             mut lines,
             ..
         } = turn;
-        lines.extend(waiting.remove(&(id, at_path.clone())).unwrap_or_default());
+        lines.extend(
+            waiting
+                .remove(&(id, Rc::clone(&at_path)))
+                .unwrap_or_default(),
+        );
         let save = read_save(repo, id)?;
         // Read only when a parent holds other contents than this version's.
         let mut here: Option<Option<Cow<'_, [u8]>>> = None;
@@ -323,11 +329,11 @@ pub fn who(repo: &Repository, req: &WhoRequest<'_>) -> Result<Whose, WhoError> {
                 break;
             }
             let parent = read_save(repo, *parent_id)?;
-            let mut there = at_path.clone();
+            let mut there = Rc::clone(&at_path);
             if i == 0
                 && let Some(from) = moved_from(&stored, &save, &parent, &at_path)?
             {
-                there = from;
+                there = from.into();
             }
             let Some(e) = Tree::new(&standing, parent.root, kept::EXACT).entry(&there)? else {
                 continue;
@@ -363,7 +369,7 @@ pub fn who(repo: &Repository, req: &WhoRequest<'_>) -> Result<Whose, WhoError> {
                     heap.push(Turn {
                         time_ms: parent.saver.time_ms,
                         id: key.0,
-                        path: key.1.clone(),
+                        path: Rc::clone(&key.1),
                         entry: e,
                         lines: Vec::new(),
                     });
@@ -371,7 +377,7 @@ pub fn who(repo: &Repository, req: &WhoRequest<'_>) -> Result<Whose, WhoError> {
                 }
             }
         }
-        let was = (at_path != path).then_some(at_path);
+        let was = (*at_path != *path).then_some(at_path);
         for (origin, _) in lines {
             if let Some(slot) = by.get_mut(origin) {
                 *slot = By::Save {
@@ -937,6 +943,24 @@ mod tests {
         (fx, [start, main, side, combined])
     }
 
+    /// A combine whose file is exactly its second parent's: a line both parents wrote, each on its
+    /// own, is the first parent's, as parents are asked in order. Git gives it to the second.
+    #[test]
+    fn a_line_both_parents_wrote_is_the_first_parents_even_when_the_file_is_the_seconds() {
+        let (_dir, mut repo) = project();
+        let mut plant = Plant::new(&mut repo);
+        let base = plant.base;
+        let start = plant.save("Start", &[base], &[("a.txt", b"a\n")], &[], 1);
+        let one = plant.save("One", &[start], &[("a.txt", b"a\nx\n")], &[], 2);
+        let two = plant.save("Two", &[start], &[("a.txt", b"a\nx\ny\n")], &[], 3);
+        let combined = plant.save("Combined", &[one, two], &[("a.txt", b"a\nx\ny\n")], &[], 4);
+        plant.commit(&mut repo);
+        assert_eq!(
+            at(&repo, combined, "a.txt").runs,
+            runs(&[(1, by(start)), (1, by(one)), (1, by(two))])
+        );
+    }
+
     #[test]
     fn what_a_combine_wrote_is_the_combines() {
         let (mut fx, [start, _, _, _]) = conflicted();
@@ -1025,6 +1049,44 @@ mod tests {
                 (1, by(fourth)),
             ])
         );
+    }
+
+    /// A path can be long and a file can have many lines: the old path is held once, not per line.
+    #[test]
+    fn a_moved_files_old_path_is_held_once_for_all_its_lines() {
+        let mut fx = Fx::new();
+        let text = |edited: bool| -> Vec<u8> {
+            (0..1000)
+                .map(|i| match edited && i % 2 == 1 {
+                    true => format!("{i} edited\n"),
+                    false => format!("{i}\n"),
+                })
+                .collect::<String>()
+                .into_bytes()
+        };
+        fx.write("a.txt", &text(false));
+        let first = fx.save("First");
+        fx.write("a.txt", &text(true));
+        let second = fx.save("Second");
+        fs::rename(fx.root().join("a.txt"), fx.root().join("b.txt")).unwrap();
+        let moved = fx.save("Moved");
+        let w = fx.at(moved, "b.txt");
+        let expected: Vec<(usize, By)> = (0..1000)
+            .map(|i| match i % 2 {
+                0 => (1, by_was(first, "a.txt")),
+                _ => (1, by_was(second, "a.txt")),
+            })
+            .collect();
+        assert_eq!(w.runs, runs(&expected));
+        let held: HashSet<*const u8> = w
+            .runs
+            .iter()
+            .map(|r| match &r.by {
+                By::Save { was: Some(was), .. } => was.as_ptr(),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(held.len(), 1);
     }
 
     #[test]
@@ -1882,8 +1944,8 @@ mod tests {
                     let By::Save { id, was } = b else {
                         panic!("{line} unsaved at a save");
                     };
-                    assert_ne!(was.as_ref(), Some(path));
-                    let there = was.clone().unwrap_or_else(|| path.clone());
+                    assert_ne!(was.as_deref(), Some(path.as_str()));
+                    let there = was.as_deref().map_or_else(|| path.clone(), str::to_owned);
                     let from = &h.nodes[&id];
                     assert!(from.files[&there].lines.contains(line), "{line} at {there}");
                     if unique {

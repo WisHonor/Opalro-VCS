@@ -125,12 +125,18 @@ impl Watch for Unsettled {
     }
 }
 
+/// Saves an earlier walk read: each one's time and parents.
+#[derive(Default)]
+pub struct Read(HashMap<Id, (i64, Vec<Id>)>);
+
 struct Walk<'r, W> {
     repo: &'r Repository,
     nodes: HashMap<Id, Node>,
     /// Newest first: every waiting node, and stale entries skipped when met.
     heap: BinaryHeap<(i64, Id)>,
     watch: W,
+    /// Taken from instead of the store.
+    read: Read,
 }
 
 impl<'r, W: Watch> Walk<'r, W> {
@@ -140,6 +146,7 @@ impl<'r, W: Watch> Walk<'r, W> {
             nodes: HashMap::new(),
             heap: BinaryHeap::new(),
             watch,
+            read: Read::default(),
         }
     }
 
@@ -148,15 +155,21 @@ impl<'r, W: Watch> Walk<'r, W> {
         let node = match self.nodes.entry(id) {
             Entry::Occupied(e) => e.into_mut(),
             Entry::Vacant(e) => {
-                let save = self
-                    .repo
-                    .store()
-                    .save_links(&id, self.repo.signatures_allowed())?;
+                let (time, parents) = match self.read.0.remove(&id) {
+                    Some(links) => links,
+                    None => {
+                        let save = self
+                            .repo
+                            .store()
+                            .save_links(&id, self.repo.signatures_allowed())?;
+                        (save.time_ms, save.parents)
+                    }
+                };
                 e.insert(Node {
                     marks: 0,
                     spread: 0,
-                    time: save.time_ms,
-                    parents: save.parents,
+                    time,
+                    parents,
                 })
             }
         };
@@ -215,7 +228,33 @@ pub fn only_in(repo: &Repository, tip: Id, others: &[Id]) -> Result<u64, RepoErr
 /// The first found of `others` that is `save` or has it in its history through any parent,
 /// by its index; `None` when none does. Exact whatever the saves' clocks say.
 pub fn holder(repo: &Repository, save: Id, others: &[Id]) -> Result<Option<usize>, RepoError> {
+    holder_reading(repo, save, others, &mut Read::default())
+}
+
+/// `holder`, reading no save that `read` holds, and adding to it every save it read.
+pub fn holder_reading(
+    repo: &Repository,
+    save: Id,
+    others: &[Id],
+    read: &mut Read,
+) -> Result<Option<usize>, RepoError> {
     let mut walk = Walk::new(repo, Tally::default());
+    walk.read = std::mem::take(read);
+    let found = holder_in(&mut walk, save, others);
+    *read = std::mem::take(&mut walk.read);
+    read.0.extend(
+        walk.nodes
+            .into_iter()
+            .map(|(id, node)| (id, (node.time, node.parents))),
+    );
+    found
+}
+
+fn holder_in(
+    walk: &mut Walk<'_, Tally>,
+    save: Id,
+    others: &[Id],
+) -> Result<Option<usize>, RepoError> {
     walk.mark(save, TIP)?;
     // For each save the others reach, one of them it was reached from.
     let mut from: HashMap<Id, usize> = HashMap::new();

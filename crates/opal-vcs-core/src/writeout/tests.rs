@@ -739,6 +739,15 @@ fn a_plan_for_some_paths_makes_a_folder_only_named_or_on_the_way_to_what_it_writ
 }
 
 #[test]
+fn a_plan_for_some_paths_leaves_the_persons_file_where_the_save_has_a_folder() {
+    let (dir, mut repo, a) = folder_deleted();
+    fs::write(dir.path().join("d"), b"mine").unwrap();
+    assert!(acted_on(&mut repo, a, Some(&["d/z"])).is_empty());
+    assert!(acted_on(&mut repo, a, Some(&["d/e/z"])).is_empty());
+    assert_eq!(fs::read(dir.path().join("d")).unwrap(), b"mine");
+}
+
+#[test]
 fn nothing_below_a_folder_in_the_way_is_planned() {
     let (dir, mut repo) = project();
     let empty = current_save(&repo).unwrap();

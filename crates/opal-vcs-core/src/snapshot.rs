@@ -1079,9 +1079,11 @@ pub(crate) fn shown_elsewhere(
         None => (0..others.len()).collect(),
     };
     let mut found = Vec::new();
+    // Each turn walks again, but reads no save an earlier turn read.
+    let mut read = ancestry::Read::default();
     while !asked.is_empty() {
         let saves: Vec<Id> = asked.iter().map(|&i| others[i].1).collect();
-        let held = match ancestry::holder(repo, id, &saves) {
+        let held = match ancestry::holder_reading(repo, id, &saves, &mut read) {
             Ok(Some(at)) => saves[at],
             Ok(None) => break,
             Err(e) => {
@@ -4302,6 +4304,78 @@ mod tests {
         let others = 300 * 20;
         assert!(among - alone >= others, "{among} {alone}");
         assert!(among - alone <= others + 3, "{among} {alone}");
+    }
+
+    /// The saves a refused amend of main reads when `k` lines each hold main's newest save
+    /// through 30 saves of their own, and the holders it names.
+    fn refused_amend_reads(k: usize) -> (usize, Vec<String>) {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"a");
+        let tip = saved_id(save_now(&mut repo));
+        let lines: Vec<(String, Id, usize)> =
+            (0..k).map(|i| (format!("line-{i:03}"), tip, 30)).collect();
+        plant_lines(&mut repo, &lines);
+        let (done, read) = amend_counted(dir.path(), &mut repo);
+        match done {
+            Err(SaveError::AmendShared { by }) => (read, by),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn naming_the_holders_reads_each_save_once() {
+        let (one, by) = refused_amend_reads(1);
+        assert_eq!(by, ["line line-000"]);
+        let (eight, by) = refused_amend_reads(8);
+        let named: Vec<String> = (0..8).map(|i| format!("line line-{i:03}")).collect();
+        assert_eq!(by, named);
+        eprintln!("saves read naming 1 holder: {one}, naming 8: {eight}");
+        // Each other line's 30 saves once, not once for every holder still to be found.
+        assert!(eight - one <= 7 * 30 + 3, "{one} {eight}");
+    }
+
+    /// Points the server line `line@server` at `id`, as a fetch would, in a step of its own.
+    fn set_server_line(repo: &mut Repository, server: &str, line: &str, id: Id) {
+        let lock = repo.lock_for_change("fetch", &mut |_| {}).unwrap();
+        let (head, entry) = repo.current().unwrap();
+        let servers = crate::diary::ServerLines {
+            servers: [(server.to_owned(), [(line.to_owned(), id)].into())].into(),
+        };
+        let mut packs = repo.new_packs().unwrap();
+        let mut state = entry.state.clone();
+        state.server_lines = Some(
+            packs
+                .add_record(ObjectKind::ServerLines, &servers.encode())
+                .unwrap(),
+        );
+        let diary = DiaryEntry {
+            parent: Some(head),
+            action: Action::Command,
+            command: "fetch".into(),
+            who: who(),
+            opal_version: "0.1.0".into(),
+            state,
+            folder_change: None,
+        };
+        repo.commit(&lock, packs, &diary).unwrap();
+    }
+
+    #[test]
+    fn with_a_note_a_server_line_moved_onto_the_save_is_asked_about() {
+        let (dir, mut repo) = project();
+        let start = repo.current().unwrap().1.state.lines["main"];
+        write(dir.path(), "a.txt", b"a");
+        let tip = saved_id(save_now(&mut repo));
+        set_server_line(&mut repo, "origin", "main", tip);
+        assert!(LastMade::load(&repo).entry_of(&tip).is_some());
+        let (done, _) = amend_counted(dir.path(), &mut repo);
+        let by_server = matches!(&done, Err(SaveError::AmendShared { by })
+            if by == &["server line main@origin"]);
+        assert!(by_server, "{done:?}");
+        // On an older save, it holds nothing the amend replaces.
+        set_server_line(&mut repo, "origin", "main", start);
+        let (done, _) = amend_counted(dir.path(), &mut repo);
+        assert!(matches!(done, Ok(SaveOutcome::Saved { .. })), "{done:?}");
     }
 
     #[test]
