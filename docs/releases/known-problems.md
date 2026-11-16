@@ -26,15 +26,15 @@ On five files of Git's own history, `opalro who` took 3 to 5 times `git blame`'s
 
 **What to do:** for a file renamed in Git, `git blame` still works in the Git repository you imported from: the import never changes it.
 
-## `opalro who` stops in a project whose `.opalro/tmp` can't be written
+## Opalro stops in a project whose `.opalro/tmp` can't be written
 
-`opalro who` changes nothing in the project, but, like every command given a path, it makes an empty file in `.opalro/tmp` for a moment, and removes it again, to learn how the drive compares names. Where that file can't be made (a project on a drive you may only read, say), it stops with `error: Opalro couldn't make a file in` the project's `.opalro/tmp` folder and the system's reason.
+A command that needs to know how the drive compares names (every command given a path, among others) makes an empty file in `.opalro/tmp` for a moment, and removes it again. `opalro who` is one of them, though it changes nothing in the project. Where that file can't be made (a project on a drive you may only read, say), the command stops with `error: Opalro couldn't make a file in` the project's `.opalro/tmp` folder and the system's reason.
 
 **What to do:** work on a copy of the project in a folder you can write to.
 
 ## `opalro status` is at its limit on Linux on some machines
 
-With nothing changed, `opalro status` is held to twice Git's time. In eight runs on GitHub's Linux machines it took 1.68 to 2.29 times Git's time, over twice in five: a matter of milliseconds (13 to 22 ms against Git's 6 to 13).
+With nothing changed, `opalro status` is held to twice Git's time. In eight runs of the speed check on GitHub's Linux machines, on v0.2's code as it was being built (none on the code as packaged), it took 1.68 to 2.29 times Git's time, over twice in five: a matter of milliseconds (13 to 22 ms against Git's 6 to 13).
 
 **What to do:** nothing; it is only slower.
 
