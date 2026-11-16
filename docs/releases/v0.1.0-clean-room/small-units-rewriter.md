@@ -1,3 +1,5 @@
+> v0.1 was prepared and never published: v0.2 is the first published version ([decision 190](../../decisions/190-v0.2-is-the-first-published-version.md)). This page is kept as the record.
+
 # Task 9 report: four small units, written new (clean room)
 
 ## What I implemented

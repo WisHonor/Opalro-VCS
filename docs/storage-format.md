@@ -1,6 +1,6 @@
 # Opalro Storage Format — Draft
 
-> **Status:** draft of repository format 1, written during the design phase (2026-10-31). The byte layouts follow decisions 004–016 and 019. Test vectors (§13) are added milestone by milestone, and format 1 freezes when v0.1 is released ([decision 121](decisions/121-format-1-freezes-at-v0.1.md) says what that covers and what it promises). Until then anything here may change, and repositories made by development builds are disposable (decision 019).
+> **Status:** draft of repository format 1, written during the design phase (2026-10-31). The byte layouts follow decisions 004–016 and 019. Test vectors (§13) are added milestone by milestone, and format 1 freezes when v0.2, the first published version, is published ([decision 190](decisions/190-v0.2-is-the-first-published-version.md), which moves [decision 121](decisions/121-format-1-freezes-at-v0.1.md)'s freeze from v0.1, never published, to v0.2): what decision 121 lists, and what v0.2 added, the `conflicts` feature and the conflict record. Until then anything here may change, and repositories made by development builds are disposable (decision 019); v0.1's draft release is one of those builds, and Opalro goes on reading what they wrote.
 
 **In plain words.** This document says exactly which bytes Opalro writes, so any program, or a future version of Opalro, can read an Opalro repository without guessing. Everything Opalro stores is either a piece of file content or a small structured record (a folder listing, a save, a diary entry…). Each one is named by its fingerprint, packed into pack files, and checked against its fingerprint every time it is read.
 
@@ -203,7 +203,7 @@ if true:
 
 A repository that contains any conflict record must list the `conflicts` feature in `.opalro/format` (§10).
 
-**Without the `conflicts` feature.** The layout above arrived with the `conflicts` feature, after format 1 froze. What froze with format 1 is the reservation (listing entry kind 6, pack object kind 19, and §2's context string `opal-vcs 2026-10-31 conflict v1`) and what v0.1 does on meeting them in a repository without the feature. It refuses a repository whose `.opalro/format` lists `feature conflicts`, as newer than it. Otherwise it decodes a listing holding a kind-6 entry, takes a kind-19 object in a pack, checks its fingerprint and never decodes it. Write-out leaves a kind-6 entry unwritten, as it leaves a project link. `opalro tidy` stops when any pack holds a kind-19 object, and when a listing it must keep holds a kind-6 entry. `opalro verify` checks a kind-19 object by its fingerprint only, and reports a listing it needs that holds a kind-6 entry as damaged, since this version can't follow it.
+**Without the `conflicts` feature.** The layout above arrived with the `conflicts` feature, after [decision 121](decisions/121-format-1-freezes-at-v0.1.md) first set the freeze; it is part of format 1 as format 1 freezes with v0.2 ([decision 190](decisions/190-v0.2-is-the-first-published-version.md)). What was fixed before it is the reservation (listing entry kind 6, pack object kind 19, and §2's context string `opal-vcs 2026-10-31 conflict v1`) and what builds from before v0.2 do on meeting them in a repository without the feature. Such a build refuses a repository whose `.opalro/format` lists `feature conflicts`, as newer than it. Otherwise it decodes a listing holding a kind-6 entry, takes a kind-19 object in a pack, checks its fingerprint and never decodes it. Write-out leaves a kind-6 entry unwritten, as it leaves a project link. `opalro tidy` stops when any pack holds a kind-19 object, and when a listing it must keep holds a kind-6 entry. `opalro verify` checks a kind-19 object by its fingerprint only, and reports a listing it needs that holds a kind-6 entry as damaged, since such a build can't follow it.
 
 ## 9. Diary entry
 
@@ -732,7 +732,7 @@ The first implementation generates, and the owner reviews, vectors in `crates/op
 - a small reference pack and a `.opalro/format` file;
 - invalid encodings that every reader must reject.
 
-Vectors are added milestone by milestone, for the records each milestone builds; format 1 freezes at the v0.1 release (decision 019).
+Vectors are added milestone by milestone, for the records each milestone builds; format 1 freezes when v0.2 is published (decision 019, moved to v0.2 by decision 190).
 
 **The files so far.** All are in `crates/opal-vcs-core/tests/vectors/`.
 - **Milestone 1:**
