@@ -154,7 +154,7 @@ data 1\nc\nfrom :{prev}\nM 100644 inline g\ndata {}\n{data}\n",
 /// a small part of what the same amend reads once the note of the save is gone.
 #[cfg(target_os = "linux")]
 #[test]
-fn an_amend_of_a_save_just_made_reads_no_other_lines_saves() {
+fn an_amend_of_a_save_just_made_reads_a_quarter_or_less_of_what_it_reads_without_its_note() {
     let env = old_branches(40, 500);
     std::fs::write(env.root().join("f"), "saved\n").unwrap();
     rchar(&reads(&env, "save s"));

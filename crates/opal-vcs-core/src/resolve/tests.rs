@@ -471,10 +471,7 @@ fn a_fix_is_a_save_of_its_own_when_another_line_combined_the_combined_save_in() 
 
 #[test]
 fn each_step_that_makes_a_save_leaves_the_note_of_it() {
-    let noted = |fx: &Fx| {
-        let note = crate::lastmade::LastMade::load(&fx.repo).unwrap();
-        (note.save, note.entry)
-    };
+    let noted = |fx: &Fx| crate::lastmade::LastMade::load(&fx.repo);
     // A combine that makes a save.
     let mut fx = Fx::new();
     fx.repo.set_cache_key([7; 32]);
@@ -487,7 +484,7 @@ fn each_step_that_makes_a_save_leaves_the_note_of_it() {
     fx.write("c.txt", b"c\n");
     fx.save("Main");
     let combined = fx.combine("side");
-    assert_eq!(noted(&fx), (combined, fx.head()));
+    assert_eq!(noted(&fx).entry_of(&combined), Some(fx.head()));
     // One that only moves the line forward leaves none.
     fx.goto(Target::Line("side".into()));
     let made = noted(&fx);
@@ -512,9 +509,9 @@ fn each_step_that_makes_a_save_leaves_the_note_of_it() {
     fx.repo.set_cache_key([7; 32]);
     fx.write("a.txt", A_FIXED);
     let (id, ..) = recorded(fx.resolve(Some(&["a.txt"]), None).unwrap());
-    assert_eq!(noted(&fx), (id, fx.head()));
+    assert_eq!(noted(&fx).entry_of(&id), Some(fx.head()));
     let (id, ..) = recorded(fx.resolve(Some(&["pic.png"]), Some(Side::Theirs)).unwrap());
-    assert_eq!(noted(&fx), (id, fx.head()));
+    assert_eq!(noted(&fx).entry_of(&id), Some(fx.head()));
 }
 
 #[test]

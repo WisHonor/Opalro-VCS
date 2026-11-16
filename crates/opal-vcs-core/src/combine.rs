@@ -1156,8 +1156,8 @@ fn combine_locked(
     }
     let mut done = to.switch(repo, lock, earlier, asked, made.save, warnings)?;
     // The switch moved the handle's head to the entry it wrote.
-    if let Ok((entry, _)) = repo.current() {
-        LastMade::store(repo, made.save, entry);
+    if let Ok((entry, after)) = repo.current() {
+        LastMade::store(repo, &after.state, made.save, entry);
     }
     // The rules file the switch left in the folder is the one the next combine reads.
     done.0.warnings.extend(repo.read_rules().warnings());

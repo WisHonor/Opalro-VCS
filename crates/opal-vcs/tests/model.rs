@@ -2030,7 +2030,10 @@ fn amend(repo: &mut Repository, m: &mut Model, new_message: bool) {
         settle(repo, m, Vec::new());
         return;
     };
-    if shown_elsewhere(m, &line, old) {
+    if shown_elsewhere(m, &line, old, true) {
+        if !shown_elsewhere(m, &line, old, false) {
+            met("an amend refused: held only through a combine");
+        }
         assert!(
             matches!(done, Err(SaveError::AmendShared { .. })),
             "{done:?}"
@@ -2081,8 +2084,9 @@ fn amend(repo: &mut Repository, m: &mut Model, new_message: bool) {
 
 /// Whether a tag or a line other than `line` has `save` itself somewhere behind it: starting from
 /// each, every parent is followed, first or not, until the save turns up or nothing is left.
-/// Another save of the same change doesn't count.
-fn shown_elsewhere(m: &Model, line: &str, save: usize) -> bool {
+/// Another save of the same change doesn't count. Without `every_parent`, only first parents
+/// are followed, which tells apart a save held only through a combine.
+fn shown_elsewhere(m: &Model, line: &str, save: usize, every_parent: bool) -> bool {
     let target = m.saves[save].id;
     let other_lines = m.state.lines.iter().filter(|(name, _)| *name != line);
     let mut frontier: Vec<usize> = (m.state.tags.values().copied())
@@ -2095,7 +2099,9 @@ fn shown_elsewhere(m: &Model, line: &str, save: usize) -> bool {
         }
         if !std::mem::replace(&mut visited[s], true) {
             frontier.extend(m.saves[s].parent);
-            frontier.extend(m.saves[s].others.iter().copied());
+            if every_parent {
+                frontier.extend(m.saves[s].others.iter().copied());
+            }
         }
     }
     false
@@ -4428,7 +4434,8 @@ fn resolve_at(
     };
     assert_eq!((&recorded, got_left), (&places, left_count));
     // Into the combined save where nothing else shows it, else a save of its own on top.
-    let amend = !m.saves[on].others.is_empty() && !shown_elsewhere(m, &line, on);
+    // Never held only through a combine: a combine stops at a line whose save holds conflicts.
+    let amend = !m.saves[on].others.is_empty() && !shown_elsewhere(m, &line, on, true);
     assert_eq!(
         replaced,
         amend.then_some(m.saves[on].id),
@@ -5011,7 +5018,7 @@ fn cases() -> u32 {
 /// that the model's files can make (two kinds at one place, a link, a rule against markers and
 /// files past the text limits they can't), the starting points that disagree, a line's conflict
 /// that stops a combine, and each way the other commands meet a conflict.
-const MUST_MEET: [&str; 38] = [
+const MUST_MEET: [&str; 39] = [
     "changed on both, in the same place",
     "changed on both, not text",
     "changed, removed",
@@ -5033,6 +5040,7 @@ const MUST_MEET: [&str; 38] = [
     "resolve --keep theirs",
     "resolve into the combined save",
     "resolve on a save of its own",
+    "an amend refused: held only through a combine",
     "resolve refused: not in conflict",
     "resolve refused: still yours",
     "resolve refused: markers left, answered no",

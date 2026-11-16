@@ -788,7 +788,9 @@ impl Made<'_> {
         };
         let made = repo.commit(lock, packs, &diary)?;
         self.learn(repo, cache, &diary.state);
-        LastMade::store(repo, self.save_id, made);
+        // The note takes the save to be new; only the same save made again in the same
+        // millisecond breaks that, and checking would cost one more read on every save.
+        LastMade::store(repo, &diary.state, self.save_id, made);
         Ok(())
     }
 
@@ -1083,7 +1085,8 @@ pub(crate) fn shown_elsewhere(
             Ok(Some(at)) => saves[at],
             Ok(None) => break,
             Err(e) => {
-                let named = lines::unreadable_history(repo, line, id, &others);
+                let these: Vec<(Holder<'_>, Id)> = asked.iter().map(|&i| others[i]).collect();
+                let named = lines::unreadable_history(repo, line, id, &these);
                 return Err(named.unwrap_or(e).into());
             }
         };
@@ -1123,8 +1126,8 @@ fn moved_since_made(
     line: &str,
     id: Id,
 ) -> Option<impl Fn(&(Holder<'_>, Id)) -> bool> {
-    let note = LastMade::load(repo).filter(|note| note.save == id)?;
-    let then = repo.entry(&note.entry).ok()?.state;
+    let entry = LastMade::load(repo).entry_of(&id)?;
+    let then = repo.entry(&entry).ok()?.state;
     if then.lines.get(line) != Some(&id) {
         return None;
     }
@@ -4167,8 +4170,8 @@ mod tests {
     }
 
     /// The saves an amend of main reads when `side` (five saves of its own off main) gained
-    /// `moved` saves since main's newest save was made, in a project with `old` more lines, and
-    /// main's saves, all of which the walk may meet.
+    /// `moved` saves by a step that made none, since main's newest save was made, in a project
+    /// with `old` more lines; and main's saves, all of which the walk may meet.
     fn amend_reads_after_another_line_moved(old: usize, moved: usize) -> (usize, usize) {
         let (dir, mut repo) = project();
         write(dir.path(), "a.txt", b"a");
@@ -4196,7 +4199,7 @@ mod tests {
     }
 
     #[test]
-    fn after_a_save_on_one_other_line_only_that_line_is_asked_about() {
+    fn after_another_line_moved_without_a_save_only_that_line_is_asked_about() {
         let (moved, main_saves) = amend_reads_after_another_line_moved(0, 3);
         let (still, _) = amend_reads_after_another_line_moved(0, 0);
         // No save of a third line is read.
@@ -4204,6 +4207,59 @@ mod tests {
         // The side line was asked about: its own eight saves, and main's back to where it parted.
         assert!(moved > still, "{moved} {still}");
         assert!(moved - still <= 8 + main_saves, "{moved} {still}");
+    }
+
+    fn goto_line(repo: &mut Repository, line: &str) {
+        let target = crate::lines::Target::Line(line.into());
+        crate::switch::goto(repo, &target, &who(), "goto", None, &mut |_| {}).unwrap();
+    }
+
+    /// The saves an amend of main reads after, with real steps, a save on main, `goto` to
+    /// `line-000` (one of `old` lines of `depth` saves that parted from main before), a save
+    /// there when `save_there`, and `goto main`.
+    fn amend_reads_after_work_on_another_line(old: usize, depth: usize, save_there: bool) -> usize {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"a");
+        let first = saved_id(save_now(&mut repo));
+        let lines: Vec<(String, Id, usize)> = (0..old)
+            .map(|k| (format!("line-{k:03}"), first, depth))
+            .collect();
+        plant_lines(&mut repo, &lines);
+        write(dir.path(), "a.txt", b"b");
+        let tip = saved_id(save_now(&mut repo));
+        goto_line(&mut repo, "line-000");
+        if save_there {
+            write(dir.path(), "there.txt", b"there");
+            saved_id(save_now(&mut repo));
+            // Main's note stays beside the other line's.
+            assert!(LastMade::load(&repo).entry_of(&tip).is_some());
+        }
+        goto_line(&mut repo, "main");
+        let (done, read) = amend_counted(dir.path(), &mut repo);
+        assert!(matches!(done, Ok(SaveOutcome::Saved { .. })), "{done:?}");
+        read
+    }
+
+    #[test]
+    fn after_a_save_on_one_other_line_only_that_line_is_asked_about() {
+        let worked = amend_reads_after_work_on_another_line(1, 20, true);
+        // No save of a third line is read.
+        assert_eq!(
+            amend_reads_after_work_on_another_line(300, 20, true),
+            worked
+        );
+        // The line worked on is asked about: its 21 saves, and main's three at most.
+        let only_goto = amend_reads_after_work_on_another_line(1, 20, false);
+        assert!(worked > only_goto, "{worked} {only_goto}");
+        assert!(worked - only_goto <= 21 + 3, "{worked} {only_goto}");
+    }
+
+    #[test]
+    fn the_red_team_s_shape_in_small_reads_only_the_line_worked_on() {
+        // Dozens of old release lines, as an import brings; work on one, back, amend.
+        let among = amend_reads_after_work_on_another_line(40, 50, true);
+        // As many saves read as with that one line alone: none of the other 39 lines'.
+        assert_eq!(amend_reads_after_work_on_another_line(1, 50, true), among);
     }
 
     /// The saves an amend reads with the cache folder emptied before it, in a project with `old`
@@ -4256,24 +4312,26 @@ mod tests {
                 matches!(&done, Err(SaveError::AmendShared { by }) if by == &["line held"]);
             assert!(by_held, "{done:?}");
         };
-        // Each lie, if believed, would leave `held` unasked.
-        LastMade::store(&repo, start, with_held);
-        refused(dir.path(), &mut repo);
-        LastMade::store(&repo, tip, Id([0x5a; 32]));
-        refused(dir.path(), &mut repo);
-        let note = LastMade {
-            save: tip,
-            entry: with_held,
+        // The file holding only the note of `save` by `entry`, sealed with `key`.
+        let plant = |save: Id, entry: Id, key: [u8; 32]| {
+            let mut notes = LastMade::default();
+            notes.insert(save, entry);
+            fs::write(&file, crate::keyed::seal(&key, &notes.encode())).unwrap();
         };
-        fs::write(&file, crate::keyed::seal(&[9; 32], &note.encode())).unwrap();
+        // Each lie, if believed, would leave `held` unasked.
+        plant(start, with_held, [7; 32]);
         refused(dir.path(), &mut repo);
-        LastMade::store(&repo, tip, main_away);
+        plant(tip, Id([0x5a; 32]), [7; 32]);
+        refused(dir.path(), &mut repo);
+        plant(tip, with_held, [9; 32]);
+        refused(dir.path(), &mut repo);
+        plant(tip, main_away, [7; 32]);
         refused(dir.path(), &mut repo);
         // The note this computer left when it made the save is used, and `held` is new since.
-        LastMade::store(&repo, tip, made);
+        plant(tip, made, [7; 32]);
         refused(dir.path(), &mut repo);
         // A lie under the right seal is believed: the seal is what it is trusted for.
-        LastMade::store(&repo, tip, with_held);
+        plant(tip, with_held, [7; 32]);
         let (done, _) = amend_counted(dir.path(), &mut repo);
         assert!(matches!(done, Ok(SaveOutcome::Saved { .. })), "{done:?}");
     }
@@ -4349,12 +4407,16 @@ mod tests {
         let (dir, mut repo) = project();
         write(dir.path(), "a.txt", b"a");
         let tip = saved_id(save_now(&mut repo));
-        let note = LastMade::load(&repo).unwrap();
-        assert_eq!((note.save, note.entry), (tip, repo.head().unwrap()));
+        assert_eq!(
+            LastMade::load(&repo).entry_of(&tip),
+            Some(repo.head().unwrap())
+        );
         let (done, _) = amend_counted(dir.path(), &mut repo);
         let amended = saved_id(done);
-        let note = LastMade::load(&repo).unwrap();
-        assert_eq!((note.save, note.entry), (amended, repo.head().unwrap()));
+        let notes = LastMade::load(&repo);
+        assert_eq!(notes.entry_of(&amended), Some(repo.head().unwrap()));
+        // The amended save is no line's newest any more, so its note is gone.
+        assert_eq!((notes.entry_of(&tip), notes.len()), (None, 1));
     }
 
     #[test]

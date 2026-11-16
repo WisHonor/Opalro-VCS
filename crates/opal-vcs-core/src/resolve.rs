@@ -409,8 +409,8 @@ fn resolve_locked(
                 make_switch(repo, lock, planned, req.who, req.command, earlier)?;
             made.learn(repo, &mut cache, &state);
             // The switch moved the handle's head to the entry it wrote.
-            if let Ok((entry, _)) = repo.current() {
-                LastMade::store(repo, save_id, entry);
+            if let Ok((entry, after)) = repo.current() {
+                LastMade::store(repo, &after.state, save_id, entry);
             }
             warnings.splice(0..0, status.warnings);
             (save_id, save, short, applied, safety_copies, warnings)

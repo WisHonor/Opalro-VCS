@@ -796,14 +796,16 @@ fn change_ids_match_their_vector() {
     assert_eq!(ids.get("side").unwrap(), [save(0x55, 0x22)]);
 }
 
-/// Save 11…11, made last, and diary entry 22…22, which recorded it, as storage-format.md §10
-/// lays them out.
+/// Two notes, save 11…11 recorded by diary entry 22…22 and save 33…33 by 44…44, as
+/// storage-format.md §10 lays them out.
 fn last_made_body() -> String {
     format!(
-        "{}01{}{}",
+        "{}0102{}{}{}{}",
         hex(b"OPALMADE"),
         "11".repeat(32),
-        "22".repeat(32)
+        "22".repeat(32),
+        "33".repeat(32),
+        "44".repeat(32)
     )
 }
 
@@ -813,7 +815,7 @@ fn print_last_made_vector() {
     let key = [0x42; 32];
     let body = last_made_body();
     println!(
-        "[\n  {{\"name\": \"save-and-entry\", \"key\": \"{}\", \"body\": \"{body}\", \"sealed\": \"{}\"}}\n]",
+        "[\n  {{\"name\": \"two-notes\", \"key\": \"{}\", \"body\": \"{body}\", \"sealed\": \"{}\"}}\n]",
         hex(&key),
         hex(&opal_core::keyed::seal(&key, &unhex(&body)))
     );
@@ -835,15 +837,11 @@ fn last_made_matches_its_vector() {
     let key: [u8; 32] = unhex(&v.key).try_into().unwrap();
     assert_eq!(key, [0x42; 32]);
     let (body, sealed) = (unhex(&v.body), unhex(&v.sealed));
-    assert_eq!((body.len(), sealed.len()), (73, 105));
+    assert_eq!((body.len(), sealed.len()), (138, 170));
     let made = LastMade::decode(&body).unwrap();
-    assert_eq!(
-        made,
-        LastMade {
-            save: Id([0x11; 32]),
-            entry: Id([0x22; 32])
-        }
-    );
+    assert_eq!(made.len(), 2);
+    assert_eq!(made.entry_of(&Id([0x11; 32])), Some(Id([0x22; 32])));
+    assert_eq!(made.entry_of(&Id([0x33; 32])), Some(Id([0x44; 32])));
     assert_eq!(made.encode(), body);
     assert_eq!(seal(&key, &body), sealed, "{}", v.name);
     assert_eq!(open_sealed(&key, &sealed), Some(&body[..]));

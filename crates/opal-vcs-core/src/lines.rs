@@ -328,6 +328,7 @@ pub(crate) fn unreadable_history(
 }
 
 /// What holds a line's saves, as [`unreadable_history`]'s damage names it.
+#[derive(Clone, Copy)]
 pub(crate) enum Holder<'a> {
     Line(&'a str),
     Tag(&'a str),
