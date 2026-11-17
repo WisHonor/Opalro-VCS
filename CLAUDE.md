@@ -10,6 +10,7 @@ A new version control system with its own engine (not a Git wrapper), written in
 - `docs/design.md`: the living design spec (plain language + technical detail). Read it first: it holds the agenda, risks, open questions and deferred decisions.
 - `docs/plans/`: implementation plans, one per milestone.
 - `docs/decisions/NNN-short-title.md`: one record per decision (Context, Options, Decision, Consequences), numbered from 001. Never rewrite an accepted decision; supersede it with a new record and link both ways.
+- The website (https://opalro.com) is not here: it has a repository of its own, `opalro-website`, in the folder next to this one (decision 191). This repository hands it each release's website zip, archives and checksums, and nothing else.
 
 ## Working with the owner
 - The owner is learning Rust and VCS internals and wants to understand and own every core decision.
