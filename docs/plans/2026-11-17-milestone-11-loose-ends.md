@@ -28,7 +28,7 @@
 - **Spec before code:** `docs/terminal.md` and `docs/json.md` for every word and field a task prints, in the same commit as the code; `docs/storage-format.md` §4 for what an import notes (Task 6), before the code that writes it.
 - **Format 1 is frozen.** No task changes how any record is written. An import writes move notes, which a save's record has held since milestone 1.
 - **`opalro_json` stays `1`:** fields are added (`status`'s `empty_folders`), none is changed or given a new code.
-- **No flush, write or check changes** in any task. Task 7 adds tests only; if a test shows a fault in the code, it stops and reports.
+- **No flush changes, and no check is loosened,** in any task (decision 193 point 1): what is flushed, and when, stays as it is. The only changes to what a command writes are the ones decisions 195 and 196 make (an import's notes; the folders a switch makes; the folder `resolve --keep` takes out). Task 7 adds tests only; if a test shows a fault in the code, it stops and reports.
 - **Untrusted text in hints:** no hint puts typed text, a stored name, a path or any other text from the project inside a command a person would paste.
 - **No message promises a milestone or a version** (naming the version a feature came with, Task 2, promises nothing).
 - **`--json` never asks and never carries colour, symbols, progress or "Next:" lines.**
