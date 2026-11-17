@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-11-02
 - **Agenda topic:** none (milestone 2 planning, question 10)
-- **Refined by:** [decision 123](123-follow-ups-done-or-moved-past-v0.1.md) (catching up with Git moves past v0.1)
+- **Refined by:** [decision 123](123-follow-ups-done-or-moved-past-v0.1.md) (catching up with Git moves past v0.1); [decision 195](195-the-import-records-the-renames-it-is-sure-of.md) (catching up matches commits by the `git-commit` each save records)
 - **Decided by:** Claude, at the owner's request to keep going with Claude's recommendations.
 - **Confirms:** [decision 019](019-review-clarifications.md) #6 (import is one-time in v0.1; picking up new commits comes later)
 

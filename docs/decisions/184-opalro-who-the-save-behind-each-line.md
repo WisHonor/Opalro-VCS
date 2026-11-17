@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 10 planning)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 017](017-commands-and-output.md) (`who <file>` is one of the history commands); [decision 021](021-v0.1-command-scope.md) and [decision 157](157-v0.2-in-four-milestones.md) (`who` comes in v0.2, in milestone 10); [decision 116](116-gits-words-as-shortcuts.md) (`blame` was explained until `who` arrived); [decision 168](168-moves-in-saves-and-in-combines.md) (`who` follows move notes back through a file's history); [decision 179](179-every-command-and-a-conflict.md) (what `who` does with a conflict was left to this decision)
+- **Refined by:** [decision 195](195-the-import-records-the-renames-it-is-sure-of.md) (in imported history, `who` follows the renames the import notes)
 
 ## Context
 
