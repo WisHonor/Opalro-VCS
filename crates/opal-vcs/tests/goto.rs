@@ -398,7 +398,7 @@ fn goto_a_line_named_with_a_save_ids_first_letter() {
     let first = env.state().1.lines["main"];
     // Saves again until the newest change ID starts with a letter no other save's does, so the
     // line made at the first save is named like the newest alone, never like its own save.
-    let letter = (0..)
+    let letter = (0..50)
         .find_map(|n| {
             env.overwrite("a.txt", &format!("second {n}\n"));
             env.opalro().args(["save", "Second"]).assert().success();
@@ -410,7 +410,7 @@ fn goto_a_line_named_with_a_save_ids_first_letter() {
             let letter = &ids[0][..1];
             (!ids[1..].iter().any(|id| id.starts_with(letter))).then(|| letter.to_owned())
         })
-        .unwrap();
+        .expect("in 50 saves, none had a change ID starting with a letter of its own");
     goto(&env, &first.to_hex());
     env.opalro()
         .args(["line", "new", &letter])
@@ -423,6 +423,39 @@ fn goto_a_line_named_with_a_save_ids_first_letter() {
         "{said}"
     );
     assert_eq!(env.state().1.position, Position::OnLine(letter));
+}
+
+#[test]
+fn goto_a_short_start_that_names_nothing_says_a_change_id_takes_four_letters() {
+    let env = Env::empty();
+    env.opalro()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
+    let hint = "A save's change ID is typed with at least 4 letters; see your saves with: opalro \
+                history";
+    // Three letters are never read as a change ID, and no line or tag here has the name.
+    let out = env.opalro().args(["goto", "kyp"]).output().unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let said = text(&out.stderr);
+    let hinted = format!("hint: {hint}");
+    assert_eq!(
+        said.lines().collect::<Vec<_>>(),
+        [
+            "error: No save, line or ID matches \"kyp\".",
+            "",
+            hinted.as_str()
+        ],
+        "{said}"
+    );
+    let out = env
+        .opalro()
+        .args(["goto", "kyp", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(doc["error"]["hint"], hint, "{doc}");
 }
 
 #[test]
