@@ -314,10 +314,11 @@ pub fn upgrade_offer(features: &[&str]) -> String {
         text += &format!("  {feature}: {}\n", allows(feature));
     }
     text += if features.len() == 1 {
-        "Once it is on, Opalro 0.1 can't open this project, and opalro undo can't turn it off.\n"
-    } else {
-        "Once they are on, Opalro 0.1 can't open this project, and opalro undo can't turn them \
+        "Once it is on, Opalro before 0.2 can't open this project, and opalro undo can't turn it \
          off.\n"
+    } else {
+        "Once they are on, Opalro before 0.2 can't open this project, and opalro undo can't turn \
+         them off.\n"
     };
     text
 }
@@ -481,5 +482,18 @@ mod tests {
         );
         let said = switched(Preset::Game, &changes, &["opalro.toml"]);
         assert_eq!(said, "\nSwitched to Game settings: made opalro.toml.\n");
+    }
+
+    // Only one feature exists, so no command prints the plural yet.
+    #[test]
+    fn an_offer_of_two_features_speaks_of_them() {
+        let offer = upgrade_offer(&[CONFLICTS, "later"]);
+        assert!(
+            offer.ends_with(
+                "\nOnce they are on, Opalro before 0.2 can't open this project, and opalro undo \
+                 can't turn them off.\n"
+            ),
+            "{offer}"
+        );
     }
 }
