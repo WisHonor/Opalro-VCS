@@ -75,6 +75,12 @@ impl ResolveError {
     #[must_use]
     pub fn hint(&self) -> Option<String> {
         match self {
+            ResolveError::NotFound(text) if in_change_letters(text) && !is_change_start(text) => {
+                Some(format!(
+                    "A save's change ID is typed with at least {MIN_SHORT} letters; see your \
+                     saves with: opalro history"
+                ))
+            }
             ResolveError::NotFound(_) => Some("See your saves with: opalro history".to_owned()),
             ResolveError::Ambiguous { .. } => Some("Type more of the ID to pick one.".to_owned()),
             ResolveError::LineOrSave { .. } => Some(
@@ -544,10 +550,10 @@ pub fn resolve(repo: &Repository, text: &str) -> Result<Id, ResolveError> {
 }
 
 /// Reads `text` in the one order a save is named by: a line's name, a server line
-/// `line@server`, a tag's name, the start of a change ID (lowercase `k`-`z`, unique on the
-/// current line), the start of a fingerprint (at least 8 hex digits). Gives where that leads,
-/// and the save. A line or server line whose name a tag at another save has too is refused, as
-/// is a line or tag name that is also the start of another save's ID.
+/// `line@server`, a tag's name, the start of a change ID (at least 4 lowercase letters `k`-`z`,
+/// unique on the current line), the start of a fingerprint (at least 8 hex digits). Gives where
+/// that leads, and the save. A line or server line whose name a tag at another save has too is
+/// refused, as is a line or tag name that is also the start of another save's ID.
 pub(crate) fn find(repo: &Repository, text: &str) -> Result<(Target, Id), ResolveError> {
     let (_, entry) = repo.current()?;
     // Read once: it can be large.
@@ -666,8 +672,14 @@ fn others_by_id(
 /// The saves found, each as it matched, and damage passed over on the way.
 type Found = (Vec<(Id, String)>, Option<RepoError>);
 
-fn is_change_start(text: &str) -> bool {
+/// Text made only of the letters a change ID is written in.
+fn in_change_letters(text: &str) -> bool {
     !text.is_empty() && text.bytes().all(|b| (b'k'..=b'z').contains(&b))
+}
+
+/// Text read as the start of a change ID: no shorter than the shortest Opalro prints.
+fn is_change_start(text: &str) -> bool {
+    text.len() >= MIN_SHORT && in_change_letters(text)
 }
 
 /// The saves `text` names as the start of a change ID or of a fingerprint: on the current line
@@ -1123,6 +1135,74 @@ mod tests {
                 .unwrap()
                 .ends_with(" To reach the line by another name: opalro line rename <old> <new>")
         );
+    }
+
+    #[test]
+    fn a_start_of_three_letters_names_no_save() {
+        let (_dir, repo, ids) = project_with(&["mnopqr", "nopqrs"]);
+        for id in &ids {
+            let letters = repo.store().save(id, false).unwrap().change_id.to_letters();
+            for start in [&letters[..1], &letters[..2], &letters[..3]] {
+                assert!(
+                    matches!(resolve(&repo, start), Err(ResolveError::NotFound(_))),
+                    "{start}"
+                );
+            }
+            // The first save's change ID is random, so it may share 4 letters with another.
+            match resolve(&repo, &letters[..4]) {
+                Ok(found) => assert_eq!(found, *id),
+                Err(ResolveError::Ambiguous { candidates, .. }) => {
+                    assert!(candidates.contains(&letters), "{candidates:?}");
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    #[test]
+    fn a_line_of_one_letter_is_the_line_whatever_ids_start_with_it() {
+        let (_dir, mut repo, ids) = project_with(&["mnopqr", "nopqrs"]);
+        // `m` and `mn` start the change ID of a save on main; the line and the tag are at another.
+        name_line(&mut repo, "m", ids[2]);
+        let before = repo.store().saves_read();
+        assert_eq!(
+            crate::lines::resolve_target(&repo, "m").unwrap(),
+            Target::Line("m".into())
+        );
+        assert_eq!(repo.store().saves_read(), before, "no save is looked for");
+        assert_eq!(resolve(&repo, "m").unwrap(), ids[2]);
+        name_tag(&mut repo, "mn", ids[2]);
+        assert_eq!(
+            crate::lines::resolve_target(&repo, "mn").unwrap(),
+            Target::Save(ids[2])
+        );
+    }
+
+    #[test]
+    fn a_name_of_four_letters_still_clashes() {
+        let (_dir, mut repo, ids) = project_with(&["mnopqr", "nopqrs"]);
+        name_line(&mut repo, "mnop", ids[2]);
+        match resolve(&repo, "mnop") {
+            Err(ResolveError::LineOrSave { saves, .. }) => {
+                assert!(saves.contains(&letters("mnopqr")), "{saves:?}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_hint_for_a_short_start_says_four_letters() {
+        let hint = |text: &str| ResolveError::NotFound(text.into()).hint().unwrap();
+        for short in ["kyp", "x"] {
+            assert_eq!(
+                hint(short),
+                "A save's change ID is typed with at least 4 letters; see your saves with: opalro \
+                 history"
+            );
+        }
+        for other in ["xyz1", "kyps", "main"] {
+            assert_eq!(hint(other), "See your saves with: opalro history");
+        }
     }
 
     #[test]

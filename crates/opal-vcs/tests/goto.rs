@@ -387,6 +387,45 @@ fn an_ambiguous_target_lists_the_saves() {
 }
 
 #[test]
+fn goto_a_line_named_with_a_save_ids_first_letter() {
+    let env = Env::empty();
+    env.opalro()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
+    env.overwrite("a.txt", "first\n");
+    env.opalro().args(["save", "First"]).assert().success();
+    let first = env.state().1.lines["main"];
+    // Saves again until the newest change ID starts with a letter no other save's does, so the
+    // line made at the first save is named like the newest alone, never like its own save.
+    let letter = (0..)
+        .find_map(|n| {
+            env.overwrite("a.txt", &format!("second {n}\n"));
+            env.opalro().args(["save", "Second"]).assert().success();
+            let out = env.opalro().args(["history", "--json"]).output().unwrap();
+            let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+            let ids: Vec<&str> = (doc["saves"].as_array().unwrap().iter())
+                .map(|save| save["change_id"].as_str().unwrap())
+                .collect();
+            let letter = &ids[0][..1];
+            (!ids[1..].iter().any(|id| id.starts_with(letter))).then(|| letter.to_owned())
+        })
+        .unwrap();
+    goto(&env, &first.to_hex());
+    env.opalro()
+        .args(["line", "new", &letter])
+        .assert()
+        .success();
+    goto(&env, "main");
+    let said = goto(&env, &letter);
+    assert!(
+        said.starts_with(&format!("Switched to line {letter} at save ")),
+        "{said}"
+    );
+    assert_eq!(env.state().1.position, Position::OnLine(letter));
+}
+
+#[test]
 fn goto_records_its_switch_in_its_diary_entry() {
     let env = two_lines();
     let (repo, state) = env.state();

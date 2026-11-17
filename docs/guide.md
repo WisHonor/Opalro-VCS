@@ -545,7 +545,7 @@ Name files or folders to look only there:
 opalro changes todo.txt
 ```
 
-`--save` shows what a save changed instead, compared with the save before it. Name the save by its line (for the line's newest save), a tag, its change ID, or 8 or more digits of its fingerprint. Here it shows the save made with `--amend` above, which added both files:
+`--save` shows what a save changed instead, compared with the save before it. Name the save by its line (for the line's newest save), a tag, 4 or more letters of its change ID, or 8 or more digits of its fingerprint. Here it shows the save made with `--amend` above, which added both files:
 
 ```sh
 opalro changes --save main
@@ -622,7 +622,7 @@ Through a combined save, each line is named for the save on the line it came fro
 
 ### `opalro goto`
 
-Go to another line or save. Name, in the order Opalro tries them, a line, a server line (`main@origin`), a tag, a save's change ID as `opalro history` shows it (Opalro looks for change IDs among the saves of the line you're on), or 8 or more digits of a save's fingerprint (any save your lines, server lines or tags lead back to). A tag or a server line takes you to its save, not onto a line. `opalro show`, `opalro changes --save` and `opalro tag --save` take a save named the same way. If a line and a tag share a name but sit at two different saves, Opalro picks neither and shows both saves' IDs: type the one you mean, or end the double meaning: rename the line, or delete the tag.
+Go to another line or save. Name, in the order Opalro tries them, a line, a server line (`main@origin`), a tag, a save's change ID as `opalro history` shows it (Opalro looks for change IDs among the saves of the line you're on), or 8 or more digits of a save's fingerprint (any save your lines, server lines or tags lead back to). A change ID is typed with at least 4 letters, the fewest `opalro history` shows, so a line or tag named with 1 to 3 letters, such as `x` or `tmp`, is always that line or tag. A tag or a server line takes you to its save, not onto a line. `opalro show`, `opalro changes --save` and `opalro tag --save` take a save named the same way. If a line and a tag share a name but sit at two different saves, Opalro picks neither and shows both saves' IDs: type the one you mean, or end the double meaning: rename the line, or delete the tag.
 
 ```sh
 opalro goto main
