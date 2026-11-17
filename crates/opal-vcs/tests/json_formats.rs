@@ -7,6 +7,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+use opal_core::conflict::{Record, Term};
+use opal_core::id::hash_content;
+use opal_core::listing::EntryKind;
 use serde_json::Value;
 
 mod support;
@@ -32,6 +35,10 @@ fn fields_in_json_md() -> BTreeMap<(String, usize), BTreeSet<String>> {
             if !before.starts_with("**A ") && !before.starts_with("**An ") {
                 filling = Some((section.clone(), count));
                 count += 1;
+            } else {
+                // A piece's table is kept under its section and the piece's name.
+                let piece = before.trim_start_matches("**").split("**").next();
+                filling = Some((format!("{section}: {}", piece.unwrap_or_default()), 0));
             }
         } else if let Some(key) = &filling {
             let first = line.split('|').nth(1).unwrap_or_default();
@@ -94,9 +101,21 @@ fn every_document() -> Vec<(&'static str, usize, Value)> {
     docs.push(("`opalro setup --json`", 0, run(&["setup"], 0)));
     docs.push((
         "`opalro setup --json`",
-        1,
+        2,
         run(&["setup", "--preset", "code"], 1),
     ));
+    // As v0.1 made it, so there is something to turn on.
+    support::without_conflicts_feature(&root);
+    let upgrades = run(&["setup"], 0);
+    assert_eq!(upgrades["upgrades"], serde_json::json!(["conflicts"]));
+    docs.push(("`opalro setup --json`", 0, upgrades));
+    for (args, code) in [
+        (&["setup", "--upgrade"][..], 1),
+        (&["setup", "--upgrade", "--yes"], 0),
+        (&["setup", "--upgrade"], 0),
+    ] {
+        docs.push(("`opalro setup --json`", 1, run(args, code)));
+    }
     env.overwrite("a.txt", "two\n");
     docs.push(("`opalro status --json`", 0, run(&["status"], 0)));
     docs.push(("`opalro changes --json`", 0, run(&["changes"], 0)));
@@ -106,9 +125,53 @@ fn every_document() -> Vec<(&'static str, usize, Value)> {
     let first = history["saves"][1]["id"].as_str().unwrap().to_owned();
     docs.push(("`opalro history --json`", 0, history));
     docs.push(("`opalro show --json`", 0, run(&["show"], 0)));
+    let who = "`opalro who --json`";
+    docs.push((who, 0, run(&["who", "a.txt"], 0)));
+    docs.push((who, 0, run(&["who", "a.txt", "--save", "main"], 0)));
+    docs.push(("5. Errors", 0, run(&["who", "none.txt"], 1)));
     docs.push(("`opalro line --json`", 0, run(&["line"], 0)));
+    docs.push(("`opalro line new --json`", 0, run(&["line", "new", "x"], 0)));
+    docs.push((
+        "`opalro line rename --json`",
+        0,
+        run(&["line", "rename", "x", "y"], 0),
+    ));
+    run(&["goto", "main"], 0);
+    docs.push((
+        "`opalro line delete --json`",
+        0,
+        run(&["line", "delete", "y"], 0),
+    ));
+    docs.push((
+        "`opalro tag <name> --json`",
+        0,
+        run(&["tag", "v1", "First"], 0),
+    ));
+    docs.push(("`opalro tag --json`", 0, run(&["tag"], 0)));
+    docs.push((
+        "`opalro tag --delete --json`",
+        0,
+        run(&["tag", "--delete", "v1", "--yes"], 0),
+    ));
     docs.push(("`opalro goto --json`", 0, run(&["goto", &first], 0)));
     run(&["goto", "main"], 0);
+    run(&["line", "new", "side"], 0);
+    env.overwrite("b.txt", "b\n");
+    run(&["save", "B"], 0);
+    run(&["goto", "main"], 0);
+    env.overwrite("a.txt", "main\n");
+    run(&["save", "Main"], 0);
+    let combine = "`opalro combine --json`";
+    docs.push((combine, 0, run(&["combine", "side"], 0)));
+    docs.push((combine, 0, run(&["combine", "side"], 0)));
+    run(&["line", "new", "ahead"], 0);
+    env.overwrite("c.txt", "c\n");
+    run(&["save", "C"], 0);
+    run(&["goto", "main"], 0);
+    let forward = run(&["combine", "ahead"], 0);
+    assert_eq!(forward["result"], "forward", "{forward}");
+    docs.push((combine, 0, forward));
+    docs.push(("5. Errors", 0, run(&["combine", "nowhere"], 1)));
     env.overwrite("a.txt", "three\n");
     docs.push(("`opalro discard --json`", 0, run(&["discard"], 0)));
     env.overwrite("a.txt", "four\n");
@@ -137,6 +200,71 @@ fn every_document() -> Vec<(&'static str, usize, Value)> {
     std::fs::remove_file(root.join(".opalro/state/head")).unwrap();
     let lost = run(&["undo", "--list"], 0);
     docs.push(("`opalro undo --list --json`", 2, lost));
+
+    // A place in conflict, planted, standing in the folder as changed.
+    let conflicted = Env::empty();
+    let root = conflicted.root().to_owned();
+    document(&conflicted, &root, start, 0);
+    let mine = b"mine\n";
+    let term = |bytes: &[u8]| Term {
+        kind: EntryKind::File,
+        id: hash_content(bytes),
+        size: bytes.len() as u64,
+    };
+    let record = Record {
+        terms: vec![Some(term(mine)), None, Some(term(b"theirs\n"))],
+        own: None,
+    };
+    support::plant_save(&root, |pack| {
+        pack.add_content(b"theirs\n").unwrap();
+        pack.add_content(mine).unwrap();
+        support::listings_with_conflicts(pack, &[], &[("c.txt", &record)])
+    });
+    std::fs::write(root.join("c.txt"), "mine, changed\n").unwrap();
+    let status = document(&conflicted, &root, &["status"], 0);
+    assert_eq!(status["conflicts"][0]["standing"], "changed", "{status}");
+    docs.push(("`opalro status --json`", 0, status));
+    let changes = document(&conflicted, &root, &["changes"], 0);
+    assert_eq!(changes["changes"][0]["in_conflict"], true, "{changes}");
+    docs.push(("`opalro changes --json`", 0, changes));
+
+    // A combine that keeps a conflict.
+    let kept = Env::empty();
+    let root = kept.root().to_owned();
+    let run = |args: &[&str], code| document(&kept, &root, args, code);
+    run(start, 0);
+    kept.overwrite("k.txt", "base\n");
+    run(&["save", "Base"], 0);
+    run(&["line", "new", "side"], 0);
+    kept.overwrite("k.txt", "side\n");
+    run(&["save", "Side"], 0);
+    run(&["goto", "main"], 0);
+    kept.overwrite("k.txt", "main\n");
+    run(&["save", "Main"], 0);
+    let combined = run(&["combine", "side"], 0);
+    assert_eq!(combined["conflict_count"], 1, "{combined}");
+    let conflict = combined["conflicts"][0].clone();
+    docs.push(("`opalro combine --json`", 0, combined));
+    docs.push(("`opalro combine --json`: A conflict", 0, conflict));
+
+    // Resolving it: nothing fixed yet, a version copied out, the fix recorded, then no conflict.
+    let resolve = "`opalro resolve --json`";
+    docs.push((resolve, 0, run(&["resolve"], 0)));
+    let to = [
+        "resolve",
+        "k.txt",
+        "--copy",
+        "theirs",
+        "--to",
+        "k-theirs.txt",
+    ];
+    docs.push((resolve, 1, run(&to, 0)));
+    std::fs::remove_file(root.join("k-theirs.txt")).unwrap();
+    kept.overwrite("k.txt", "both\n");
+    let recorded = run(&["resolve"], 0);
+    assert_eq!(recorded["result"], "recorded", "{recorded}");
+    docs.push((resolve, 0, recorded));
+    docs.push((resolve, 0, run(&["resolve"], 0)));
     docs
 }
 
@@ -158,7 +286,9 @@ fn every_document_has_only_the_fields_json_md_lists() {
 
 #[test]
 fn every_document_parses_and_holds_opalro_json_and_warnings() {
-    for (section, _, doc) in every_document() {
+    // A piece of a document (`<section>: A conflict`) is no document of its own.
+    let documents = every_document().into_iter();
+    for (section, _, doc) in documents.filter(|(s, _, _)| !s.contains("`: ")) {
         assert_eq!(doc["opalro_json"], 1, "{section}: {doc}");
         assert!(doc["warnings"].is_array(), "{section}: {doc}");
     }

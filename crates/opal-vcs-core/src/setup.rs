@@ -1,13 +1,14 @@
 //! `opalro setup`'s step: a preset's `opalro.toml` and `.opalroignore` written as one step that undo
 //! takes back (docs/storage-format.md section 9).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::ffi::OsStr;
 use std::io;
 use std::path::Path;
 
 use opal_platform::dir::{Dir, EntryType};
 
+use crate::conflict::Listings;
 use crate::diary::Action;
 use crate::history::tip_of;
 use crate::id::Id;
@@ -81,6 +82,8 @@ pub enum SetupError {
         listed(paths.iter().take(NAMED), paths.len() as u64)
     )]
     InTheWay { paths: Vec<String> },
+    #[error("Opalro asks before turning on a feature, and can't ask here, so nothing was changed.")]
+    UpgradeDeclined,
     #[error(transparent)]
     Switch(#[from] SwitchError),
     #[error(transparent)]
@@ -114,6 +117,9 @@ impl SetupError {
             }
             SetupError::InTheWay { .. } => {
                 Some("Rename or move them out of the way, then run opalro setup again.".to_owned())
+            }
+            SetupError::UpgradeDeclined => {
+                Some("Run it again with --yes to turn it on.".to_owned())
             }
             SetupError::Switch(e) => e.hint(),
             SetupError::Save(e) => e.hint_when_reading(),
@@ -188,6 +194,32 @@ pub fn apply_setup(
     })?
 }
 
+/// What `opalro setup --upgrade` did: the features turned on, none when there was nothing to do.
+#[derive(Debug)]
+pub struct Upgraded {
+    pub turned_on: Vec<&'static str>,
+}
+
+/// Turns on every feature this version knows that the project lacks, once `confirm` says yes;
+/// changes nothing if it says no, and says so (`SetupError::UpgradeDeclined`). Not a diary step:
+/// only `format` changes.
+pub fn upgrade(
+    repo: &mut Repository,
+    on_wait: &mut dyn FnMut(&str),
+    confirm: &mut dyn FnMut(&[&'static str]) -> bool,
+) -> Result<Upgraded, SetupError> {
+    let wanted = repo.features_to_turn_on();
+    if wanted.is_empty() {
+        return Ok(Upgraded { turned_on: wanted });
+    }
+    if !confirm(&wanted) {
+        return Err(SetupError::UpgradeDeclined);
+    }
+    let lock = repo.lock_for_change("setup", on_wait)?;
+    let turned_on = repo.turn_on_features(&lock)?;
+    Ok(Upgraded { turned_on })
+}
+
 fn nothing() -> SetupOutcome {
     SetupOutcome {
         written: Vec::new(),
@@ -236,8 +268,11 @@ fn write_step(
     let paths: Vec<String> = before.keys().cloned().collect();
     let kept = switch::kept_on(&entry.state, current, "setup", &paths, who);
     let base_root = repo.store().save(&current, repo.signatures_allowed())?.root;
+    // Both sides picture the folder, a conflict's place holding what it stands as.
+    let unstored = HashMap::new();
+    let standing = Listings::standing(repo, &unstored);
     let mut side = |changes: &BTreeMap<String, Option<Put>>| -> Result<Id, SaveError> {
-        let root = kept::overlay(repo.store(), base_root, changes, &mut packs)?;
+        let root = kept::overlay(&standing, base_root, changes, &mut packs)?;
         if root == base_root {
             return Ok(current);
         }
@@ -272,6 +307,7 @@ fn write_step(
         plan: step,
         drive,
         packs,
+        cache: None,
     };
     let applied = switch::switch(repo, lock, to_make, who, "setup", earlier)?;
     let written = plan

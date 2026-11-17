@@ -4,10 +4,12 @@
 use std::collections::HashSet;
 
 use crate::changeids::ChangeIds;
-use crate::diary::{DiaryEntry, Position};
+use crate::diary::{DiaryEntry, Position, TagList};
 use crate::id::{ChangeId, Id, is_hex_start};
+use crate::lines::Target;
 use crate::repo::{RepoError, Repository};
 use crate::save::Save;
+use crate::store::is_unreadable_record;
 use crate::text::escape;
 
 /// A short change ID has at least this many letters.
@@ -36,6 +38,34 @@ pub enum ResolveError {
         saves.join(", ")
     )]
     LineOrSave { text: String, saves: Vec<String> },
+    #[error(
+        "\"{}\" is the name of a tag and also the start of another save's ID ({}), so Opalro \
+         didn't pick either.",
+        escape(text, false),
+        saves.join(", ")
+    )]
+    TagOrSave { text: String, saves: Vec<String> },
+    /// `line` and `tag` are the two saves' first 12 hex digits.
+    #[error(
+        "\"{}\" is the name of a line and also of a tag at another save (line {line}, tag {tag}), \
+         so Opalro didn't pick either.",
+        escape(text, false)
+    )]
+    LineOrTag {
+        text: String,
+        line: String,
+        tag: String,
+    },
+    #[error(
+        "\"{}\" is the name of a server line and also of a tag at another save (server line \
+         {line}, tag {tag}), so Opalro didn't pick either.",
+        escape(text, false)
+    )]
+    ServerLineOrTag {
+        text: String,
+        line: String,
+        tag: String,
+    },
     #[error(transparent)]
     Repo(#[from] RepoError),
 }
@@ -49,8 +79,24 @@ impl ResolveError {
             ResolveError::Ambiguous { .. } => Some("Type more of the ID to pick one.".to_owned()),
             ResolveError::LineOrSave { .. } => Some(
                 "To reach the save, type more of its ID; opalro history --json gives the whole \
-                 change ID and fingerprint. Until Opalro can rename lines, that line can't be \
-                 reached by this name."
+                 change ID and fingerprint. To reach the line by another name: opalro line \
+                 rename <old> <new>"
+                    .to_owned(),
+            ),
+            ResolveError::TagOrSave { .. } => Some(
+                "To reach the save, type more of its ID; opalro history --json gives the whole \
+                 change ID and fingerprint. To reach the tag's save, take its ID from: opalro tag"
+                    .to_owned(),
+            ),
+            ResolveError::LineOrTag { .. } => Some(
+                "To reach one of them, type its ID as shown here. To end the double meaning, \
+                 rename the line (opalro line rename <old> <new>) or delete the tag (opalro tag \
+                 --delete <name>)."
+                    .to_owned(),
+            ),
+            ResolveError::ServerLineOrTag { .. } => Some(
+                "To reach one of them, type its ID as shown here. To end the double meaning, \
+                 delete the tag: opalro tag --delete <name>"
                     .to_owned(),
             ),
             ResolveError::Repo(r) => r.hint(),
@@ -301,6 +347,24 @@ pub fn for_each_on_line<E: From<RepoError>>(
     Ok(())
 }
 
+/// How many letters of a change ID a listing from another place shows: shortening them to be
+/// unique would mean reading the whole list first.
+const FROM_LETTERS: usize = 12;
+
+/// Calls `each` with every save from `tip` back along first parents, newest first, each with
+/// the first 12 letters of its change ID. Nothing is cached.
+pub fn for_each_from<E: From<RepoError>>(
+    repo: &Repository,
+    tip: Id,
+    mut each: impl FnMut(&Id, &Save, &str) -> Result<(), E>,
+) -> Result<(), E> {
+    for step in chain(repo, tip) {
+        let (id, save) = step?;
+        each(&id, &save, &save.change_id.to_letters()[..FROM_LETTERS])?;
+    }
+    Ok(())
+}
+
 fn one_of(text: &str, mut found: Vec<(Id, String)>) -> Result<Id, ResolveError> {
     found.sort_by(|a, b| a.1.cmp(&b.1));
     found.dedup();
@@ -361,14 +425,15 @@ fn by_change_prefix(
     Ok(found)
 }
 
-/// Calls `visit` once for each save reachable from `tips` along first parents. A chain an
-/// earlier tip walked is not walked again, so the cost doesn't grow with the number of tips.
+/// Calls `visit` once for each save reachable from `tips` along first parents and not in `seen`,
+/// adding them to it. A chain an earlier tip walked is not walked again, so the cost doesn't grow
+/// with the number of tips.
 fn each_once<E>(
+    seen: &mut HashSet<Id>,
     tips: impl IntoIterator<Item = Id>,
     mut first_parent: impl FnMut(&Id) -> Result<Option<Id>, E>,
     mut visit: impl FnMut(&Id),
 ) -> Result<(), E> {
-    let mut seen = HashSet::new();
     for tip in tips {
         let mut next = Some(tip);
         while let Some(id) = next {
@@ -382,11 +447,12 @@ fn each_once<E>(
     Ok(())
 }
 
-/// The saves, among those any line reaches by first parents, whose fingerprint starts with
-/// `text`, each with its fingerprint.
+/// The saves, among those any line, server line or tag reaches by first parents, whose
+/// fingerprint starts with `text`, each with its fingerprint. `tags` are the project's.
 fn by_fingerprint_prefix(
     repo: &Repository,
     entry: &DiaryEntry,
+    tags: &TagList,
     text: &str,
 ) -> Result<Vec<(Id, String)>, ResolveError> {
     let text = text.to_ascii_lowercase();
@@ -417,72 +483,261 @@ fn by_fingerprint_prefix(
         }
     }
     let mut found = Vec::new();
+    let mut visit = |id: &Id| {
+        let hex = id.to_hex();
+        if hex.starts_with(&text) {
+            found.push((*id, hex));
+        }
+    };
+    let parent = |id: &Id| {
+        let save = repo.store().save(id, repo.signatures_allowed());
+        save.map(|save| save.parents.first().copied())
+    };
+    let mut seen = HashSet::new();
     each_once(
+        &mut seen,
         entry.state.lines.values().copied(),
-        |id| {
-            let save = repo.store().save(id, repo.signatures_allowed())?;
-            Ok::<_, RepoError>(save.parents.first().copied())
-        },
-        |id| {
-            let hex = id.to_hex();
-            if hex.starts_with(&text) {
-                found.push((*id, hex));
-            }
-        },
+        |id| Ok::<_, RepoError>(parent(id)?),
+        &mut visit,
     )?;
+    // A server line's or tag's save that can't be read ends its chain there: it can still be
+    // named, and it never stops a search that the lines alone would answer.
+    let servers = repo.server_lines(&entry.state)?;
+    let more = (servers.servers.values())
+        .flat_map(|lines| lines.values().copied())
+        .chain(tags.tags.values().map(|tag| tag.save));
+    let damage_ends = |id: &Id| match parent(id) {
+        Err(e) if is_unreadable_record(&e) => Ok(None),
+        read => Ok::<_, RepoError>(read?),
+    };
+    each_once(&mut seen, more, damage_ends, &mut visit)?;
     Ok(found)
 }
 
-/// Finds a save from text: a line name, else a change-ID prefix (lowercase `k`-`z`, unique on
-/// the current line), else at least 8 hex digits of a fingerprint. Fails with `NotFound`,
-/// `Ambiguous`, `LineOrSave`, or a repository problem.
+/// The save `id` as a hint's command names it: its short change ID when that reaches it on the
+/// current line, otherwise the first 12 hex digits of its fingerprint when those reach it; `None`
+/// when neither does.
+#[must_use]
+pub fn id_for_command(repo: &Repository, id: &Id) -> Option<String> {
+    let reaches = |text: &String| matches!(resolve(repo, text), Ok(found) if found == *id);
+    // A save off the line is named by its fingerprint: its short change ID is made unique only
+    // among the line's saves.
+    let on_line = |text: &String| {
+        let found = repo
+            .current()
+            .ok()
+            .map(|(_, entry)| by_change_prefix(repo, &entry, text));
+        matches!(found, Some(Ok(found)) if matches!(found.as_slice(), [(one, _)] if one == id))
+    };
+    let save = repo.store().save(id, repo.signatures_allowed()).ok();
+    let short = save.and_then(|save| short_change_id(repo, id, &save.change_id).ok());
+    short
+        .filter(on_line)
+        .into_iter()
+        .chain([id.short_hex()])
+        .find(reaches)
+}
+
+/// Finds a save from text, as [`find`] reads it.
 pub fn resolve(repo: &Repository, text: &str) -> Result<Id, ResolveError> {
+    find(repo, text).map(|(_, id)| id)
+}
+
+/// Reads `text` in the one order a save is named by: a line's name, a server line
+/// `line@server`, a tag's name, the start of a change ID (lowercase `k`-`z`, unique on the
+/// current line), the start of a fingerprint (at least 8 hex digits). Gives where that leads,
+/// and the save. A line or server line whose name a tag at another save has too is refused, as
+/// is a line or tag name that is also the start of another save's ID.
+pub(crate) fn find(repo: &Repository, text: &str) -> Result<(Target, Id), ResolveError> {
     let (_, entry) = repo.current()?;
-    if let Some(id) = line_named(repo, &entry, text)? {
-        return Ok(id);
+    // Read once: it can be large.
+    let tags = repo.tag_list(&entry.state)?;
+    if let Some(line) = line_named(repo, &entry, &tags, text)? {
+        if let Some(tag) = tag_elsewhere(&tags, text, line) {
+            return Err(ResolveError::LineOrTag {
+                text: text.to_owned(),
+                line: shown_save(&line),
+                tag: shown_save(&tag),
+            });
+        }
+        return Ok((Target::Line(text.to_owned()), line));
     }
-    one_of(text, by_id(repo, &entry, text)?)
+    // A line name never holds `@`, so a server line can't be taken for one.
+    if let Some((line, server)) = text.split_once('@') {
+        let servers = repo.server_lines(&entry.state)?;
+        if let Some(&save) = servers.servers.get(server).and_then(|l| l.get(line)) {
+            if let Some(tag) = tag_elsewhere(&tags, text, save) {
+                return Err(ResolveError::ServerLineOrTag {
+                    text: text.to_owned(),
+                    line: shown_save(&save),
+                    tag: shown_save(&tag),
+                });
+            }
+            let target = Target::ServerLine {
+                server: server.to_owned(),
+                line: line.to_owned(),
+                save,
+            };
+            return Ok((target, save));
+        }
+    }
+    let id = match tag_named(repo, &entry, &tags, text)? {
+        Some(id) => id,
+        None => match by_id(repo, &entry, &tags, text)? {
+            (found, Some(damage)) if found.is_empty() => return Err(damage.into()),
+            (found, _) => one_of(text, found)?,
+        },
+    };
+    Ok((Target::Save(id), id))
+}
+
+/// The save of the tag named `text`, if it isn't `save`.
+fn tag_elsewhere(tags: &TagList, text: &str, save: Id) -> Option<Id> {
+    tags.tags.get(text).map(|t| t.save).filter(|t| *t != save)
+}
+
+/// A save as a refusal names it: its fingerprint's first 12 hex digits.
+fn shown_save(id: &Id) -> String {
+    id.to_hex()[..12].to_owned()
 }
 
 /// The save of the line named `text`, if there is one. A name that is also the start of
 /// another save's change ID or fingerprint is refused, so that neither passes for the other.
-pub(crate) fn line_named(
+fn line_named(
     repo: &Repository,
     entry: &DiaryEntry,
+    tags: &TagList,
     text: &str,
 ) -> Result<Option<Id>, ResolveError> {
     let Some(&line) = entry.state.lines.get(text) else {
         return Ok(None);
     };
-    let mut saves: Vec<String> = by_id(repo, entry, text)?
-        .into_iter()
-        .filter(|(id, _)| *id != line)
-        .map(|(_, shown)| shown)
-        .collect();
+    let saves = others_by_id(repo, entry, tags, text, line)?;
     if saves.is_empty() {
         return Ok(Some(line));
     }
-    saves.sort_unstable();
-    saves.dedup();
     Err(ResolveError::LineOrSave {
         text: text.to_owned(),
         saves,
     })
 }
 
-/// The saves `text` names as the start of a change ID or of a fingerprint.
+/// The save of the tag named `text`, if there is one. A name that is also the start of
+/// another save's change ID or fingerprint is refused, as a line's is.
+fn tag_named(
+    repo: &Repository,
+    entry: &DiaryEntry,
+    tags: &TagList,
+    text: &str,
+) -> Result<Option<Id>, ResolveError> {
+    let Some(tag) = tags.tags.get(text) else {
+        return Ok(None);
+    };
+    let saves = others_by_id(repo, entry, tags, text, tag.save)?;
+    if saves.is_empty() {
+        return Ok(Some(tag.save));
+    }
+    Err(ResolveError::TagOrSave {
+        text: text.to_owned(),
+        saves,
+    })
+}
+
+/// The saves other than `own` that `text` names by ID, as shown, sorted and once each.
+fn others_by_id(
+    repo: &Repository,
+    entry: &DiaryEntry,
+    tags: &TagList,
+    text: &str,
+    own: Id,
+) -> Result<Vec<String>, ResolveError> {
+    // A save the wider walk couldn't read doesn't refuse the name: it can't be gone to either.
+    // Any other failure still does.
+    let mut saves: Vec<String> = (by_id(repo, entry, tags, text)?.0)
+        .into_iter()
+        .filter(|(id, _)| *id != own)
+        .map(|(_, shown)| shown)
+        .collect();
+    saves.sort_unstable();
+    saves.dedup();
+    Ok(saves)
+}
+
+/// The saves found, each as it matched, and damage passed over on the way.
+type Found = (Vec<(Id, String)>, Option<RepoError>);
+
+fn is_change_start(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|b| (b'k'..=b'z').contains(&b))
+}
+
+/// The saves `text` names as the start of a change ID or of a fingerprint: on the current line
+/// (a fingerprint: along first parents from any line, server line or tag) first; only when none
+/// is there, through every parent. With them, damage the wider walk passed over.
 fn by_id(
     repo: &Repository,
     entry: &DiaryEntry,
+    tags: &TagList,
     text: &str,
-) -> Result<Vec<(Id, String)>, ResolveError> {
-    if !text.is_empty() && text.bytes().all(|b| (b'k'..=b'z').contains(&b)) {
-        return by_change_prefix(repo, entry, text);
+) -> Result<Found, ResolveError> {
+    let first = if is_change_start(text) {
+        by_change_prefix(repo, entry, text)?
+    } else if is_hex_start(text) {
+        by_fingerprint_prefix(repo, entry, tags, text)?
+    } else {
+        return Ok((Vec::new(), None));
+    };
+    if !first.is_empty() {
+        return Ok((first, None));
     }
-    if is_hex_start(text) {
-        return by_fingerprint_prefix(repo, entry, text);
+    through_every_parent(repo, entry, tags, text)
+}
+
+/// The saves whose change ID or fingerprint starts with `text` among every save that a line, a
+/// server line, a tag or the save the project is at reaches through every parent, each read
+/// once. A save that can't be read ends the walk there but not the search (its fingerprint
+/// still counts); the first such damage comes back with what was found.
+fn through_every_parent(
+    repo: &Repository,
+    entry: &DiaryEntry,
+    tags: &TagList,
+    text: &str,
+) -> Result<Found, ResolveError> {
+    let by_change = is_change_start(text);
+    let hex = text.to_ascii_lowercase();
+    let servers = repo.server_lines(&entry.state)?;
+    let at = match entry.state.position {
+        Position::AtSave(id) => Some(id),
+        Position::OnLine(_) => None,
+    };
+    let mut stack: Vec<Id> = (entry.state.lines.values().copied())
+        .chain(servers.servers.values().flat_map(|l| l.values().copied()))
+        .chain(tags.tags.values().map(|tag| tag.save))
+        .chain(at)
+        .collect();
+    let mut seen = HashSet::new();
+    let (mut found, mut damage) = (Vec::new(), None);
+    while let Some(id) = stack.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        if !by_change && id.to_hex().starts_with(&hex) {
+            found.push((id, id.to_hex()));
+        }
+        match repo.store().save(&id, repo.signatures_allowed()) {
+            Ok(save) => {
+                let letters = save.change_id.to_letters();
+                if by_change && letters.starts_with(text) {
+                    found.push((id, letters));
+                }
+                stack.extend(save.parents.into_iter().filter(|p| !seen.contains(p)));
+            }
+            Err(e) if is_unreadable_record(&e) => {
+                damage.get_or_insert(RepoError::from(e));
+            }
+            Err(e) => return Err(e.into()),
+        }
     }
-    Ok(Vec::new())
+    Ok((found, damage))
 }
 
 #[cfg(test)]
@@ -515,24 +770,35 @@ mod tests {
 
     /// Commits a save with the given parents and change ID, and points `line` at it if given.
     fn plant(repo: &mut Repository, parents: &[Id], start: &str, line: Option<&str>) -> Id {
-        let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
-        let (head, entry) = repo.current().unwrap();
+        let save = save_of(repo, parents, start, "m");
+        plant_save(repo, &save, line)
+    }
+
+    /// A save with the given parents, change ID and message, holding main's folder.
+    fn save_of(repo: &Repository, parents: &[Id], start: &str, message: &str) -> Save {
+        let (_, entry) = repo.current().unwrap();
         let root = repo
             .store()
             .save(&entry.state.lines["main"], false)
             .unwrap()
             .root;
-        let save = Save {
+        Save {
             root,
             parents: parents.to_vec(),
             author: who(),
             saver: who(),
-            message: "m".into(),
+            message: message.into(),
             change_id: change(start),
             move_notes: vec![],
             signature: vec![],
             extra: BTreeMap::from([(EXTRA_LINE.to_owned(), b"main".to_vec())]),
-        };
+        }
+    }
+
+    /// Commits `save`, and points `line` at it if given.
+    fn plant_save(repo: &mut Repository, save: &Save, line: Option<&str>) -> Id {
+        let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
+        let (head, entry) = repo.current().unwrap();
         let mut packs = repo.new_packs().unwrap();
         let id = packs.add_record(ObjectKind::Save, &save.encode()).unwrap();
         let mut state = entry.state.clone();
@@ -728,10 +994,139 @@ mod tests {
             saves: vec!["klmn".into()],
         };
         assert_hostile_text_escaped(&refused.to_string());
+        let refused = ResolveError::TagOrSave {
+            text: HOSTILE.into(),
+            saves: vec!["klmn".into()],
+        };
+        assert_hostile_text_escaped(&refused.to_string());
+        let (line, tag) = ("3f9a1c2b4d5e".to_owned(), "9b8c7d6e5f4a".to_owned());
+        let refused = ResolveError::LineOrTag {
+            text: HOSTILE.into(),
+            line: line.clone(),
+            tag: tag.clone(),
+        };
+        assert_hostile_text_escaped(&refused.to_string());
+        let refused = ResolveError::ServerLineOrTag {
+            text: HOSTILE.into(),
+            line,
+            tag,
+        };
+        assert_hostile_text_escaped(&refused.to_string());
+    }
+
+    /// Gives the save `id` the tag `name` too, as an import may: any name.
+    fn name_tag(repo: &mut Repository, name: &str, id: Id) {
+        use crate::diary::Tag;
+        let lock = repo.lock_for_change("tag", &mut |_| {}).unwrap();
+        let (head, entry) = repo.current().unwrap();
+        let mut list = repo.tag_list(&entry.state).unwrap();
+        let tag = Tag {
+            save: id,
+            message: String::new(),
+            git_tags: vec![],
+        };
+        list.tags.insert(name.to_owned(), tag);
+        let mut packs = repo.new_packs().unwrap();
+        let mut state = entry.state.clone();
+        state.tags = Some(
+            packs
+                .add_record(ObjectKind::TagList, &list.encode())
+                .unwrap(),
+        );
+        let diary = DiaryEntry {
+            parent: Some(head),
+            action: Action::Command,
+            command: "tag".into(),
+            who: who(),
+            opal_version: "0.1.0".into(),
+            state,
+            folder_change: None,
+        };
+        repo.commit(&lock, packs, &diary).unwrap();
     }
 
     #[test]
-    fn a_fingerprint_prefix_finds_saves_on_any_line_but_not_through_a_second_parent() {
+    fn a_line_wins_over_a_tag_of_the_same_name_at_its_save() {
+        use crate::lines::{Target, resolve_target};
+        let (_dir, mut repo, ids) = project_with(&["lmnopq"]);
+        name_line(&mut repo, "v1.0", ids[0]);
+        name_tag(&mut repo, "v1.0", ids[0]);
+        assert_eq!(resolve(&repo, "v1.0").unwrap(), ids[0]);
+        assert_eq!(
+            resolve_target(&repo, "v1.0").unwrap(),
+            Target::Line("v1.0".into())
+        );
+        // A tag alone is its save, and not a line.
+        name_tag(&mut repo, "release/1", ids[0]);
+        assert_eq!(resolve(&repo, "release/1").unwrap(), ids[0]);
+        assert_eq!(
+            resolve_target(&repo, "release/1").unwrap(),
+            Target::Save(ids[0])
+        );
+    }
+
+    #[test]
+    fn a_tag_named_like_the_start_of_another_saves_id_is_refused() {
+        let (_dir, mut repo, ids) = project_with(&["lmnopq"]);
+        let hex = ids[0].to_hex()[..8].to_owned();
+        name_tag(&mut repo, &hex, ids[1]);
+        let refused = resolve(&repo, &hex).unwrap_err();
+        match &refused {
+            ResolveError::TagOrSave { saves, .. } => assert_eq!(saves, &[ids[0].to_hex()]),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(
+            refused.to_string(),
+            format!(
+                "\"{hex}\" is the name of a tag and also the start of another save's ID ({}), so \
+                 Opalro didn't pick either.",
+                ids[0].to_hex()
+            )
+        );
+        assert_eq!(
+            refused.hint().unwrap(),
+            "To reach the save, type more of its ID; opalro history --json gives the whole change \
+             ID and fingerprint. To reach the tag's save, take its ID from: opalro tag"
+        );
+        let target = crate::lines::resolve_target(&repo, &hex);
+        assert!(matches!(target, Err(ResolveError::TagOrSave { .. })));
+        // A tag named like the start of its own save's IDs is just the tag.
+        let own = ids[1].to_hex()[..8].to_owned();
+        name_tag(&mut repo, &own, ids[1]);
+        assert_eq!(resolve(&repo, &own).unwrap(), ids[1]);
+    }
+
+    #[test]
+    fn a_tag_holding_an_at_sign_is_found_when_no_server_line_matches() {
+        use crate::lines::{Target, resolve_target};
+        let (_dir, mut repo, ids) = project_with(&["lmnopq"]);
+        name_tag(&mut repo, "v1@home", ids[0]);
+        assert_eq!(
+            resolve_target(&repo, "v1@home").unwrap(),
+            Target::Save(ids[0])
+        );
+        assert!(matches!(
+            resolve_target(&repo, "v2@home"),
+            Err(ResolveError::NotFound(_))
+        ));
+    }
+
+    #[test]
+    fn a_line_or_save_refusal_hints_at_renaming_the_line() {
+        let refused = ResolveError::LineOrSave {
+            text: "mnop".into(),
+            saves: vec!["mnopqr".into()],
+        };
+        assert!(
+            refused
+                .hint()
+                .unwrap()
+                .ends_with(" To reach the line by another name: opalro line rename <old> <new>")
+        );
+    }
+
+    #[test]
+    fn a_fingerprint_prefix_finds_saves_on_any_line_and_through_a_second_parent() {
         let (_dir, mut repo, ids) = project_with(&["kkkk"]);
         let (first, tip) = (ids[0], ids[1]);
         let side = plant(&mut repo, &[first], "lmno", Some("side"));
@@ -739,16 +1134,298 @@ mod tests {
         let lone = plant(&mut repo, &[first], "mnop", None);
         let merge = plant(&mut repo, &[tip, lone], "nopq", Some("main"));
         let prefix = |id: &Id| id.to_hex()[..8].to_uppercase();
-        for found in [first, tip, side, merge] {
+        for found in [first, tip, side, merge, lone] {
             assert_eq!(resolve(&repo, &prefix(&found)).unwrap(), found);
         }
         assert!(matches!(
-            resolve(&repo, &prefix(&lone)),
-            Err(ResolveError::NotFound(_))
-        ));
-        assert!(matches!(
             resolve(&repo, "0123456"),
             Err(ResolveError::NotFound(_))
+        ));
+    }
+
+    /// Gives the save `id` the server line `line@server`.
+    fn name_server_line(repo: &mut Repository, server: &str, line: &str, id: Id) {
+        use crate::diary::ServerLines;
+        let lock = repo.lock_for_change("fetch", &mut |_| {}).unwrap();
+        let (head, entry) = repo.current().unwrap();
+        let servers = ServerLines {
+            servers: [(server.to_owned(), [(line.to_owned(), id)].into())].into(),
+        };
+        let mut packs = repo.new_packs().unwrap();
+        let mut state = entry.state.clone();
+        state.server_lines = Some(
+            packs
+                .add_record(ObjectKind::ServerLines, &servers.encode())
+                .unwrap(),
+        );
+        let diary = DiaryEntry {
+            parent: Some(head),
+            action: Action::Command,
+            command: "fetch".into(),
+            who: who(),
+            opal_version: "0.1.0".into(),
+            state,
+            folder_change: None,
+        };
+        repo.commit(&lock, packs, &diary).unwrap();
+    }
+
+    /// Puts the save `id` on the shelf, as `shelf` would, without touching the folder.
+    fn shelve(repo: &mut Repository, id: Id) {
+        let lock = repo.lock_for_change("shelf", &mut |_| {}).unwrap();
+        let (head, entry) = repo.current().unwrap();
+        let mut state = entry.state.clone();
+        state.shelves.insert(0, ("put away".to_owned(), id));
+        let diary = DiaryEntry {
+            parent: Some(head),
+            action: Action::Command,
+            command: "shelf".into(),
+            who: who(),
+            opal_version: "0.1.0".into(),
+            state,
+            folder_change: None,
+        };
+        let packs = repo.new_packs().unwrap();
+        repo.commit(&lock, packs, &diary).unwrap();
+    }
+
+    #[test]
+    fn a_save_reached_only_through_a_second_parent_is_found() {
+        let (_dir, mut repo, ids) = project_with(&["kkkk"]);
+        let lone = plant(&mut repo, &[ids[0]], "mnopqr", None);
+        let merge = plant(&mut repo, &[ids[1], lone], "nopqrs", Some("main"));
+        assert_eq!(resolve(&repo, "mnopqr").unwrap(), lone);
+        assert_eq!(resolve(&repo, &lone.to_hex()[..8]).unwrap(), lone);
+        // The save the project is at counts too, when no line has it.
+        let behind = plant(&mut repo, &[ids[0]], "opqrst", None);
+        let at = plant(&mut repo, &[merge, behind], "pqrstu", None);
+        set_position(&mut repo, Position::AtSave(at));
+        assert_eq!(resolve(&repo, "opqrst").unwrap(), behind);
+        assert_eq!(resolve(&repo, &behind.to_hex()[..8]).unwrap(), behind);
+        assert_eq!(resolve(&repo, &at.to_hex()[..8]).unwrap(), at);
+    }
+
+    #[test]
+    fn a_line_named_like_a_save_reached_only_through_a_second_parent_is_refused() {
+        let (_dir, mut repo, ids) = project_with(&["kkkk"]);
+        let lone = plant(&mut repo, &[ids[0]], "mnopqr", None);
+        plant(&mut repo, &[ids[1], lone], "nopqrs", Some("main"));
+        // No line has `lone` on its first parents; a line elsewhere takes the start of its ID.
+        let name = repo
+            .store()
+            .save(&lone, false)
+            .unwrap()
+            .change_id
+            .to_letters()[..12]
+            .to_owned();
+        name_line(&mut repo, &name, ids[1]);
+        match resolve(&repo, &name) {
+            Err(ResolveError::LineOrSave { saves, .. }) => assert_eq!(saves, [letters("mnopqr")]),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn the_line_comes_first_so_a_short_id_history_printed_still_works() {
+        let (_dir, mut repo, ids) = project_with(&["lmnopl"]);
+        let lone = plant(&mut repo, &[ids[0]], "lmnopk", None);
+        plant(&mut repo, &[ids[1], lone], "nopqrs", Some("main"));
+        assert_eq!(resolve(&repo, "lmnop").unwrap(), ids[1]);
+        let short = short_change_id(&repo, &ids[1], &change("lmnopl")).unwrap();
+        assert_eq!(resolve(&repo, &short).unwrap(), ids[1]);
+        assert_eq!(resolve(&repo, "lmnopk").unwrap(), lone);
+    }
+
+    #[test]
+    fn several_found_elsewhere_are_listed() {
+        let (_dir, mut repo, ids) = project_with(&["kkkk"]);
+        let one = plant(&mut repo, &[ids[0]], "mnopqk", None);
+        let two = plant(&mut repo, &[ids[0]], "mnopql", None);
+        let merge = plant(&mut repo, &[ids[1], one], "nopqrs", Some("main"));
+        plant(&mut repo, &[merge, two], "opqrst", Some("main"));
+        match resolve(&repo, "mnopq") {
+            Err(ResolveError::Ambiguous { candidates, .. }) => {
+                assert_eq!(candidates, [letters("mnopqk"), letters("mnopql")]);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_tags_or_server_lines_history_counts() {
+        let (_dir, mut repo, ids) = project_with(&[]);
+        let by_tag = plant(&mut repo, &[ids[0]], "mnopqr", None);
+        let tagged = plant(&mut repo, &[ids[0], by_tag], "nopqrs", None);
+        name_tag(&mut repo, "v1.0", tagged);
+        let by_server = plant(&mut repo, &[ids[0]], "opqrst", None);
+        let fetched = plant(&mut repo, &[ids[0], by_server], "pqrstu", None);
+        name_server_line(&mut repo, "origin", "main", fetched);
+        for (start, found) in [("mnopqr", by_tag), ("opqrst", by_server)] {
+            assert_eq!(resolve(&repo, start).unwrap(), found);
+            assert_eq!(resolve(&repo, &found.to_hex()[..8]).unwrap(), found);
+        }
+    }
+
+    #[test]
+    fn a_save_only_a_shelf_holds_is_not_found() {
+        let (_dir, mut repo, ids) = project_with(&[]);
+        let shelved = plant(&mut repo, &[ids[0]], "mnopqr", None);
+        shelve(&mut repo, shelved);
+        for text in ["mnopqr".to_owned(), shelved.to_hex()[..8].to_owned()] {
+            assert!(
+                matches!(resolve(&repo, &text), Err(ResolveError::NotFound(_))),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_save_only_an_undone_step_holds_is_not_found() {
+        let (_dir, mut repo, ids) = project_with(&["kkkk"]);
+        let undone = plant(&mut repo, &[ids[1]], "mnopqr", Some("main"));
+        move_line(&mut repo, "main", ids[1]);
+        for text in ["mnopqr".to_owned(), undone.to_hex()[..8].to_owned()] {
+            assert!(
+                matches!(resolve(&repo, &text), Err(ResolveError::NotFound(_))),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_first_parents_come_first_for_a_fingerprint_too() {
+        use crate::id::{Flavor, hash_record};
+        let (_dir, mut repo, ids) = project_with(&["kkkk"]);
+        // Two saves whose fingerprints share 8 hex digits, found by trying messages.
+        let mut tried = std::collections::HashMap::new();
+        let base = save_of(&repo, &[ids[0]], "mnop", "");
+        let save = |n: u32| Save {
+            message: n.to_string(),
+            ..base.clone()
+        };
+        let (one, two) = (0u32..)
+            .find_map(|n| {
+                let id = hash_record(Flavor::Save, &save(n).encode());
+                let start = u32::from_be_bytes(id.0[..4].try_into().unwrap());
+                tried
+                    .insert(start, n)
+                    .map(|earlier| (save(earlier), save(n)))
+            })
+            .unwrap();
+        let on_side = plant_save(&mut repo, &one, Some("side"));
+        let lone = plant_save(&mut repo, &two, None);
+        plant(&mut repo, &[ids[1], lone], "nopq", Some("main"));
+        let start = on_side.to_hex()[..8].to_owned();
+        assert_eq!(lone.to_hex()[..8], start);
+        assert_eq!(resolve(&repo, &start).unwrap(), on_side);
+        // Past the first step, both are there.
+        let (_, entry) = repo.current().unwrap();
+        let tags = repo.tag_list(&entry.state).unwrap();
+        let (found, _) = through_every_parent(&repo, &entry, &tags, &start).unwrap();
+        assert_eq!(found.len(), 2);
+    }
+
+    #[test]
+    fn a_miss_reads_each_save_once() {
+        // Lines, a tag and a server line that overlap, and saves reached by several paths.
+        let (_dir, mut repo, ids) = project_with(&["lmno", "lmnp", "lmnq"]);
+        let s1 = plant(&mut repo, &[ids[1]], "mnok", Some("side"));
+        let s2 = plant(&mut repo, &[s1], "mnol", Some("side"));
+        let m1 = plant(&mut repo, &[ids[3], s2], "nopk", Some("main"));
+        let x = plant(&mut repo, &[ids[2]], "nopl", None);
+        plant(&mut repo, &[m1, x, s1], "nopm", Some("main"));
+        name_tag(&mut repo, "v1.0", s1);
+        name_server_line(&mut repo, "origin", "side", s2);
+        let saves = 9;
+        let reads = |repo: &Repository, f: &mut dyn FnMut()| {
+            let before = repo.store().saves_read();
+            f();
+            repo.store().saves_read() - before
+        };
+        for text in ["zzzzzz", "000000000000"] {
+            let missed = || matches!(resolve(&repo, text), Err(ResolveError::NotFound(_)));
+            assert!(missed(), "{text}");
+            let (_, entry) = repo.current().unwrap();
+            let tags = repo.tag_list(&entry.state).unwrap();
+            let first = reads(&repo, &mut || {
+                if is_hex_start(text) {
+                    by_fingerprint_prefix(&repo, &entry, &tags, text).unwrap();
+                } else {
+                    by_change_prefix(&repo, &entry, text).unwrap();
+                }
+            });
+            let all = reads(&repo, &mut || assert!(missed(), "{text}"));
+            assert!(all - first <= saves, "{text}: {all} - {first}");
+            let wide = reads(&repo, &mut || {
+                let (found, damage) = through_every_parent(&repo, &entry, &tags, text).unwrap();
+                assert!(found.is_empty() && damage.is_none());
+            });
+            assert_eq!(wide, saves, "{text}");
+        }
+    }
+
+    #[test]
+    fn a_save_that_cant_be_read_is_told_only_when_nothing_is_found() {
+        let (_dir, mut repo, ids) = project_with(&["kkkk"]);
+        let missing = Id([7; 32]);
+        // A save whose parent isn't in the store, and a tag at a save that isn't.
+        let orphan = plant(&mut repo, &[missing], "mnopqr", None);
+        plant(&mut repo, &[ids[1], orphan], "nopqrs", Some("main"));
+        name_tag(&mut repo, "v1.0", Id([8; 32]));
+        assert_eq!(resolve(&repo, "mnopqr").unwrap(), orphan);
+        assert_eq!(resolve(&repo, &orphan.to_hex()[..8]).unwrap(), orphan);
+        for text in ["zzzzzz", "000000000000"] {
+            assert!(
+                matches!(resolve(&repo, text), Err(ResolveError::Repo(_))),
+                "{text}"
+            );
+        }
+        // A name is still the line's: the damage hides nothing a line could be taken for.
+        name_line(&mut repo, "qqqqqqqqqqqqqqqq", ids[1]);
+        assert_eq!(resolve(&repo, "qqqqqqqqqqqqqqqq").unwrap(), ids[1]);
+    }
+
+    // Reading a name reads the tag list once, whatever the name turns out to be: a line, a tag,
+    // hex text, or a line refused as a tag's name too.
+    #[test]
+    fn reading_a_name_reads_the_tag_list_once_whatever_it_names() {
+        use crate::repo::TAG_LISTS_READ;
+        let (_dir, mut repo, ids) = project_with(&["lmnopq"]);
+        name_tag(&mut repo, "rel-1", ids[0]);
+        let hex = ids[0].to_hex()[..8].to_owned();
+        for name in ["main", "rel-1", hex.as_str()] {
+            let before = TAG_LISTS_READ.get();
+            resolve(&repo, name).unwrap();
+            assert_eq!(TAG_LISTS_READ.get() - before, 1, "{name}");
+        }
+        // A line that is also a tag at another save is refused after one read too.
+        name_tag(&mut repo, "main", ids[0]);
+        let before = TAG_LISTS_READ.get();
+        assert!(matches!(
+            resolve(&repo, "main"),
+            Err(ResolveError::LineOrTag { .. })
+        ));
+        assert_eq!(TAG_LISTS_READ.get() - before, 1);
+    }
+
+    #[test]
+    fn saves_off_the_lines_that_share_a_start_are_more_than_one() {
+        // No two saves can be made to share 8 digits, so the empty start stands in for one.
+        let (_dir, mut repo, ids) = project_with(&[]);
+        let behind = plant(&mut repo, &[ids[0]], "lmno", None);
+        let tagged = plant(&mut repo, &[behind], "mnop", None);
+        name_tag(&mut repo, "rel-1", tagged);
+        let (_, entry) = repo.current().unwrap();
+        let tags = repo.tag_list(&entry.state).unwrap();
+        let found = by_fingerprint_prefix(&repo, &entry, &tags, "").unwrap();
+        let mut all: Vec<Id> = found.iter().map(|(id, _)| *id).collect();
+        all.sort_unstable();
+        let mut want = vec![ids[0], behind, tagged];
+        want.sort_unstable();
+        assert_eq!(all, want);
+        assert!(matches!(
+            one_of("", found),
+            Err(ResolveError::Ambiguous { candidates, .. }) if candidates.len() == 3
         ));
     }
 
@@ -782,6 +1459,7 @@ mod tests {
         let mut reads = 0;
         let mut visited = Vec::new();
         each_once(
+            &mut HashSet::new(),
             (0..100_000).map(|_| numbered(299)),
             |id| {
                 reads += 1;
@@ -805,6 +1483,7 @@ mod tests {
         let tips = [49, 20, 89, 49, 9, 60, 0].map(numbered);
         let (mut reads, mut visited) = (0, Vec::new());
         each_once(
+            &mut HashSet::new(),
             tips,
             |id| {
                 reads += 1;
@@ -821,6 +1500,7 @@ mod tests {
     #[test]
     fn a_walk_that_fails_stops_with_the_error() {
         let result = each_once(
+            &mut HashSet::new(),
             [numbered(5)],
             |id| {
                 if number(id) == 3 {
@@ -1187,13 +1867,15 @@ mod tests {
     #[test]
     fn a_list_with_another_line_s_save_changes_no_answer() {
         let (dir, mut repo, ids) = project_with(&["klmnopl", "klmnopk", "mmmm"]);
-        let side = plant(&mut repo, &[ids[1]], "nopqrs", Some("side"));
+        // Saves on no line, so only a believed list could find them.
+        let stray = plant(&mut repo, &[ids[1]], "nopqrs", None);
         let mut lie = true_line(&repo);
-        lie[1] = (side, change("nopqrs"));
+        lie[1] = (stray, change("nopqrs"));
         let (cached, cold) = resolved(dir.path(), &repo, &lie, "nopqr");
         assert_eq!(cached, cold);
-        // A line name that a planted save's change ID starts with still names the line.
-        let work = plant(&mut repo, &[ids[0]], "workkk", Some("elsewhere"));
+        assert!(cold.starts_with("Err(NotFound"), "{cold}");
+        // A line name that a listed stray's change ID starts with still names the line.
+        let work = plant(&mut repo, &[ids[0]], "workkk", None);
         name_line(&mut repo, "work", ids[1]);
         let mut lie = true_line(&repo);
         lie[1] = (work, change("workkk"));
@@ -1289,281 +1971,25 @@ mod tests {
         }
     }
 
-    /// Whether a line other than `main` holds `main`'s newest save or reaches its change ID.
+    /// Whether a line other than `main` has `main`'s newest save in its history, through every
+    /// parent.
     fn shown_elsewhere(repo: &Repository) -> bool {
         let lines = repo.current().unwrap().1.state.lines;
         let tip = lines["main"];
-        let change_id = repo.store().save(&tip, false).unwrap().change_id;
-        lines
-            .iter()
+        let mut todo: Vec<Id> = (lines.iter())
             .filter(|(name, _)| *name != "main")
-            .any(|(_, &other)| {
-                other == tip || chain(repo, other).any(|s| s.unwrap().1.change_id == change_id)
-            })
-    }
-
-    #[test]
-    fn an_amend_asks_each_line_without_building_it_a_list() {
-        let starts: Vec<String> = (0..29u8)
-            .map(|n| format!("{}{}", char::from(b'k' + n / 16), char::from(b'k' + n % 16)))
+            .map(|(_, id)| *id)
             .collect();
-        let starts: Vec<&str> = starts.iter().map(String::as_str).collect();
-        let (_dir, mut repo, ids) = project_with(&starts);
-        let tip = ids[29];
-        let mut side_saves = 0;
-        for n in 0..11 {
-            name_line(&mut repo, &format!("at{n:02}"), ids[n * 2]);
-        }
-        for n in 0..5 {
-            name_line(&mut repo, &format!("amended{n}"), tip);
-        }
-        // Lines of a few saves of their own on a save of main, and two that share one.
-        for (n, &on) in ids.iter().take(20).enumerate() {
-            let mut top = on;
-            for _ in 0..=n % 3 {
-                top = plant(&mut repo, &[top], "pppp", None);
-                side_saves += 1;
+        let mut seen = std::collections::HashSet::new();
+        while let Some(id) = todo.pop() {
+            if id == tip {
+                return true;
             }
-            name_line(&mut repo, &format!("side{n:02}"), top);
+            if seen.insert(id) {
+                todo.extend(repo.store().save(&id, false).unwrap().parents);
+            }
         }
-        let shared = plant(&mut repo, &[ids[4]], "qqqq", Some("shared"));
-        plant(&mut repo, &[shared], "rrrr", Some("shared2"));
-        side_saves += 2;
-        // A history that never meets main's.
-        let alone = plant(&mut repo, &[], "ssss", None);
-        plant(&mut repo, &[alone], "tttt", Some("alone"));
-        side_saves += 2;
-        // Another save with the amended save's change ID, as an undone amend leaves.
-        plant(&mut repo, &[ids[6]], starts[28], Some("twin"));
-        side_saves += 1;
-        // A line of two saves of its own on the amended save.
-        let above = plant(&mut repo, &[tip], "uuuu", None);
-        plant(&mut repo, &[above], "uuuu", Some("above"));
-        side_saves += 2;
-        assert_eq!(repo.current().unwrap().1.state.lines.len(), 42);
-        let by = asked_as_walked(&repo, side_saves);
-        for shown in ["twin", "amended0", "above"] {
-            assert!(by.contains(&format!("line {shown}")), "{shown}: {by:?}");
-        }
-        assert!(!by.contains(&"line side00".to_owned()), "{by:?}");
-    }
-
-    #[test]
-    fn an_amend_finds_a_line_between_two_saves_of_its_change_id() {
-        // `main` holds the amended save's change ID twice, at its newest save and two back.
-        let (_dir, mut repo, ids) = project_with(&["kkkk", "klkk", "zzzz", "kmkk", "zzzz"]);
-        name_line(&mut repo, "between", ids[4]);
-        plant(&mut repo, &[ids[4]], "uuuu", Some("between2"));
-        name_line(&mut repo, "older", ids[2]);
-        plant(&mut repo, &[ids[2]], "uuuu", Some("older2"));
-        let by = asked_as_walked(&repo, 2);
-        assert_eq!(by, ["line between", "line between2"]);
-    }
-
-    /// The lines `shown_elsewhere` names for an amend of `main`'s newest save, checked against
-    /// walking each line whole; that only `main` gains a list; and that no more saves are read
-    /// than the `on_no_list` saves no line's list holds.
-    fn asked_as_walked(repo: &Repository, on_no_list: usize) -> Vec<String> {
-        let state = repo.current().unwrap().1.state;
-        let tip = state.lines["main"];
-        let save = repo.store().save(&tip, false).unwrap();
-        let expected: Vec<String> = state
-            .lines
-            .iter()
-            .filter(|(name, _)| *name != "main")
-            .filter(|&(_, &other)| {
-                other == tip || chain(repo, other).any(|s| s.unwrap().1.change_id == save.change_id)
-            })
-            .map(|(name, _)| format!("line {name}"))
-            .collect();
-        cached_line(repo);
-        let mut cache = ChangeIds::load(repo);
-        let before = repo.store().saves_read();
-        let by =
-            crate::snapshot::shown_elsewhere(repo, &mut cache, &state, "main", tip, &save).unwrap();
-        let read = repo.store().saves_read() - before;
-        assert_eq!(by, expected);
-        assert!(
-            read <= on_no_list,
-            "{read} saves read, {on_no_list} on no list"
-        );
-        assert!(cache.get("main").is_some());
-        for name in state.lines.keys().filter(|name| *name != "main") {
-            assert!(cache.get(name).is_none(), "{name}");
-        }
-        by
-    }
-
-    /// What `shown_elsewhere` names for an amend of `line`'s newest save, and the saves it read.
-    fn shown_for(repo: &Repository, line: &str) -> (Vec<String>, usize) {
-        let state = repo.current().unwrap().1.state;
-        let tip = state.lines[line];
-        let save = repo.store().save(&tip, false).unwrap();
-        let mut cache = ChangeIds::load(repo);
-        let before = repo.store().saves_read();
-        let by =
-            crate::snapshot::shown_elsewhere(repo, &mut cache, &state, line, tip, &save).unwrap();
-        cache.store(repo, &state);
-        (by, repo.store().saves_read() - before)
-    }
-
-    /// Plants `n` saves of their own on `on`, the last as the line `name`, and returns them,
-    /// oldest first.
-    fn side_line(repo: &mut Repository, name: &str, on: Id, start: &str, n: usize) -> Vec<Id> {
-        let mut saves = vec![];
-        let mut top = on;
-        for k in 0..n {
-            top = plant(repo, &[top], start, (k + 1 == n).then_some(name));
-            saves.push(top);
-        }
-        saves
-    }
-
-    #[test]
-    fn a_second_amend_reads_no_save_of_a_line_that_has_not_moved() {
-        let (dir, mut repo, ids) = project_with(&["kkkk", "klkk", "kmkk"]);
-        side_line(&mut repo, "old", ids[1], "pppp", 20);
-        cached_line(&repo);
-        let (by, first) = shown_for(&repo, "main");
-        assert!(by.is_empty(), "{by:?}");
-        assert!(first >= 20, "{first}");
-        assert_eq!(shown_for(&repo, "main"), (vec![], 0));
-        // An amend moves main; the side line's run still meets main's list.
-        assert!(save_through(&mut repo, "again", true).is_some());
-        cached_line(&repo);
-        assert_eq!(shown_for(&repo, "main"), (vec![], 0));
-        // With the file gone, the line is read again.
-        std::fs::remove_file(dir.path().join(".opalro/cache/other-lines")).unwrap();
-        assert!(shown_for(&repo, "main").1 >= 20);
-    }
-
-    /// What `shown_elsewhere` names for an amend of `line`, with `cache/other-lines` as it is and
-    /// with it deleted, both checked against walking each line whole.
-    fn named_both_ways(dir: &std::path::Path, repo: &Repository, line: &str) -> Vec<String> {
-        let state = repo.current().unwrap().1.state;
-        let tip = state.lines[line];
-        let change_id = repo.store().save(&tip, false).unwrap().change_id;
-        let walked: Vec<String> = state
-            .lines
-            .iter()
-            .filter(|(name, _)| *name != line)
-            .filter(|&(_, &other)| {
-                other == tip || chain(repo, other).any(|s| s.unwrap().1.change_id == change_id)
-            })
-            .map(|(name, _)| format!("line {name}"))
-            .collect();
-        let file = dir.join(".opalro/cache/other-lines");
-        let kept = std::fs::read(&file).ok();
-        let _ = std::fs::remove_file(&file);
-        let cold = shown_for(repo, line).0;
-        match kept {
-            Some(bytes) => std::fs::write(&file, bytes).unwrap(),
-            None => std::fs::remove_file(&file).unwrap(),
-        }
-        let warm = shown_for(repo, line).0;
-        assert_eq!(cold, walked);
-        assert_eq!(warm, walked);
-        warm
-    }
-
-    #[test]
-    fn the_amend_check_names_the_same_lines_with_kept_runs_and_without() {
-        let (dir, mut repo, ids) = project_with(&["kkkk", "klkk", "kmkk", "knkk", "kokk"]);
-        let check = |repo: &Repository, line: &str| named_both_ways(dir.path(), repo, line);
-        // A line off main below the amended save, and one off the middle of that line's run.
-        let below = side_line(&mut repo, "below", ids[2], "qqqq", 3);
-        side_line(&mut repo, "off-run", below[1], "rrrr", 2);
-        assert!(check(&repo, "main").is_empty());
-        assert!(check(&repo, "main").is_empty());
-        assert!(save_through(&mut repo, "amended", true).is_some());
-        // A line whose own saves hold the amended save's change ID, as an undone amend leaves.
-        let twin = plant(&mut repo, &[ids[1]], "kokk", None);
-        side_line(&mut repo, "twin", twin, "pppp", 2);
-        assert_eq!(check(&repo, "main"), ["line twin"]);
-        assert_eq!(check(&repo, "main"), ["line twin"]);
-        // A line that moved after its run was kept.
-        plant(&mut repo, &[below[2]], "kokk", Some("below"));
-        assert_eq!(check(&repo, "main"), ["line below", "line twin"]);
-        // Amending another line, where main is one of the others.
-        set_position(&mut repo, Position::OnLine("off-run".into()));
-        let off_run = repo.current().unwrap().1.state.lines["off-run"];
-        side_line(&mut repo, "copy", off_run, "rrrr", 1);
-        assert_eq!(check(&repo, "off-run"), ["line copy"]);
-        assert_eq!(check(&repo, "off-run"), ["line copy"]);
-        // Main has a list in `cache/change-ids`, so it is answered from that, with no run.
-        let main = repo.current().unwrap().1.state.lines["main"];
-        assert!(
-            crate::otherlines::OtherLines::load(&repo)
-                .run(&main)
-                .is_none()
-        );
-        assert_eq!(check(&repo, "below"), ["line main", "line twin"]);
-    }
-
-    #[test]
-    fn a_run_that_goes_on_into_the_amended_line_s_list_is_named_through_it() {
-        // Main's newest save and the one two below it share a change ID.
-        let (dir, mut repo, ids) = project_with(&["kkkk", "klkk", "zzzz", "kmkk", "zzzz"]);
-        side_line(&mut repo, "side", ids[4], "pppp", 2);
-        side_line(&mut repo, "below", ids[2], "pppp", 2);
-        cached_line(&repo);
-        for _ in 0..2 {
-            assert_eq!(named_both_ways(dir.path(), &repo, "main"), ["line side"]);
-        }
-        let side = repo.current().unwrap().1.state.lines["side"];
-        let kept = crate::otherlines::OtherLines::load(&repo);
-        assert_eq!(kept.run(&side).unwrap().next, Some(ids[4]));
-    }
-
-    #[test]
-    fn a_run_that_goes_on_to_no_save_is_walked_again() {
-        let (dir, mut repo, ids) = project_with(&["kkkk", "klkk", "kmkk"]);
-        // A side line that holds main's change ID four saves below its newest.
-        let twin = plant(&mut repo, &[ids[1]], "kmkk", None);
-        let side = side_line(&mut repo, "side", twin, "pppp", 4);
-        let tip = side[3];
-        let change_id = repo.store().save(&tip, false).unwrap().change_id;
-        // An ID nothing has, and a folder listing's.
-        let listing = repo.store().save(&tip, false).unwrap().root;
-        let file = dir.path().join(".opalro/cache/other-lines");
-        cached_line(&repo);
-        for wrong in [Id([0x5a; 32]), listing] {
-            let mut lie = crate::otherlines::OtherLines::default();
-            lie.add(tip, &[(tip, change_id)], Some(wrong));
-            std::fs::write(&file, crate::keyed::seal(&KEY, &lie.encode())).unwrap();
-            let (by, _) = shown_for(&repo, "main");
-            assert_eq!(by, ["line side"]);
-            let kept = crate::otherlines::OtherLines::load(&repo);
-            let run = kept.run(&tip).unwrap();
-            assert_eq!(run.saves.len(), 5);
-            assert_eq!(run.next, Some(ids[1]));
-            assert_eq!(shown_for(&repo, "main"), (vec!["line side".to_owned()], 0));
-            std::fs::remove_file(&file).unwrap();
-            assert_eq!(shown_for(&repo, "main").0, ["line side"]);
-        }
-    }
-
-    #[test]
-    fn a_run_that_starts_at_no_line_s_newest_save_is_not_used() {
-        let (dir, mut repo, ids) = project_with(&["kkkk", "klkk"]);
-        let below = side_line(&mut repo, "below", ids[0], "qqqq", 3);
-        let off = side_line(&mut repo, "off", below[1], "rrrr", 1);
-        let tip = repo.current().unwrap().1.state.lines["main"];
-        let change_id = repo.store().save(&tip, false).unwrap().change_id;
-        // Under a good seal, runs that say main's change ID is on `below` and `off` past their
-        // newest save.
-        let mut lie = crate::otherlines::OtherLines::default();
-        lie.add(below[1], &[(below[1], change_id)], None);
-        lie.add(below[0], &[(below[0], change_id)], None);
-        assert!(lie.run(&off[0]).is_none());
-        let file = dir.path().join(".opalro/cache/other-lines");
-        std::fs::write(&file, crate::keyed::seal(&KEY, &lie.encode())).unwrap();
-        assert!(shown_for(&repo, "main").0.is_empty());
-        // A lie at a line's newest save is believed: the seal is what it is trusted for.
-        let mut lie = crate::otherlines::OtherLines::default();
-        lie.add(off[0], &[(off[0], change_id)], None);
-        std::fs::write(&file, crate::keyed::seal(&KEY, &lie.encode())).unwrap();
-        assert_eq!(shown_for(&repo, "main").0, ["line off"]);
+        false
     }
 
     /// Puts the project at `position`, as `goto` would, without touching the folder.

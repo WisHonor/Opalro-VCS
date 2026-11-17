@@ -1,0 +1,69 @@
+---
+source: crates/opal-vcs/tests/combine.rs
+expression: "support::masked(doc)"
+---
+{
+  "conflict_count": 3,
+  "conflicts": [
+    {
+      "clash": "changed_on_both",
+      "path": "a.txt",
+      "places": 1,
+      "stands": "markers",
+      "why": "overlap"
+    },
+    {
+      "clash": "changed_and_removed",
+      "path": "gone.txt",
+      "places": null,
+      "stands": "nothing",
+      "why": null
+    },
+    {
+      "clash": "changed_on_both",
+      "path": "pic.png",
+      "places": null,
+      "stands": "yours",
+      "why": "binary"
+    }
+  ],
+  "holds_conflicts": true,
+  "line": "main",
+  "merged_files": [],
+  "more_conflicts": 0,
+  "not_written": [],
+  "opalro_json": 1,
+  "placeholders": [],
+  "removed": 0,
+  "result": "combined",
+  "safety_copies": 0,
+  "save": {
+    "author": {
+      "email": "test@example.com",
+      "name": "Test",
+      "time_ms": "[redacted]",
+      "tz_offset_min": "[redacted]"
+    },
+    "change_id": "[redacted]",
+    "change_id_short": "[redacted]",
+    "id": "[redacted]",
+    "line": "main",
+    "message": "Combine side into main",
+    "parents": [
+      "[redacted]",
+      "[redacted]"
+    ],
+    "saver": {
+      "email": "test@example.com",
+      "name": "Test",
+      "time_ms": "[redacted]",
+      "tz_offset_min": "[redacted]"
+    }
+  },
+  "starts": [
+    "[redacted]"
+  ],
+  "warnings": [],
+  "with": "[redacted]",
+  "written": 1
+}

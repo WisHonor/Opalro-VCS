@@ -1,10 +1,13 @@
 //! Opalro's engine library: objects, storage and history. No `unsafe` code is allowed here.
 #![forbid(unsafe_code)]
 
+pub mod ancestry;
 pub mod changeids;
 pub mod changes;
 pub mod chunks;
+pub mod combine;
 pub mod config;
+pub mod conflict;
 pub mod diary;
 pub mod diff;
 pub mod drive;
@@ -20,15 +23,17 @@ pub(crate) mod ingest;
 pub mod journal;
 pub(crate) mod kept;
 pub mod keyed;
+pub mod lastmade;
 pub mod lines;
 pub mod link;
 pub mod listing;
 pub mod merge;
+pub(crate) mod moves;
 pub mod names;
-pub mod otherlines;
 pub mod pack;
 pub mod presets;
 pub mod repo;
+pub mod resolve;
 pub mod rules;
 pub mod safe_fs;
 pub mod save;
@@ -39,12 +44,14 @@ pub mod snapshot;
 pub mod status;
 pub mod store;
 pub mod switch;
+pub mod tags;
 pub mod text;
 pub mod tidy;
 pub(crate) mod timeline;
 pub mod undo;
 pub mod verify;
 pub mod warning;
+pub mod who;
 pub mod workers;
 pub mod writeout;
 

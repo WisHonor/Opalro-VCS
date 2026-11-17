@@ -1,0 +1,152 @@
+//! RT20 exploration: `common_starts` against brute force on random histories.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+use std::collections::HashSet;
+
+use opal_core::ancestry::{MAX_STARTS, Starts, common_starts};
+use opal_core::id::{ChangeId, Id};
+use opal_core::pack::ObjectKind;
+use opal_core::repo::Repository;
+use opal_core::save::Save;
+
+mod support;
+use support::{Env, text};
+
+struct Rng(u64);
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+    fn below(&mut self, n: usize) -> usize {
+        (self.next() % n as u64) as usize
+    }
+}
+
+fn anc(parents: &[Vec<usize>], tips: &[usize]) -> HashSet<usize> {
+    let mut seen = HashSet::new();
+    let mut todo: Vec<usize> = tips.to_vec();
+    while let Some(n) = todo.pop() {
+        if seen.insert(n) {
+            todo.extend(&parents[n]);
+        }
+    }
+    seen
+}
+
+#[test]
+fn rt20_common_starts_matches_brute_force() {
+    let env = Env::empty();
+    let out = env
+        .opalro()
+        .args(["start", "--preset", "custom"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let cases: u64 = std::env::var("RT20_CASES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(400);
+    let mut rng = Rng(0x2545_f491_4f6c_dd1d);
+    let mut over = 0;
+    let mut many = 0;
+    for case in 0..cases {
+        let mut repo = Repository::open(env.root()).unwrap();
+        let (_, entry) = repo.current().unwrap();
+        let first = entry.state.lines["main"];
+        let made_on = repo.store().save(&first, false).unwrap();
+        let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
+        let mut pack = repo.new_packs().unwrap();
+        let n = 5 + rng.below(120);
+        let wide = if rng.below(2) == 0 { 3 } else { 40 };
+        let roots = 1 + rng.below(wide);
+        let clock = rng.below(5);
+        let mut parents: Vec<Vec<usize>> = Vec::new();
+        let mut ids: Vec<Id> = Vec::new();
+        for k in 0..n {
+            let mut ps: Vec<usize> = Vec::new();
+            if k >= roots {
+                let most = if rng.below(4) == 0 { 20 } else { 3 };
+                let count = 1 + rng.below(most);
+                for _ in 0..count {
+                    // Mostly recent parents, sometimes far back.
+                    let p = if rng.below(3) == 0 {
+                        rng.below(k)
+                    } else {
+                        k - 1 - rng.below(k.min(6))
+                    };
+                    if !ps.contains(&p) {
+                        ps.push(p);
+                    }
+                }
+            }
+            let time = match clock {
+                0 => k as i64 * 1000,
+                1 => 5,
+                2 => -(k as i64) * 1000,
+                3 => [i64::MIN, i64::MAX, 0, -1, 1][rng.below(5)],
+                _ => rng.next() as i64,
+            };
+            let mut who = made_on.author.clone();
+            who.time_ms = time;
+            let save = Save {
+                root: made_on.root,
+                parents: ps.iter().map(|&p| ids[p]).collect(),
+                author: who.clone(),
+                saver: who,
+                message: format!("c{case} n{k}"),
+                change_id: ChangeId::random().unwrap(),
+                move_notes: vec![],
+                signature: vec![],
+                extra: Default::default(),
+            };
+            ids.push(pack.add_record(ObjectKind::Save, &save.encode()).unwrap());
+            parents.push(ps);
+        }
+        pack.finish().unwrap();
+        drop(lock);
+        drop(repo);
+        let repo = Repository::open(env.root()).unwrap();
+        for _ in 0..4 {
+            let pick = |rng: &mut Rng| -> Vec<usize> {
+                let c = 1 + if rng.below(2) == 0 { rng.below(3) } else { rng.below(40) };
+                let mut tips: Vec<usize> = (0..c).map(|_| rng.below(n)).collect();
+                tips.sort_unstable();
+                tips.dedup();
+                tips
+            };
+            let (a, b) = (pick(&mut rng), pick(&mut rng));
+            let (aa, bb) = (anc(&parents, &a), anc(&parents, &b));
+            let common: HashSet<usize> = aa.intersection(&bb).copied().collect();
+            let mut want: Vec<Id> = common
+                .iter()
+                .filter(|&&c| {
+                    !common
+                        .iter()
+                        .any(|&d| d != c && anc(&parents, &parents[d]).contains(&c))
+                })
+                .map(|&c| ids[c])
+                .collect();
+            want.sort();
+            let a_ids: Vec<Id> = a.iter().map(|&k| ids[k]).collect();
+            let b_ids: Vec<Id> = b.iter().map(|&k| ids[k]).collect();
+            let got = common_starts(&repo, &a_ids, &b_ids).unwrap();
+            let expect = if want.len() > MAX_STARTS {
+                over += 1;
+                Starts::TooMany(want.len())
+            } else {
+                Starts::Found(want.clone())
+            };
+            if want.len() > 4 {
+                many += 1;
+            }
+            assert_eq!(
+                got, expect,
+                "case {case} clock {clock} roots {roots} n {n} a {a:?} b {b:?} parents {parents:?}"
+            );
+        }
+    }
+    eprintln!("cases {cases}: {over} past {MAX_STARTS}, {many} with more than 4 starts");
+}

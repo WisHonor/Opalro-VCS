@@ -5,8 +5,9 @@
 
 mod support;
 
+use support::Env;
 #[cfg(target_os = "linux")]
-use support::{Env, text};
+use support::text;
 
 /// The bytes `opalro <args>` read (`rchar`) in `env`, which the shell that waited for it counts;
 /// "failed" if it did.
@@ -114,16 +115,9 @@ fn rt13_1_small_reads_in_pairs_cost_small_reads() {
     );
 }
 
-/// RT13-2. RT12-1's fix walks every other line, on every amend, until it meets the amended line's
-/// list; nothing it learns is kept. Lines that branched off long ago, each with its own long run of
-/// saves, are read from the store whole on every amend. Main kept their lists in
-/// `cache/change-ids`, so only its first amend read them: 300 such branches of 2,000 commits took
-/// this build 19 to 21 s an amend, every time, and main 34 s once, then 0.3 s.
-#[cfg(target_os = "linux")]
-#[test]
-fn rt13_2_a_second_amend_does_not_walk_the_other_lines_again() {
-    const BRANCHES: usize = 40;
-    const DEPTH: usize = 500;
+/// A project imported from Git: `main` of two commits, and `branches` lines of `depth` commits
+/// each that parted from it at its first.
+fn old_branches(branches: usize, depth: usize) -> Env {
     let env = Env::new();
     let mut stream = b"commit refs/heads/main\nmark :1\ncommitter a <a@b> 1700000000 +0000\n\
 data 1\nr\nM 100644 inline f\ndata 2\nr\n\n\
@@ -131,9 +125,9 @@ commit refs/heads/main\nmark :2\ncommitter a <a@b> 1700000001 +0000\ndata 1\nm\n
 M 100644 inline f\ndata 2\nm\n\n"
         .to_vec();
     let mut mark = 2;
-    for b in 0..BRANCHES {
+    for b in 0..branches {
         let mut prev = 1;
-        for i in 0..DEPTH {
+        for i in 0..depth {
             mark += 1;
             let data = format!("b{b}.{i}\n");
             stream.extend_from_slice(
@@ -151,15 +145,47 @@ data 1\nc\nfrom :{prev}\nM 100644 inline g\ndata {}\n{data}\n",
     env.git_input(&["fast-import", "--quiet"], &stream);
     env.git(&["checkout", "-q", "-f", "main"]);
     env.import();
-    let mut read = Vec::new();
-    for n in 0..2 {
-        std::fs::write(env.root().join("f"), format!("more {n}\n")).unwrap();
-        read.push(rchar(&reads(&env, &format!("save --amend m{n}"))));
-    }
+    env
+}
+
+/// RT13-2, as the promise now stands. RT12-1's fix walked every other line on every amend; the
+/// cache that fixed this read each line once, on the first amend. An amend of a save Opalro just
+/// made now asks nothing of lines that haven't moved since, so it reads none of their saves:
+/// a small part of what the same amend reads once the note of the save is gone.
+#[cfg(target_os = "linux")]
+#[test]
+fn rt13_2_an_amend_of_a_save_just_made_reads_a_quarter_or_less_of_what_it_reads_without_its_note() {
+    let env = old_branches(40, 500);
+    std::fs::write(env.root().join("f"), "saved\n").unwrap();
+    rchar(&reads(&env, "save s"));
+    std::fs::write(env.root().join("f"), "more 0\n").unwrap();
+    let just_made = rchar(&reads(&env, "save --amend m0"));
+    std::fs::remove_file(env.root().join(".opalro/cache/last-made")).unwrap();
+    std::fs::write(env.root().join("f"), "more 1\n").unwrap();
+    let without = rchar(&reads(&env, "save --amend m1"));
     assert!(
-        read[1] * 4 <= read[0],
-        "the first amend read {} bytes, the second {}",
-        read[0],
-        read[1]
+        just_made * 4 <= without,
+        "the amend right after a save read {just_made} bytes, the one without a note {without}"
     );
+}
+
+/// The red team's shape at full size, timed: an amend right after a save, and one with no note.
+/// Asserts nothing on a clock; run in a release build for docs/benchmarks.md.
+#[test]
+#[ignore = "builds 600,000 commits; run by hand in a release build"]
+fn amend_in_a_project_of_300_old_lines_timed() {
+    let env = old_branches(300, 2000);
+    let timed = |args: &[&str]| {
+        let started = std::time::Instant::now();
+        env.opalro().args(args).assert().success();
+        started.elapsed()
+    };
+    std::fs::write(env.root().join("f"), "saved\n").unwrap();
+    timed(&["save", "s"]);
+    std::fs::write(env.root().join("f"), "more 0\n").unwrap();
+    let just_made = timed(&["save", "--amend", "m0"]);
+    std::fs::remove_file(env.root().join(".opalro/cache/last-made")).unwrap();
+    std::fs::write(env.root().join("f"), "more 1\n").unwrap();
+    let without = timed(&["save", "--amend", "m1"]);
+    println!("an amend right after a save: {just_made:?}; an amend with no note: {without:?}");
 }

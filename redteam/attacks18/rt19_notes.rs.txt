@@ -1,0 +1,91 @@
+//! RT19 exploration: how long a combine takes over saves full of move notes.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+use std::time::Instant;
+
+use opal_core::diary::{Action, DiaryEntry};
+use opal_core::id::ChangeId;
+use opal_core::pack::ObjectKind;
+use opal_core::repo::Repository;
+use opal_core::save::{MoveNote, Save};
+
+mod support;
+use support::{Env, text};
+
+fn ok(env: &Env, args: &[&str]) {
+    let out = env.opalro().args(args).output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{args:?}: {}", text(&out.stderr));
+}
+
+/// Plants `count` saves on `main`, each holding its parent's folder and `notes` move notes that
+/// are not true of it.
+fn plant_noted(env: &Env, count: usize, notes: usize) {
+    let mut repo = Repository::open(env.root()).unwrap();
+    let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
+    let (head, entry) = repo.current().unwrap();
+    let mut parent = entry.state.lines["main"];
+    let made_on = repo.store().save(&parent, false).unwrap();
+    let mut pack = repo.new_packs().unwrap();
+    let move_notes: Vec<MoveNote> = (0..notes)
+        .map(|i| MoveNote {
+            from: format!("f{i:06}"),
+            to: format!("t{i:06}"),
+        })
+        .collect();
+    for _ in 0..count {
+        let save = Save {
+            root: made_on.root,
+            parents: vec![parent],
+            author: made_on.author.clone(),
+            saver: made_on.saver.clone(),
+            message: "Planted".into(),
+            change_id: ChangeId::random().unwrap(),
+            move_notes: move_notes.clone(),
+            signature: vec![],
+            extra: made_on.extra.clone(),
+        };
+        parent = pack.add_record(ObjectKind::Save, &save.encode()).unwrap();
+    }
+    let mut state = entry.state.clone();
+    state.lines.insert("main".into(), parent);
+    let diary = DiaryEntry {
+        parent: Some(head),
+        action: Action::Command,
+        command: "save".into(),
+        who: made_on.author,
+        opal_version: "0.1.0".into(),
+        state,
+        folder_change: None,
+    };
+    repo.commit(&lock, pack, &diary).unwrap();
+}
+
+#[test]
+fn rt19_combine_over_noted_saves() {
+    let count: usize = std::env::var("RT19_SAVES")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(50);
+    let env = Env::empty();
+    ok(&env, &["start", "--preset", "custom"]);
+    support::write(&env, "a.txt", "a\n");
+    ok(&env, &["save", "A"]);
+    ok(&env, &["line", "new", "side"]);
+    support::write(&env, "b.txt", "b\n");
+    ok(&env, &["save", "B"]);
+    ok(&env, &["goto", "main"]);
+    let t = Instant::now();
+    plant_noted(&env, count, 100_000);
+    eprintln!("planted {count} saves in {:?}", t.elapsed());
+    let size: u64 = std::fs::read_dir(Repository::open(env.root()).unwrap().packs_dir())
+        .unwrap()
+        .map(|e| e.unwrap().metadata().unwrap().len())
+        .sum();
+    eprintln!("packs hold {size} bytes");
+    let t = Instant::now();
+    ok(&env, &["history"]);
+    eprintln!("history took {:?}", t.elapsed());
+    let t = Instant::now();
+    ok(&env, &["combine", "side"]);
+    eprintln!("combine took {:?}", t.elapsed());
+}

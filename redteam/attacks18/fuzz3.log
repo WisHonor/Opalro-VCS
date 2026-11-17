@@ -1,0 +1,143 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 2.32s
+     Running tests/rt19_fuzz.rs (target/debug/deps/rt19_fuzz-74dc5e02800f3537)
+
+running 1 test
+REFUSED one 1000:  b: moved to d0/p3 on main, and to p1 on side
+REFUSED one 1001:  c/y: moved to p5 on main, and to p3 on side
+REFUSED one 1002:  c/y: changed on side, removed on main
+REFUSED one 1002:  f/g/h: moved to d1/p6 on main, and to d1/e/p1 on side
+REFUSED one 1003:  b: moved to p2 on main, removed on side
+REFUSED one 1004:  a: moved to q1 on main, and to q4 on side
+REFUSED one 1004:  c/x: changed on side, removed on main
+REFUSED one 1006:  c/x: moved to q1 on main, removed on side
+REFUSED one 1006:  f/g/h: changed on side, removed on main
+REFUSED one 1007:  f/g/h: changed on main, removed on side
+REFUSED one 1010:  a: changed on main, removed on side
+REFUSED one 1010:  c/x: changed on side, removed on main
+REFUSED one 1010:  c/y: changed on side, removed on main
+REFUSED one 1010:  f/g/h: changed on side, removed on main
+REFUSED two 1012:  d1/p1: moved to d1/e/p7 on main, and to d0/e/p5 on side
+REFUSED two 1012:  p3: changed on side, removed on main
+REFUSED one 1013:  f/g/h: changed on main, removed on side
+REFUSED one 1015:  c/x: changed on side, removed on main
+REFUSED one 1015:  f/g/h: moved to d0/p3 on main, and to p2 on side
+REFUSED one 1017:  c/x: moved to p7 on main, and to d0/p4 on side
+REFUSED one 1020:  b: moved to d1/p3 on main, and to d0/e/p2 on side
+REFUSED one 1021:  b: changed on main, removed on side
+test rt19_random_combines has been running for over 60 seconds
+REFUSED one 1023:  c/x: moved to q5 on main, and to q0 on side
+REFUSED one 1027:  c/x: moved to d1/p0 on main, and to p2 on side
+REFUSED one 1030:  c/y: moved to d0/e/p5 on main, and to p2 on side
+REFUSED one 1030:  f/g/h: moved to d1/e/p8 on main, and to p1 on side
+REFUSED one 1031:  b: moved to p4 on main, and to d1/e/p1 on side
+REFUSED two 1032:  a: moved to d0/e/p7 on main, and to q2 on side
+REFUSED one 1033:  f/g/h: moved to p7 on main, and to p1 on side
+REFUSED one 1034:  a: changed on main, removed on side
+REFUSED one 1034:  c/x: moved to d0/p5 on main, and to q5 on side
+REFUSED one 1035:  b: moved to d0/p7 on main, and to p2 on side
+REFUSED two 1036:  f/g/h: moved to d1/p4 on side, removed on main
+REFUSED one 1037:  c/x: moved to d0/e/p7 on main, and to d1/p1 on side
+REFUSED one 1037:  f/g/h: moved to d1/p8 on main, and to d1/p6 on side
+REFUSED one 1039:  f/g/h: moved to p4 on main, removed on side
+REFUSED one 1040:  a: moved to d1/p4 on main, and to d0/p2 on side
+REFUSED one 1040:  c/x: changed on main, removed on side
+REFUSED one 1041:  b: changed on main, removed on side
+REFUSED one 1041:  f/g/h: changed on main, removed on side
+REFUSED two 1042:  f/g/h: changed on side, removed on main
+REFUSED two 1043:  f/g/h: moved to p8 on main, removed on side
+REFUSED one 1044:  a: moved to q2 on side, where main has something else
+REFUSED one 1044:  b: changed on side, removed on main
+REFUSED one 1044:  q2: added on both lines, differently
+REFUSED two 1045:  p1: moved to p7 on main, removed on side
+REFUSED one 1048:  c/y: changed on side, removed on main
+REFUSED one 1050:  a: moved to d1/p7 on side, removed on main
+REFUSED one 1050:  c/y: moved to d0/p8 on main, and to p2 on side
+REFUSED one 1050:  f/g/h: moved to d1/p1 on main, and to p1 on side
+REFUSED one 1051:  b: moved to d1/e/p4 on main, and to q1 on side
+REFUSED one 1052:  a: moved to q1 on main, where side has something else
+REFUSED one 1052:  c/x: moved to q1 on side, where main has something else
+REFUSED one 1052:  q1: added on both lines, differently
+REFUSED two 1053:  b: moved to p5 on main, and to d1/p4 on side
+REFUSED two 1053:  d0/p2: moved to q0 on side, removed on main
+REFUSED one 1054:  a: moved to d0/e/p5 on main, removed on side
+REFUSED two 1055:  a: moved to d1/e/p7 on main, and to d1/p2 on side
+REFUSED two 1055:  d0/p1: moved to q2 on main, and to q1 on side
+REFUSED one 1058:  c/x: moved to q0 on side, removed on main
+REFUSED two 1059:  c/y: moved to q3 on side, where main has something else
+REFUSED two 1059:  d1/p1: moved to q3 on main, where side has something else
+REFUSED two 1059:  q3: added on both lines, differently
+REFUSED one 1060:  a: moved to d1/p4 on main, and to d0/e/p1 on side
+REFUSED one 1060:  f/g/h: changed on side, removed on main
+REFUSED two 1061:  d0/p1: moved to d1/e/p5 on main, and to p2 on side
+REFUSED one 1063:  f/g/h: moved to p4 on main, and to p2 on side
+REFUSED two 1064:  p3: moved to q2 on side, where main has something else
+REFUSED two 1064:  q2: added on both lines, differently
+REFUSED two 1067:  p3: moved to q3 on side, removed on main
+REFUSED two 1069:  q4: moved to q1 on main, and to d1/p7 on side
+REFUSED one 1070:  a: moved to q5 on side, removed on main
+REFUSED one 1071:  c/y: moved to d0/e/p5 on main, removed on side
+REFUSED one 1072:  c/y: moved to p6 on main, and to p1 on side
+REFUSED one 1073:  b: changed on side, removed on main
+REFUSED one 1075:  c/y: moved to q4 on main, and to d1/p3 on side
+REFUSED one 1076:  a: moved to p5 on main, and to p2 on side
+REFUSED two 1077:  f/g/h: moved to d1/e/p6 on main, and to d1/e/p4 on side
+REFUSED one 1078:  b: moved to d1/p5 on main, removed on side
+REFUSED one 1078:  f/g/h: moved to p7 on main, and to p3 on side
+REFUSED two 1080:  c/y: moved to q4 on main, where side has something else
+REFUSED two 1080:  d0/p1: moved to q0 on main, removed on side
+REFUSED two 1080:  f/g/h: moved to q4 on side, where main has something else
+REFUSED two 1080:  q4: added on both lines, differently
+REFUSED two 1081:  d0/p3: changed on side, removed on main
+REFUSED one 1082:  a: moved to p5 on main, and to q0 on side
+REFUSED two 1083:  d1/p1: changed on main, removed on side
+REFUSED two 1084:  b: moved to p2 on side, removed on main
+REFUSED two 1086:  c/x: moved to p6 on main, removed on side
+REFUSED two 1086:  d0/e/p1: changed on side, removed on main
+REFUSED one 1087:  a: moved to d1/e/p4 on main, and to d0/e/p1 on side
+REFUSED one 1087:  f/g/h: moved to d0/p3 on side, removed on main
+REFUSED one 1088:  a: moved to d0/e/p5 on main, and to d0/e/p1 on side
+REFUSED one 1088:  b: moved to q0 on main, where side has something else
+REFUSED one 1088:  c/y: changed on side, removed on main
+REFUSED one 1088:  q0: added on both lines, differently
+REFUSED two 1089:  a: changed on main, removed on side
+REFUSED two 1089:  b: moved to d0/p4 on main, and to p6 on side
+REFUSED two 1089:  q3: moved to p1 on main, removed on side
+REFUSED two 1090:  f/g/h: changed on side, removed on main
+REFUSED two 1091:  f/g/h: moved to p4 on side, removed on main
+REFUSED one 1092:  b: moved to p7 on main, and to d0/p3 on side
+REFUSED one 1093:  c/x: moved to d0/e/p7 on main, and to d0/e/p3 on side
+REFUSED one 1093:  c/y: moved to q2 on main, and to q3 on side
+REFUSED two 1095:  p2: changed on main, removed on side
+REFUSED two 1097:  d0/e/p8: moved to q0 on main, and to d0/p5 on side
+REFUSED two 1097:  d0/p1: moved to q0 on side, removed on main
+REFUSED two 1097:  q0: added on both lines, differently
+REFUSED one 1098:  b: moved to d1/e/p8 on main, and to d0/p4 on side
+REFUSED one 1098:  c/x: moved to p7 on main, and to d1/e/p2 on side
+REFUSED one 1098:  f/g/h: moved to q0 on main, and to d1/p1 on side
+REFUSED one 1099:  b: moved to p6 on main, and to q3 on side
+REFUSED one 1100:  c/y: moved to d0/e/p7 on main, and to q5 on side
+REFUSED one 1100:  f/g/h: moved to q2 on main, and to d0/e/p2 on side
+REFUSED one 1102:  b: changed on main, removed on side
+REFUSED two 1103:  c/y: changed on main, removed on side
+REFUSED two 1105:  a: moved to d1/p4 on main, removed on side
+REFUSED one 1106:  a: moved to p4 on main, and to d0/p1 on side
+REFUSED one 1106:  f/g/h: moved to d1/e/p3 on main, and to d1/e/p2 on side
+REFUSED one 1107:  a: moved to d1/e/p6 on main, and to d1/p4 on side
+REFUSED one 1107:  f/g/h: moved to d1/p5 on main, and to d1/p1 on side
+REFUSED two 1109:  d0/p1: moved to d0/e/p4 on main, and to d0/p3 on side
+REFUSED two 1110:  a: moved to q1 on side, removed on main
+REFUSED two 1110:  d0/e/p3: moved to p7 on main, removed on side
+REFUSED two 1111:  c/x: changed on main, removed on side
+REFUSED one 1112:  f/g/h: moved to q5 on main, and to p2 on side
+REFUSED one 1113:  a: moved to d0/e/p5 on main, and to q1 on side
+REFUSED one 1114:  a: changed on main, removed on side
+REFUSED one 1114:  c/x: moved to p5 on main, and to q5 on side
+REFUSED one 1115:  b: moved to d0/p4 on main, and to d1/e/p2 on side
+REFUSED one 1117:  f/g/h: moved to d0/p1 on side, removed on main
+REFUSED two 1118:  c/y: moved to q1 on main, and to d0/e/p2 on side
+REFUSED one 1119:  a: changed on main, removed on side
+made 63, second 33
+test rt19_random_combines ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 325.85s
+

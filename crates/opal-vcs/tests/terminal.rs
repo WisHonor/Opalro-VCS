@@ -9,7 +9,7 @@ mod support;
 use support::{Env, text};
 
 /// The symbols Opalro draws on a terminal that shows them.
-const SYMBOLS: [char; 10] = ['•', '▸', '→', '←', '✓', '✗', '─', '…', '█', '░'];
+const SYMBOLS: [char; 11] = ['•', '▸', '→', '←', '✓', '✗', '─', '│', '…', '█', '░'];
 
 /// `opalro` in `dir` where everything asks for colour and symbols, but no terminal.
 fn opal_in_a_log(env: &Env, dir: &Path) -> assert_cmd::Command {
@@ -157,15 +157,29 @@ fn without_a_terminal_opals_own_words_are_plain() {
     for args in [
         &["history"][..],
         &["show"],
+        &["who", "a.txt"],
         &["line"],
         &["changes", "main"],
         &["goto", "main"],
         &["undo", "--list"],
         &["undo"],
         &["redo"],
+        &["line", "new", "x"],
+        &["line", "rename", "x", "y"],
+        &["goto", "main"],
+        &["line", "delete", "y"],
+        &["tag", "v1", "First"],
+        &["tag"],
+        &["tag", "--delete", "v1", "--yes"],
     ] {
         run(args);
     }
+    run(&["line", "new", "side"]);
+    std::fs::write(env.root().join("b.txt"), "b\n").unwrap();
+    run(&["save", "on side"]);
+    run(&["goto", "main"]);
+    run(&["combine", "side"]);
+    run(&["resolve"]);
     std::fs::write(env.root().join("a.txt"), "abcd\n").unwrap();
     run(&["shelf", "wip"]);
     run(&["shelf", "--list"]);
@@ -579,6 +593,61 @@ fn history_marks_the_current_save_and_cuts_long_messages_at_the_end() {
     }
 }
 
+#[cfg(feature = "fault-injection")]
+#[test]
+fn history_keeps_tag_marks_whole_and_cuts_the_message() {
+    let env = started();
+    put(&env, "a.txt", "a\n");
+    run_at(&env, None, &["save", "word ".repeat(30).trim_end()]);
+    run_at(&env, None, &["tag", "v1"]);
+    run_at(&env, None, &["tag", "v2"]);
+    let (shown, _) = run_at(&env, Some(60), &["history"]);
+    let row = shown.lines().nth(2).unwrap();
+    assert!(row.ends_with("...  [main]  [tag v1]  [tag v2]"), "{shown}");
+    assert!(row.contains("  word"), "{shown}");
+    assert!(shown.lines().all(|l| l.len() <= 60), "{shown}");
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn history_keeps_combined_marks_whole_and_cuts_the_message() {
+    let env = started();
+    put(&env, "a.txt", "a\n");
+    run_at(&env, None, &["save", "A"]);
+    run_at(&env, None, &["line", "new", "side"]);
+    put(&env, "b.txt", "b\n");
+    run_at(&env, None, &["save", "B"]);
+    let side = env.state().1.lines["side"].to_hex();
+    run_at(&env, None, &["goto", "main"]);
+    put(&env, "c.txt", "c\n");
+    run_at(&env, None, &["save", "C"]);
+    run_at(
+        &env,
+        None,
+        &["combine", "side", "word ".repeat(30).trim_end()],
+    );
+    let (shown, _) = run_at(&env, Some(70), &["history"]);
+    let row = shown.lines().nth(2).unwrap();
+    let marks = format!("...  [main]  [combined {}]", &side[..12]);
+    assert!(row.ends_with(&marks), "{shown}");
+    assert!(row.contains("  word"), "{shown}");
+    assert!(shown.lines().all(|l| l.len() <= 70), "{shown}");
+
+    // With more marks than fit, the message is cut to nothing and the marks run long, whole.
+    let others: Vec<opal_core::id::Id> = (1..40)
+        .map(|n| opal_core::id::hash_content(format!("parent {n}").as_bytes()))
+        .collect();
+    support::plant_combined(env.root(), "Octopus", &others);
+    let (shown, _) = run_at(&env, Some(70), &["history"]);
+    let row = shown.lines().nth(2).unwrap();
+    let marks: String = (others.iter())
+        .map(|p| format!("  [combined {}]", p.short_hex()))
+        .collect();
+    assert!(row.ends_with(&format!("  [main]{marks}")), "{shown}");
+    assert!(!row.contains("Octopus"), "{shown}");
+    assert!(shown.lines().skip(3).all(|l| l.len() <= 70), "{shown}");
+}
+
 #[test]
 fn show_lists_what_a_save_changed_with_sizes_in_1024_units() {
     let env = started();
@@ -619,6 +688,47 @@ fn show_lists_what_a_save_changed_with_sizes_in_1024_units() {
             "{said}"
         );
     }
+}
+
+/// The save `opalro show name` at a terminal says to see with `opalro changes --save <id>`: the
+/// `<id>`, after checking that command runs.
+#[cfg(feature = "fault-injection")]
+fn shows_next_id(env: &Env, name: &str) -> String {
+    let (_, said) = run_at(env, Some(80), &["show", name]);
+    let (_, rest) = said
+        .split_once("Next: see its lines with: opalro changes --save ")
+        .unwrap_or_else(|| panic!("{said}"));
+    let id = rest.split_whitespace().next().unwrap().to_owned();
+    run_at(env, None, &["changes", "--save", &id]);
+    id
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn shows_next_step_names_a_save_off_the_line_by_its_fingerprint() {
+    // origin/main is ahead of main, and line feat, with tag rel at its save, past main.
+    let env = Env::new();
+    let one = env.commit("a.txt", "one", "one");
+    let two = env.commit("a.txt", "two", "two");
+    env.git(&["update-ref", "refs/remotes/origin/main", &two]);
+    env.git(&["reset", "-q", "--hard", &one]);
+    env.import();
+    run_at(&env, None, &["line", "new", "feat"]);
+    put(&env, "a.txt", "feat\n");
+    run_at(&env, None, &["save", "Feat"]);
+    run_at(&env, None, &["tag", "rel"]);
+    run_at(&env, None, &["goto", "main"]);
+    let (repo, state) = env.state();
+    let server = repo.server_lines(&state).unwrap().servers["origin"]["main"];
+    let (feat, main) = (state.lines["feat"], state.lines["main"]);
+    let main_change = repo.store().save(&main, false).unwrap().change_id;
+    let short = opal_core::history::short_change_id(&repo, &main, &main_change).unwrap();
+    drop(repo);
+    for (name, save) in [("rel", feat), ("feat", feat), ("main@origin", server)] {
+        assert_eq!(shows_next_id(&env, name), save.to_hex()[..12], "{name}");
+    }
+    // On the line the project is on, the short change ID.
+    assert_eq!(shows_next_id(&env, "main"), short);
 }
 
 #[cfg(feature = "fault-injection")]
@@ -1112,8 +1222,14 @@ fn changed_your_mind_shows_only_on_a_terminal() {
     put(&env, "a.txt", "mine\n");
     run_at(&env, None, &["shelf"]);
     assert!(on_terminal(&["unshelf"]).ends_with(offered));
-    // Nothing thrown away is nothing to change your mind about; other commands don't offer it.
     run_at(&env, None, &["discard"]);
+    run_at(&env, None, &["line", "new", "side"]);
+    put(&env, "side.txt", "side\n");
+    run_at(&env, None, &["save", "On side"]);
+    run_at(&env, None, &["goto", "main"]);
+    assert!(on_terminal(&["combine", "side"]).ends_with(offered));
+    // Nothing thrown away is nothing to change your mind about; other commands don't offer it.
+    assert_eq!(on_terminal(&["combine", "side"]), "");
     assert_eq!(on_terminal(&["discard"]), "");
     put(&env, "a.txt", "third\n");
     for args in [&["save", "Third"][..], &["undo"], &["redo"], &["tidy"]] {
@@ -1708,6 +1824,13 @@ fn project_text_is_escaped_with_colour_on() {
     assert_eq!(saved.status.code(), Some(0), "{}", text(&saved.stderr));
     let author = "Ada\\x1b[2J\\u{202e}";
     std::fs::write(env.root().join(name), format!("{TITLE}changed\n")).unwrap();
+    // Only an import brings in a tag named like this; the tag command refuses it.
+    env.plant_tags(
+        std::iter::once(format!("v1{CLEAR}\u{202e}")),
+        support::main_tip(&env),
+    );
+    // The name's own `[` is marked too, so it can't open a line's mark.
+    let shown_tag = "v1\\x1b\\[2J\\u{202e}";
 
     let said = same_with_colour_on(&env, &["status"], 0);
     assert!(said.contains(shown_name), "{said}");
@@ -1715,9 +1838,21 @@ fn project_text_is_escaped_with_colour_on() {
     let said = same_with_colour_on(&env, &["changes"], 0);
     assert!(said.contains(shown_name), "{said}");
     let said = same_with_colour_on(&env, &["history"], 0);
-    assert!(said.contains(author) && said.contains("\\x1b[2J"), "{said}");
+    for part in [author, "\\x1b[2J", shown_tag] {
+        assert!(said.contains(part), "{part}: {said}");
+    }
     let said = same_with_colour_on(&env, &["show"], 0);
-    for part in [shown_name, shown_message, author] {
+    for part in [shown_name, shown_message, author, shown_tag] {
+        assert!(said.contains(part), "{part}: {said}");
+    }
+    // Listed from a save, its message is in the heading too.
+    let tip = support::main_tip(&env).to_hex();
+    let said = same_with_colour_on(&env, &["history", &tip[..12]], 0);
+    assert!(
+        said.contains(&format!("\"{shown_message}\", newest first:")),
+        "{said}"
+    );
+    for part in [author, shown_tag] {
         assert!(said.contains(part), "{part}: {said}");
     }
     let said = same_with_colour_on(&env, &["undo", "--list"], 0);
@@ -1744,12 +1879,151 @@ fn project_text_is_escaped_with_colour_on() {
         assert!(said.contains(words), "{said}");
     }
 
+    // Back on main, the hostile file's line is from the hostile author's save.
+    let said = same_with_colour_on(&env, &["who", name], 0);
+    for part in [shown_name, author, " \\x1b[2Jline\n"] {
+        assert!(said.contains(part), "{part}: {said}");
+    }
+
     // A damaged copy of the file: verify names where the save needs it.
     rot_in_store(&env, &opal_core::id::hash_content(content.as_bytes()));
     let said = same_with_colour_on(&env, &["verify"], 1);
     assert!(
         support::without_opals_codes(&said).contains(&format!("needs it at {shown_name}.")),
         "{said}"
+    );
+
+    // A place in conflict, which no folder holds.
+    let record = opal_core::conflict::Record {
+        terms: vec![None, None, None],
+        own: None,
+    };
+    let place = format!("evil{CLEAR}\u{202e}.png");
+    support::plant_save(env.root(), |pack| {
+        support::listings_with_conflicts(pack, &[], &[(place.as_str(), &record)])
+    });
+    let said = same_with_colour_on(&env, &["status"], 0);
+    assert!(
+        support::without_opals_codes(&said).contains("In conflict (1 place):"),
+        "{said}"
+    );
+    assert!(said.contains("evil\\x1b[2J\\u{202e}.png"), "{said}");
+    let said = same_with_colour_on(&env, &["resolve"], 0);
+    assert!(
+        support::without_opals_codes(&said).starts_with(
+            "Nothing to record: no place in conflict is fixed in your folder.\n\n    \
+             evil\\x1b[2J\\u{202e}.png  "
+        ),
+        "{said}"
+    );
+}
+
+/// Plants a save on `main` with a conflict at each of `places`, each standing as the file it names
+/// (with markers when the bool says so).
+#[cfg(feature = "fault-injection")]
+fn plant_conflicts(env: &Env, places: &[(&str, &[u8], bool)]) {
+    use opal_core::conflict::{Own, Record, Term};
+    let term = |bytes: &[u8]| Term {
+        kind: opal_core::listing::EntryKind::File,
+        id: opal_core::id::hash_content(bytes),
+        size: bytes.len() as u64,
+    };
+    let records: Vec<(&str, Record)> = places
+        .iter()
+        .map(|&(path, bytes, marked)| {
+            let own = marked.then(|| Own {
+                version: Some(term(bytes)),
+                marker: 7,
+            });
+            // No bytes: your line has nothing there.
+            let mine = (!bytes.is_empty()).then(|| term(bytes));
+            let record = Record {
+                terms: vec![mine, None, None],
+                own,
+            };
+            (path, record)
+        })
+        .collect();
+    let records: Vec<(&str, &Record)> = records.iter().map(|(p, r)| (*p, r)).collect();
+    support::plant_save(env.root(), |pack| {
+        for (_, bytes, _) in places {
+            pack.add_content(bytes).unwrap();
+        }
+        support::listings_with_conflicts(pack, &[], &records)
+    });
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn status_paints_its_places_in_conflict_and_cuts_their_paths() {
+    let marked: &[u8] = b"<<<<<<< a\nx\n=======\ny\n>>>>>>> b\n";
+    let env = started();
+    let mut places: Vec<(&str, &[u8], bool)> = vec![
+        ("changed.png", b"picture", false),
+        ("fixed.txt", marked, true),
+        ("gone.png", b"", false),
+        ("marked.txt", marked, true),
+        ("yours.png", b"picture", false),
+    ];
+    if cfg!(windows) {
+        places.push(("aux.txt", b"picture", false));
+    }
+    plant_conflicts(&env, &places);
+    put(&env, "changed.png", "painted over");
+    put(&env, "fixed.txt", "x\n");
+    std::fs::write(env.root().join("marked.txt"), marked).unwrap();
+    put(&env, "yours.png", "picture");
+    let out = opal_on_a_terminal(&env, env.root())
+        .arg("status")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let shown = text(&out.stdout);
+    let (yellow, green, dim, blue) = ("\x1b[33m", "\x1b[32m", "\x1b[2m", "\x1b[34m");
+    let mut painted = vec![
+        (yellow, "changed in place, still to decide"),
+        (green, "fixed, not yet recorded"),
+        (dim, "not in your folder, still to decide"),
+        (yellow, "1 marked place left to fix"),
+        (dim, "your version, still to decide"),
+        (blue, "yours.png"),
+        (dim, "(5 places)"),
+    ];
+    if cfg!(windows) {
+        painted.push((dim, "can't be written on this computer, kept as it is"));
+        painted.push((dim, "(6 places)"));
+        painted.retain(|p| p.1 != "(5 places)");
+    }
+    for (code, words) in painted {
+        assert!(
+            shown.contains(&format!("{code}{words}\x1b[0m")),
+            "{words}: {shown:?}"
+        );
+    }
+
+    // On a narrow terminal a place's path loses folders from its middle, as a change's does.
+    let env = started();
+    plant_conflicts(
+        &env,
+        &[("art/very/deep/folder/inside/hero.png", b"picture", false)],
+    );
+    std::fs::create_dir_all(env.root().join("art/very/deep/folder/inside")).unwrap();
+    std::fs::write(
+        env.root().join("art/very/deep/folder/inside/hero.png"),
+        "picture",
+    )
+    .unwrap();
+    let (shown, _) = run_at(&env, Some(60), &["status"]);
+    assert!(
+        shown.contains("\n    art/.../inside/hero.png  your version, still to decide\n"),
+        "{shown}"
+    );
+    let (shown, _) = run_at(&env, None, &["status"]);
+    assert!(
+        shown.contains(
+            "\n    art/very/deep/folder/inside/hero.png  your version, still to decide\n"
+        ),
+        "{shown}"
     );
 }
 
@@ -1958,6 +2232,141 @@ fn cutting_a_path_never_cuts_through_an_escaped_character() {
     // With colour on, the cut forms are escaped the same.
     let said = same_with_colour_on(&env, &["history"], 0);
     assert!(said.contains('…'), "{said}");
+}
+
+/// `combine` paints as `goto` does: the outcome's verb green and bold, a line's or a tag's name
+/// blue, a change ID magenta and bold; and on a terminal it shows its progress.
+#[cfg(feature = "fault-injection")]
+#[test]
+fn combine_paints_its_outcome_and_shows_progress() {
+    let env = started();
+    put(&env, "a.txt", "a\n");
+    run_at(&env, None, &["save", "First"]);
+    run_at(&env, None, &["line", "new", "side"]);
+    let on_side = |env: &Env, file: &str, message: &str| {
+        run_at(env, None, &["goto", "side"]);
+        put(env, file, "side\n");
+        run_at(env, None, &["save", message]);
+        run_at(env, None, &["goto", "main"]);
+    };
+    on_side(&env, "b.txt", "On side");
+    let combine = |target: &str| {
+        let out = opal_on_a_terminal(&env, env.root())
+            .env("OPALRO_PROGRESS_QUIET_MS", "0")
+            .args(["combine", target])
+            .output()
+            .unwrap();
+        let said = text(&out.stderr);
+        assert_eq!(out.status.code(), Some(0), "{said}");
+        assert!(said.starts_with("\rCombining"), "{said:?}");
+        text(&out.stdout)
+    };
+    let shown = combine("side");
+    assert!(
+        shown.starts_with(
+            "\x1b[1;32mMoved\x1b[0m \x1b[34mmain\x1b[0m forward to \x1b[34mside\x1b[0m: save \
+             \x1b[1;35m"
+        ),
+        "{shown:?}"
+    );
+    // A tag's name is painted as a line's.
+    on_side(&env, "c.txt", "Side two");
+    run_at(&env, None, &["tag", "v1.0", "--save", "side"]);
+    put(&env, "d.txt", "main\n");
+    run_at(&env, None, &["save", "Main two"]);
+    let shown = combine("v1.0");
+    assert!(
+        shown.starts_with(
+            "\x1b[1;32mCombined\x1b[0m \x1b[34mv1.0\x1b[0m into \x1b[34mmain\x1b[0m: save \
+             \x1b[1;35m"
+        ),
+        "{shown:?}"
+    );
+    // A save named by its ID is named by its change ID.
+    on_side(&env, "e.txt", "Side three");
+    let shown = combine(&tip_of(&env, "side"));
+    assert!(
+        shown.starts_with("\x1b[1;32mCombined\x1b[0m \x1b[1;35m"),
+        "{shown:?}"
+    );
+    assert!(
+        shown.contains("\x1b[0m into \x1b[34mmain\x1b[0m: save \x1b[1;35m"),
+        "{shown:?}"
+    );
+}
+
+/// A combine that kept a conflict says what to do next, then offers the undo; a log sees neither.
+#[cfg(feature = "fault-injection")]
+#[test]
+fn a_combine_that_kept_conflicts_says_what_to_do_next() {
+    let env = started();
+    put(&env, "a.txt", "a\n");
+    run_at(&env, None, &["save", "First"]);
+    run_at(&env, None, &["line", "new", "side"]);
+    put(&env, "a.txt", "side\n");
+    run_at(&env, None, &["save", "On side"]);
+    run_at(&env, None, &["goto", "main"]);
+    put(&env, "a.txt", "main\n");
+    run_at(&env, None, &["save", "On main"]);
+    let (shown, said) = run_at(&env, Some(200), &["combine", "side"]);
+    assert!(
+        shown.contains(", with 1 place in conflict:\n  a.txt: "),
+        "{shown}"
+    );
+    assert_eq!(
+        said.replace("\n      ", " "),
+        "\nNext: fix the marked files and pick a version for the rest, then run opalro resolve. \
+         opalro status lists what is left.\n\nChanged your mind? opalro undo\n"
+    );
+    run_at(&env, None, &["undo"]);
+    let (_, said) = run_at(&env, None, &["combine", "side"]);
+    assert_eq!(said, "");
+}
+
+/// A long line name or target on a narrow terminal: as with `goto`, the outcome line is kept
+/// whole and the details wrap within the width, saying what a log says.
+#[cfg(feature = "fault-injection")]
+#[test]
+fn combine_with_a_long_line_name_on_a_narrow_terminal_wraps_as_goto_does() {
+    // `LONG_LINE` one save ahead of `main`; with `both`, `main` one save ahead of where they part.
+    let setup = |both: bool, on: &'static str| {
+        move |env: &Env| {
+            put(env, "a.txt", "a\n");
+            run_at(env, None, &["save", "First"]);
+            run_at(env, None, &["line", "new", LONG_LINE]);
+            put(env, "b.txt", "b\n");
+            run_at(env, None, &["save", "Away"]);
+            run_at(env, None, &["goto", "main"]);
+            if both {
+                put(env, "c.txt", "c\n");
+                run_at(env, None, &["save", "Here"]);
+            }
+            run_at(env, None, &["goto", on]);
+        }
+    };
+    // Each project has its own change IDs: the word after `save` is left out.
+    let words = |s: &str| {
+        let words: Vec<&str> = s.split_whitespace().collect();
+        let kept = (0..words.len()).filter(|&n| n == 0 || words[n - 1] != "save");
+        kept.map(|n| words[n]).collect::<Vec<_>>().join(" ")
+    };
+    for (setup, args, wraps) in [
+        (setup(true, "main"), &["goto", LONG_LINE][..], false),
+        (setup(true, "main"), &["combine", LONG_LINE], false),
+        (setup(true, LONG_LINE), &["combine", "main"], false),
+        // Forward: the detail names both, and wraps.
+        (setup(false, "main"), &["combine", LONG_LINE], true),
+    ] {
+        let (logged, shown) = in_a_log_and_at_60(setup, args);
+        let first = |s: &str| words(s.lines().next().unwrap());
+        assert_eq!(first(&logged), first(&shown), "{args:?}");
+        for line in shown.lines().skip(1) {
+            assert!(line.chars().count() <= 60, "{args:?}: {shown}");
+        }
+        assert_eq!(words(&logged), words(&shown), "{args:?}");
+        let more_rows = shown.lines().count() > logged.lines().count();
+        assert_eq!(more_rows, wraps, "{args:?}: {shown}");
+    }
 }
 
 /// Runs `setup` in a project just started, then `args`, in a log and on a terminal 60 columns

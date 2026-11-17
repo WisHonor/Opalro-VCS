@@ -3,6 +3,7 @@ source: crates/opal-vcs/tests/goto.rs
 expression: doc
 ---
 {
+  "holds_conflicts": false,
   "not_written": [],
   "opalro_json": 1,
   "placeholders": [],
@@ -24,6 +25,9 @@ expression: doc
     "id": "[redacted]",
     "line": null,
     "message": "Feature\n",
+    "parents": [
+      "[redacted]"
+    ],
     "saver": {
       "email": "test@example.com",
       "name": "Test",

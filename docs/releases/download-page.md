@@ -1,10 +1,10 @@
-# Download Opalro 0.1.0
+# Download Opalro 0.2.0
 
 Opalro keeps every version of your project, the code and the big files together: textures, models, sounds, videos.
 It has its own engine and its own way of storing things; it is not built on Git, though it can bring in a Git repository.
 Almost every command that changes something can be taken back with `opalro undo`.
 
-**This is an early version.** Opalro 0.1 is for one person on one computer: there is no server, so no sharing or locking yet, and no merging yet either. Keep another copy of anything that matters to you; Opalro is not a backup yet.
+**This is an early version.** Opalro 0.2 is for one person on one computer: there is no server, so no sharing or locking yet. Keep another copy of anything that matters to you; Opalro is not a backup yet.
 
 ## The downloads
 
@@ -12,10 +12,10 @@ Take the archive for your system:
 
 | Your system | What it needs | The archive |
 |---|---|---|
-| Windows | Windows 10 or 11, or Windows Server 2016 or later, on a 64-bit Intel or AMD processor | `opalro-0.1.0-x86_64-pc-windows-msvc.zip` |
-| Linux | A 64-bit Intel or AMD processor, and glibc 2.34 or newer (Ubuntu 22.04, Debian 12, Fedora 35, RHEL, AlmaLinux and Rocky Linux 9, and later) | `opalro-0.1.0-x86_64-unknown-linux-gnu.tar.gz` |
-| macOS on Apple silicon (M1 and later) | macOS 11 or later | `opalro-0.1.0-aarch64-apple-darwin.tar.gz` |
-| macOS on Intel | macOS 11 or later | `opalro-0.1.0-x86_64-apple-darwin.tar.gz` |
+| Windows | Windows 10 or 11, or Windows Server 2016 or later, on a 64-bit Intel or AMD processor | `opalro-0.2.0-x86_64-pc-windows-msvc.zip` |
+| Linux | A 64-bit Intel or AMD processor, and glibc 2.34 or newer (Ubuntu 22.04, Debian 12, Fedora 35, RHEL, AlmaLinux and Rocky Linux 9, and later) | `opalro-0.2.0-x86_64-unknown-linux-gnu.tar.gz` |
+| macOS on Apple silicon (M1 and later) | macOS 11 or later | `opalro-0.2.0-aarch64-apple-darwin.tar.gz` |
+| macOS on Intel | macOS 11 or later | `opalro-0.2.0-x86_64-apple-darwin.tar.gz` |
 
 Nothing else needs to be installed: not Git, not a runtime, not a library. On Linux, `ldd --version` prints your glibc version on its first line.
 
@@ -23,7 +23,7 @@ Nothing else needs to be installed: not Git, not a runtime, not a library. On Li
 
 ## Check the download
 
-`SHA256SUMS`, offered here beside the archives, lists a fingerprint (a SHA-256 checksum) for each archive. If your file's fingerprint is the one listed, the file arrived whole and is the one put on this page. It doesn't say who made it: Opalro 0.1 is not signed yet.
+`SHA256SUMS`, offered here beside the archives, lists a fingerprint (a SHA-256 checksum) for each archive. If your file's fingerprint is the one listed, the file arrived whole and is the one put on this page. It doesn't say who made it: Opalro 0.2 is not signed yet.
 
 The fingerprints:
 

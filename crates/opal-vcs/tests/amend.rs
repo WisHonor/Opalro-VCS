@@ -235,6 +235,75 @@ fn amend_of_a_save_a_server_line_or_tag_names_is_refused() {
 }
 
 #[test]
+fn an_amend_is_refused_when_another_line_combined_this_one_in() {
+    let env = project(&[("a.txt", "a\n")]);
+    ok(&env, &["line", "new", "feature"]);
+    write(&env, "f.txt", "f\n");
+    ok(&env, &["save", "F"]);
+    ok(&env, &["goto", "main"]);
+    write(&env, "a.txt", "m\n");
+    ok(&env, &["save", "M"]);
+    let m = main_tip(&env);
+    ok(&env, &["goto", "feature"]);
+    ok(&env, &["combine", "main"]);
+    // Main's newest save is the combine's second parent.
+    let repo = Repository::open(env.root()).unwrap();
+    let feature = repo.current().unwrap().1.state.lines["feature"];
+    assert_eq!(save_of(&env, feature).parents[1], m);
+    ok(&env, &["goto", "main"]);
+    write(&env, "a.txt", "M\n");
+    let err = refused(&env, &["save", "--amend", "M2"]);
+    assert!(err.contains(": line feature shows it too,"), "{err}");
+    assert!(
+        err.contains("Save your changes as a new save instead"),
+        "{err}"
+    );
+}
+
+#[test]
+fn an_amend_is_refused_when_a_tag_sits_past_it_on_a_deleted_line() {
+    let env = project(&[("a.txt", "a\n")]);
+    write(&env, "b.txt", "b\n");
+    ok(&env, &["save", "--line", "gone", "B"]);
+    write(&env, "c.txt", "c\n");
+    ok(&env, &["save", "C"]);
+    ok(&env, &["tag", "v1.0"]);
+    ok(&env, &["goto", "main"]);
+    ok(&env, &["line", "delete", "gone"]);
+    write(&env, "a.txt", "A\n");
+    let err = refused(&env, &["save", "--amend", "A"]);
+    assert!(err.contains(": tag v1.0 shows it too,"), "{err}");
+}
+
+#[test]
+fn an_amend_is_refused_when_a_server_line_reaches_it() {
+    let env = Env::new();
+    env.commit("a.txt", "a\n", "First");
+    env.commit("a.txt", "b\n", "Second");
+    env.git(&["update-ref", "refs/remotes/origin/main", "HEAD"]);
+    env.git(&["reset", "-q", "--hard", "HEAD~1"]);
+    env.import();
+    write(&env, "a.txt", "A\n");
+    let err = refused(&env, &["save", "--amend", "A"]);
+    assert!(
+        err.contains(": server line main@origin shows it too,"),
+        "{err}"
+    );
+}
+
+#[test]
+fn amend_refused_for_tags_shows_an_odd_tags_name_between_quotes() {
+    let env = project(&[("a.txt", "a\n")]);
+    let names = ["say \"hi\" now".to_owned(), "v\u{7}".to_owned()];
+    env.plant_tags(names.into_iter(), main_tip(&env));
+    write(&env, "a.txt", "A\n");
+    let err = refused(&env, &["save", "--amend", "A"]);
+    let named = "error: Opalro can't amend this save: tag \"say \\\"hi\\\" now\" and tag \"v\\x07\" \
+                 show it too, and two saves you can see would then share one change ID.\n";
+    assert!(err.starts_with(named), "{err}");
+}
+
+#[test]
 fn amend_stops_at_the_line_ending_check_after_an_import() {
     let env = Env::new();
     env.commit("a.txt", "one\ntwo\n", "First");
@@ -403,4 +472,51 @@ fn an_amend_stopped_at_every_write_leaves_the_old_save_on_the_line() {
             break;
         }
     }
+}
+
+/// Moves `main` to a planted save holding `plain.txt` and a picture in conflict at `yours.png`,
+/// standing as your version.
+fn plant_conflicted(env: &Env) {
+    use opal_core::conflict::{Record, Term};
+    use opal_core::id::hash_content;
+    use opal_core::listing::EntryKind;
+    let picture: &[u8] = b"picture";
+    let term = |bytes: &[u8]| {
+        Some(Term {
+            kind: EntryKind::File,
+            id: hash_content(bytes),
+            size: bytes.len() as u64,
+        })
+    };
+    let record = Record {
+        terms: vec![term(picture), term(b"base"), term(b"theirs")],
+        own: None,
+    };
+    support::plant_save(env.root(), |pack| {
+        for bytes in [picture, b"base", b"theirs"] {
+            pack.add_content(bytes).unwrap();
+        }
+        let files: [(&str, EntryKind, &[u8]); 1] = [("plain.txt", EntryKind::File, b"one\n")];
+        support::listings_with_conflicts(pack, &files, &[("yours.png", &record)])
+    });
+}
+
+#[test]
+fn amend_says_how_many_places_are_still_in_conflict() {
+    let env = project(&[("plain.txt", "one\n")]);
+    plant_conflicted(&env);
+    write(&env, "yours.png", "painted over");
+    write(&env, "plain.txt", "two\n");
+    let shown = ok(&env, &["save", "--amend", "Painted"]);
+    assert!(shown.starts_with("Updated save "), "{shown}");
+    assert!(
+        shown.contains("\n    1 place is still in conflict: opalro status lists it.\n"),
+        "{shown}"
+    );
+    support::assert_folder_is_goto_of(&env, main_tip(&env));
+    write(&env, "plain.txt", "three\n");
+    let doc = json(&env, &["save", "--amend", "Painted"]);
+    assert_eq!(doc["result"], "saved", "{doc}");
+    assert_eq!(doc["conflicts"], 1, "{doc}");
+    support::assert_folder_is_goto_of(&env, main_tip(&env));
 }

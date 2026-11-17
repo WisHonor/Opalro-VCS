@@ -1,12 +1,12 @@
 # Opalro
 
-Opalro is a version control system for code and large binary files together, with its own engine and storage format: it is not built on Git. You save versions of your project, go back to any of them, try ideas on lines of their own, and take back any command that changed your project with `opalro undo` (a save, a switch to another save, a discard of unsaved work, a shelf, a change of rules; it doesn't take back `opalro tidy`, which frees space, or the starting of the project itself). Big files are cut into chunks, so a change to part of a file stores only the part that changed.
+Opalro is a version control system for code and large binary files together, with its own engine and storage format: it is not built on Git. You save versions of your project, go back to any of them, try ideas on lines of their own, and take back any command that changed your project with `opalro undo` (a save, a switch to another save, a discard of unsaved work, a shelf, a change of rules; it doesn't take back `opalro tidy`, which frees space, `opalro setup --upgrade`, which turns on a new feature for good, or the starting of the project itself). Big files are cut into chunks, so a change to part of a file stores only the part that changed.
 
 ## State
 
-Opalro v0.1 is an early release, for one person on one computer: there is no server, so there is no sharing, merging or locking yet. It can import a Git repository, Git LFS files included. Keep another copy of anything that matters.
+Opalro 0.2, the first published version, is an early release, for one person on one computer: there is no server, so there is no sharing or locking yet. You can combine one line's work into another, keep the conflicts and fix them when you choose, and see the save behind each line of a file with `opalro who`. It can import a Git repository, Git LFS files included. Keep another copy of anything that matters.
 
-What Opalro writes on disk is frozen from v0.1: every later Opalro reads what v0.1 wrote.
+What Opalro writes on disk is frozen from 0.2, the first published version: every later Opalro reads what 0.2 wrote.
 
 ## What is in this archive
 

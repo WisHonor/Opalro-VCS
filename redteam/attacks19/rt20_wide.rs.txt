@@ -1,0 +1,104 @@
+//! RT20 exploration: a save with 1,024 parents.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+use std::time::Instant;
+
+use opal_core::id::{ChangeId, Id};
+use opal_core::pack::ObjectKind;
+use opal_core::repo::Repository;
+use opal_core::save::Save;
+
+mod support;
+use support::{Env, text};
+
+fn run(env: &Env, args: &[&str]) -> (i32, String, String) {
+    let t = Instant::now();
+    let out = env.opalro().args(args).output().unwrap();
+    eprintln!("{args:?}: {:?}", t.elapsed());
+    (
+        out.status.code().unwrap_or(-1),
+        text(&out.stdout),
+        text(&out.stderr),
+    )
+}
+
+fn ok(env: &Env, args: &[&str]) -> String {
+    let (c, o, e) = run(env, args);
+    assert_eq!(c, 0, "{args:?}: {o}{e}");
+    o
+}
+
+/// 1,023 saves on top of `main`'s save, none on a line.
+fn plant_children(env: &Env) -> Vec<Id> {
+    let mut repo = Repository::open(env.root()).unwrap();
+    let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
+    let (_, entry) = repo.current().unwrap();
+    let first = entry.state.lines["main"];
+    let made_on = repo.store().save(&first, false).unwrap();
+    let mut pack = repo.new_packs().unwrap();
+    let ids = (0..1023)
+        .map(|k| {
+            let save = Save {
+                root: made_on.root,
+                parents: vec![first],
+                author: made_on.author.clone(),
+                saver: made_on.saver.clone(),
+                message: format!("W{k}"),
+                change_id: ChangeId::random().unwrap(),
+                move_notes: vec![],
+                signature: vec![],
+                extra: made_on.extra.clone(),
+            };
+            pack.add_record(ObjectKind::Save, &save.encode()).unwrap()
+        })
+        .collect();
+    pack.finish().unwrap();
+    drop(lock);
+    ids
+}
+
+#[test]
+fn rt20_a_save_with_1024_parents() {
+    let env = Env::empty();
+    ok(&env, &["start", "--preset", "custom"]);
+    support::write(&env, "a.txt", "1\n2\n3\n");
+    ok(&env, &["save", "A"]);
+    ok(&env, &["line", "new", "side"]);
+    support::write(&env, "s.txt", "s\n");
+    ok(&env, &["save", "S"]);
+    ok(&env, &["goto", "main"]);
+    let ws = plant_children(&env);
+    let big = support::plant_combined(env.root(), "Wide", &ws);
+    // As the line's own newest save.
+    let o = ok(&env, &["show"]);
+    eprintln!("show: {} lines, widest {}", o.lines().count(), o.lines().map(str::len).max().unwrap());
+    let o = ok(&env, &["show", "--json"]);
+    eprintln!("show --json: {} bytes", o.len());
+    ok(&env, &["history"]);
+    ok(&env, &["status"]);
+    ok(&env, &["combine", "side"]);
+    ok(&env, &["verify"]);
+    // As the target.
+    ok(&env, &["goto", "side"]);
+    support::write(&env, "t.txt", "t\n");
+    ok(&env, &["save", "T"]);
+    let (c, o, e) = run(&env, &["combine", &big.to_hex()]);
+    eprintln!("combine big: {c} {o}{e}");
+    // Both sides hold all 1,023 beside a save of their own: 1,023 starting points.
+    ok(&env, &["undo"]);
+    ok(&env, &["goto", "main"]);
+    let main_ws: Vec<Id> = ws.clone();
+    let _ = support::plant_combined(env.root(), "Wide too", &main_ws);
+    let side = env.state().1.lines["side"];
+    let t = Instant::now();
+    let repo = Repository::open(env.root()).unwrap();
+    let mut ours = vec![env.state().1.lines["main"]];
+    ours.truncate(1);
+    let starts = opal_core::ancestry::common_starts(&repo, &ours, &[side]).unwrap();
+    eprintln!("starts main/side: {starts:?} in {:?}", t.elapsed());
+    let mut theirs = vec![side];
+    theirs.extend(&ws);
+    let t = Instant::now();
+    let starts = opal_core::ancestry::common_starts(&repo, &ours, &theirs).unwrap();
+    eprintln!("starts main/side+ws: {starts:?} in {:?}", t.elapsed());
+}

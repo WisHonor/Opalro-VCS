@@ -879,6 +879,8 @@ impl PackReader {
             .kind
             .flavor()
             .ok_or_else(|| misuse("read_record cannot read content"))?;
+        #[cfg(test)]
+        crate::store::counted::unpacking();
         let out = match self.read_small(entry)? {
             Some(out) => out,
             None => {

@@ -8,11 +8,13 @@ use std::iter;
 
 use super::walk::{Handles, holds_own_repository, kept_as_they_were, path_in, without_git_names};
 use super::{Child, Folders, Kind, SaveError};
+use crate::conflict::{self, Recording, Summary};
 use crate::id::Id;
 use crate::listing::{Entry, EntryKind, Listing, SaveLimits};
 use crate::names::{Given, is_git_alias, is_opal_alias};
 use crate::scope::{Scope, ancestors, within};
 use crate::store::{Store, StoreError};
+use crate::text::escape;
 
 /// What `narrow` found: which of the named matched anything, in the folder or the base save, and
 /// the entries that aren't folders but that something named reaches below.
@@ -26,6 +28,14 @@ struct Blocked {
     path: String,
     /// What it is on disk, or `None` where every save keeps it as it was.
     what: Option<&'static str>,
+}
+
+/// What `narrow` follows of conflicts, in a project that keeps them: the records read once, the
+/// folders on disk a conflict stands as and those below them, and the places recorded as fixed.
+pub(super) struct Conflicts<'r> {
+    pub(super) records: &'r mut HashMap<Id, Summary>,
+    pub(super) in_conflict: HashSet<String>,
+    pub(super) recording: &'r Recording,
 }
 
 /// An entry of the base save, at the project path `rel`, as `kind` keeps it.
@@ -45,8 +55,11 @@ fn base_child(e: &Entry, rel: String, kept: bool) -> Child {
 
 /// Narrows what the walk found, `folders`, whose base save's listings are `old`, to what `scope`
 /// takes, the base save's entries standing in for everything else. Folders gone from disk with
-/// something named below them are read from `store` into `old`; `rebuilt` keeps only the
-/// listings still used. The gone folders read count against `limits`.
+/// something named below them are read from `store` into `old`, a conflict standing as a folder
+/// too where the project keeps conflicts (`conflicts`: each record read once, and the folders a
+/// conflict stands as and those below, as the walk found them);
+/// `rebuilt` keeps only the listings still used. The gone folders read count against `limits`.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn narrow(
     scope: &Scope,
     given: &[Given],
@@ -55,6 +68,7 @@ pub(super) fn narrow(
     old: &mut HashMap<String, Option<Listing>>,
     rebuilt: &mut Vec<Listing>,
     mut limits: SaveLimits,
+    mut conflicts: Option<Conflicts<'_>>,
 ) -> Result<Narrowed, SaveError> {
     let too_large = |detail| SaveError::from(StoreError::SaveTooLarge { detail });
     // The whole project always matches, even with nothing in it.
@@ -67,6 +81,15 @@ pub(super) fn narrow(
     // Those gone folders whose listings were counted whole already, with all they hold.
     let mut whole = HashSet::new();
     let mut blocked = Vec::new();
+    // The folders a conflict stands as, and those below, where a conflict is damage.
+    let mut in_conflict = HashSet::new();
+    if let Some(c) = &mut conflicts {
+        in_conflict = std::mem::take(&mut c.in_conflict);
+    }
+    // The gone folders that hold a named place still in conflict, which stay.
+    let mut stays = HashSet::new();
+    // The places standing as a folder walked into, below a name, that stay conflicts.
+    let mut places = HashSet::new();
     let mut todo = vec![String::new()];
     while let Some(rel) = todo.pop() {
         let is_gone = gone.contains(&rel);
@@ -128,16 +151,44 @@ pub(super) fn narrow(
                 }
                 let reaches = scope.reaches_below(&path);
                 // The walk took care of what is named in a folder it found.
-                let into = e.kind == EntryKind::Folder && reaches && (is_gone || !inside);
-                if into {
+                let walked_into = reaches && (is_gone || !inside);
+                // A place named whole is taken from the folder whole: there is nothing below it
+                // to walk. One named below is walked as the folder it stands as.
+                let folder = match (e.kind, conflicts.as_mut()) {
+                    (EntryKind::Folder, _) => Some(e.id),
+                    (EntryKind::Conflict, Some(c)) if walked_into && !inside => {
+                        let folder = stood_as_folder(store, c.records, &path, e)?;
+                        let record = conflict::record_at(store, c.records, &path, &e.id)?;
+                        if folder.is_some()
+                            && c.recording.settled_gone(&path, &record) != conflict::Settled::Fixed
+                        {
+                            places.insert(path.clone());
+                        }
+                        folder
+                    }
+                    _ => None,
+                };
+                if let Some(folder) = folder.filter(|_| walked_into) {
                     let depth = path.split('/').count();
                     limits.check_depth(depth).map_err(too_large)?;
                     // Met as it is read, a folder met again is counted whole before it is walked.
                     let again = in_whole
                         || limits
-                            .enter(e.id, depth, path.len(), |id| store.listing(id))?
+                            .enter(folder, depth, path.len(), |id| store.listing(id))?
                             .map_err(too_large)?;
-                    let (listing, _) = without_git_names(store.listing(&e.id)?)?;
+                    let stored = store.listing(&folder).map_err(|err| match e.kind {
+                        EntryKind::Conflict => conflict::at_place(&path, &e.id, err.into()),
+                        _ => err.into(),
+                    })?;
+                    let (listing, _) = without_git_names(stored)?;
+                    if e.kind == EntryKind::Conflict || in_conflict.contains(&rel) {
+                        in_conflict.insert(path.clone());
+                        let mut entries = listing.entries().iter();
+                        if let Some(e) = entries.find(|e| e.kind == EntryKind::Conflict) {
+                            let place = escape(&path_in(&path, &e.name), false);
+                            return Err(conflict::nested(&place).into());
+                        }
+                    }
                     if again {
                         whole.insert(path.clone());
                     } else {
@@ -152,6 +203,15 @@ pub(super) fn narrow(
                     });
                 } else if !inside {
                     kept.push(base_child(e, path, false));
+                } else if let Some(c) = conflicts.as_mut().filter(|_| is_gone)
+                    && e.kind == EntryKind::Conflict
+                {
+                    // A named place that stays a conflict keeps the gone folder it is in, where
+                    // the build meets it as it meets any place with nothing in the folder.
+                    let record = conflict::record_at(store, c.records, &path, &e.id)?;
+                    if c.recording.settled_gone(&path, &record) != conflict::Settled::Fixed {
+                        stays.insert(rel.clone());
+                    }
                 }
             }
         }
@@ -163,17 +223,36 @@ pub(super) fn narrow(
         kept.sort_by(|a, b| a.name.cmp(&b.name));
         out.insert(rel, kept);
     }
-    drop_empty(scope, &gone, old, &mut out);
+    drop_empty(scope, &gone, stays, &places, old, &mut out);
     *folders = out;
     keep_used(folders, rebuilt);
     Ok(Narrowed { matched, blocked })
 }
 
+/// The folder listing the conflict `e` at `path` stands as, if it stands as a folder, its record
+/// read once into `records`.
+fn stood_as_folder(
+    store: &Store,
+    records: &mut HashMap<Id, Summary>,
+    path: &str,
+    e: &Entry,
+) -> Result<Option<Id>, SaveError> {
+    let record = conflict::record_at(store, records, path, &e.id)?;
+    Ok(record
+        .stands_as
+        .filter(|t| t.kind == EntryKind::Folder)
+        .map(|t| t.id))
+}
+
 /// Removes, deepest first, the folders left empty that the new save shouldn't hold: those gone
 /// from disk that are named or whose last named entries went, and new ones nothing named takes.
+/// Those in `stays` stay. A place in `places` emptied this way goes from its folder, which stays,
+/// so the build meets the place as it meets any with nothing in the folder there.
 fn drop_empty(
     scope: &Scope,
     gone: &HashSet<String>,
+    mut stays: HashSet<String>,
+    places: &HashSet<String>,
     old: &HashMap<String, Option<Listing>>,
     out: &mut Folders,
 ) {
@@ -188,11 +267,14 @@ fn drop_empty(
         } else {
             saved.is_none() && !named
         };
-        if drop && out.get(&rel).is_some_and(Vec::is_empty) {
+        if drop && !stays.contains(&rel) && out.get(&rel).is_some_and(Vec::is_empty) {
             out.remove(&rel);
             let (up, name) = rel.rsplit_once('/').unwrap_or(("", &rel));
             if let Some(children) = out.get_mut(up) {
                 children.retain(|c| c.name != name);
+            }
+            if places.contains(&rel) {
+                stays.insert(up.to_owned());
             }
         }
     }
@@ -326,6 +408,7 @@ mod tests {
                 &mut old,
                 &mut rebuilt,
                 limits,
+                None,
             )
             .map(|_| folders)
         };

@@ -2,7 +2,7 @@
 
 A new version control system with its own engine (not a Git wrapper), written in Rust. One tool for code and large binary assets: friendly commands, undo for everything, great big-file handling.
 
-## Phase: BUILDING — milestone 1 ("First save") done 2026-11-01; milestone 2 ("Coming from Git") done 2026-11-04; milestone 3 ("Working folder") done 2026-11-06; milestone 4 ("Undo everything") done 2026-11-08; milestone 5 ("Big files") done 2026-11-09; milestone 6 ("Presets and polish", the road to v0.1) done 2026-11-10; v0.1's draft release, with the owner's agreement, was made on 2026-11-13 and waits for the owner to publish it
+## Phase: BUILDING — milestone 1 ("First save") done 2026-11-01; milestone 2 ("Coming from Git") done 2026-11-04; milestone 3 ("Working folder") done 2026-11-06; milestone 4 ("Undo everything") done 2026-11-08; milestone 5 ("Big files") done 2026-11-09; milestone 6 ("Presets and polish", the road to v0.1) done 2026-11-10; v0.1's draft release, made on 2026-11-13, is never published (decision 190: v0.2 is the first published version); v0.2 (lines and combining, milestones 7 to 10, decision 157) started 2026-11-14 on the branch `v0.2`, which the owner had Claude merge into `main` on 2026-11-16 (decision 192): milestone 7 ("Lines and tags") done 2026-11-14 and merged into `v0.2`; milestone 8 ("Combine") done 2026-11-14 and merged into `v0.2`; milestone 9 ("Conflicts") done 2026-11-15 and merged into `v0.2`; milestone 10 ("`who`, and v0.2") done 2026-11-16 and merged into `v0.2`; v0.2 is packaged as version 0.2.0 and is in `main`, with no tag and no draft release, and was reviewed with the owner on 2026-11-16 (decision 189: what was decided while they were away is kept, and the agreement's sentence names 0.2), and waits for the owner to try it and publish
 - The owner signed off the design on 2026-10-31. Build milestone by milestone (`docs/milestones.md`), task by task from the plan in `docs/plans/`.
 - The design docs stay the source of truth. Changing a decided behaviour or format needs a new decision record that supersedes the old one, and spec edits come before code.
 
@@ -10,6 +10,7 @@ A new version control system with its own engine (not a Git wrapper), written in
 - `docs/design.md`: the living design spec (plain language + technical detail). Read it first: it holds the agenda, risks, open questions and deferred decisions.
 - `docs/plans/`: implementation plans, one per milestone.
 - `docs/decisions/NNN-short-title.md`: one record per decision (Context, Options, Decision, Consequences), numbered from 001. Never rewrite an accepted decision; supersede it with a new record and link both ways.
+- The website (https://opalro.com) is not here: it has a repository of its own, `opalro-website`, in the folder next to this one (decision 191). This repository hands it each release's website zip, archives and checksums, and nothing else.
 
 ## Working with the owner
 - The owner is learning Rust and VCS internals and wants to understand and own every core decision.

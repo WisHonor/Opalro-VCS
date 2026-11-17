@@ -133,14 +133,15 @@ impl ChangeIds {
     }
 
     /// Writes the cache back, sealed with the handle's key, if it changed, keeping only the lines
-    /// `state` has and, at a save, the position's list; nothing when the handle has no key. A
-    /// cache that can't be written is just not there next time, so a failure is ignored.
+    /// `state` has and, at a save, the position's list; nothing when the handle has no key or
+    /// stores no caches. A cache that can't be written is just not there next time, so a failure
+    /// is ignored.
     pub(crate) fn store(&mut self, repo: &Repository, state: &State) {
         self.store_within(repo, state, MAX_BYTES);
     }
 
     fn store_within(&mut self, repo: &Repository, state: &State, cap: u64) {
-        let Some(key) = repo.cache_key() else {
+        let Some(key) = repo.storing_key() else {
             return;
         };
         let keep = kept(state);
@@ -287,7 +288,7 @@ impl ChangeIds {
                 found.extend(self.lines.remove(name).unwrap_or_default());
                 break;
             }
-            let save = repo.store().save(&id, repo.signatures_allowed())?;
+            let save = repo.store().save_links(&id, repo.signatures_allowed())?;
             found.push((id, save.change_id));
             next = save.parents.first().copied();
         }

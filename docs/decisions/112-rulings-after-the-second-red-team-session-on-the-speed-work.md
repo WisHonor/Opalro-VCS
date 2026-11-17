@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 6's red-team gate, [decision 024](024-red-team-gate.md))
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 111](111-rulings-after-the-first-red-team-session-on-the-speed-work.md) (the block window reads a block only while blocks pay for themselves; the check before an amend keeps what it read of the other lines; the first session's memory proof runs on Linux only) and [decision 100](100-caches-are-written-without-a-flush-and-only-when-they-changed.md) (a third cache, written the same way)
+- **Refined by:** [decision 185](185-save-amend-and-a-save-something-else-holds.md) (the cache of the other lines goes; a note of the save made last comes)
 
 ## Context
 

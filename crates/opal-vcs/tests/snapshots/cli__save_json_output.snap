@@ -4,6 +4,7 @@ expression: json
 ---
 {
   "changed_files": 1,
+  "conflicts": 0,
   "opalro_json": 1,
   "paths": [],
   "replaced": null,
@@ -20,6 +21,9 @@ expression: json
     "id": "[redacted]",
     "line": "main",
     "message": "Add a",
+    "parents": [
+      "[redacted]"
+    ],
     "saver": {
       "email": "test@example.com",
       "name": "Test",

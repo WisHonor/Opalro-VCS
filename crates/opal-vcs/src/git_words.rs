@@ -24,8 +24,9 @@ pub enum Typed {
 }
 
 /// The words that run an Opalro command, which are the only ones `git-words` may list.
-const SHORTCUTS: [&str; 10] = [
-    "init", "commit", "diff", "log", "checkout", "switch", "stash", "branch", "fsck", "gc",
+const SHORTCUTS: [&str; 13] = [
+    "init", "commit", "diff", "log", "checkout", "switch", "stash", "branch", "merge", "fsck",
+    "gc", "blame", "annotate",
 ];
 
 /// `save`'s options that take a value, which travels with them when `commit` is translated.
@@ -37,7 +38,8 @@ const FILE: &str = "git-words";
 const MAX_BYTES: u64 = 4096;
 
 const ADD: &str = "Opalro has no staging step: `opalro save` saves every change, new files too.\n\
-                   To save only some files, name them: `opalro save \"message\" <paths>`";
+                   To save only some files, name them: `opalro save \"message\" <paths>`\n\
+                   After a combine, `opalro resolve <file>` records a file you fixed.";
 const RM_MV: &str = "Delete or move the file itself, as you would any file.\n\
                      The next `opalro save` records it.";
 const RESET: &str = "To take back the last command: `opalro undo`\n\
@@ -47,13 +49,31 @@ const RESTORE: &str = "`opalro discard <paths>` throws away the unsaved changes 
                        new files included, and `opalro undo` brings them back.";
 const COMMIT: &str = "To save every change: `opalro save \"message\"`\n\
                       To save only some files and folders: `opalro save \"message\" <paths>`";
-const NEW_LINE: &str = "In Opalro, a new line starts with a save made away from a line:\n\
-                        `opalro goto <save>`, then `opalro save --line <name> \"message\"`";
+const NEW_LINE: &str = "`opalro line new <name>` makes a new line where you are and moves onto it.\n\
+                        To start it somewhere else, go there first: `opalro goto <save>`";
 const STASH: &str = "`opalro shelf` sets your unsaved changes aside, new files too.\n\
                      `opalro unshelf` brings the newest back, `opalro unshelf <number>` another.\n\
                      `opalro shelf --list` lists them by that number, which stays with its shelf.";
-const LATER: &str = "Combining lines, tags and seeing who changed each line arrive in v0.2.\n\
-                     Until then, `opalro history` lists the saves on your line.";
+const MERGE_ABORT: &str = "`opalro undo` takes back the last step;\n\
+                           right after a combine, that is the combine, conflicts and all.";
+const MERGE_CONTINUE: &str = "`opalro combine` is done as soon as it runs.\n\
+                              `opalro resolve` records the conflicts you fixed.";
+const OURS: &str = "`opalro resolve <file> --keep mine` takes your version of a file in conflict.";
+const THEIRS: &str = "`opalro resolve <file> --keep theirs` takes the other line's version\n\
+                      of a file in conflict.";
+const MERGETOOL: &str = "Opalro starts no other program: fix the file in your editor,\n\
+                         or copy a version out to look at with\n\
+                         `opalro resolve <file> --copy theirs --to <somewhere>`.";
+const NO_FF: &str = "`opalro combine` makes a combined save only when both lines have work\n\
+                     the other lacks; otherwise it moves your line forward.\n\
+                     Opalro can't make a combined save every time.";
+const MERGE_MANY: &str = "Opalro combines one line at a time.\n\
+                          `opalro combine <line>` brings one line's work into the line you're on;\n\
+                          a second word after it is the combined save's message.";
+const SQUASH: &str = "Opalro can't bring a line's work in as one plain save.\n\
+                      `opalro combine <line>` makes a combined save that keeps both lines' history.";
+const MOVE_SAVES: &str = "Opalro can't move saves from one line to another yet; that comes after v0.2.\n\
+                          `opalro save --amend` replaces your newest save; `opalro undo` steps back.";
 const SYNC: &str = "Syncing with a server arrives in Opalro v0.3.\n\
                     Until then, `opalro import` brings a Git repository here into Opalro.";
 const REVERT: &str = "Opalro's word for this is `opalro reverse <save>`, which arrives in v0.3.\n\
@@ -83,7 +103,11 @@ pub fn translate(mut args: Vec<OsString>) -> Typed {
             .collect(),
     };
     let given = || rest.iter().filter(|a| *a != "--json");
+    let side = |w: &str| matches!(w, "checkout" | "restore");
     match word.to_str().unwrap_or_default() {
+        // Taking one side of a file in conflict: the path typed is never put in the answer.
+        w if side(w) && given().any(|a| a == "--ours") => Typed::Explain(OURS),
+        w if side(w) && given().any(|a| a == "--theirs") => Typed::Explain(THEIRS),
         "init" => run("init", &["start"], rest),
         "commit" => match commit_args(rest) {
             Some(rest) => run("commit", &["save"], rest),
@@ -91,21 +115,51 @@ pub fn translate(mut args: Vec<OsString>) -> Typed {
         },
         "diff" => run("diff", &["changes"], rest),
         "log" => run("log", &["history"], rest),
-        "checkout" if given().any(|a| a == "-b") => Typed::Explain(NEW_LINE),
-        "switch" if given().any(|a| a == "-c") => Typed::Explain(NEW_LINE),
+        "checkout" if given().any(|a| a.to_string_lossy().starts_with("-b")) => {
+            new_line("checkout", &["-b"], rest, run)
+        }
+        "switch"
+            if given().any(|a| {
+                let a = a.to_string_lossy();
+                a.starts_with("-c") || a.starts_with("--create")
+            }) =>
+        {
+            new_line("switch", &["-c", "--create"], rest, run)
+        }
         "checkout" => run("checkout", &["goto"], rest),
         "switch" => run("switch", &["goto"], rest),
         "stash" => stash(rest, run),
         // An option goes to `line`, which answers in its own words.
         "branch" if given().next().is_some_and(|a| !is_option(a)) => Typed::Explain(NEW_LINE),
-        "branch" => run("branch", &["line"], rest),
+        "branch" => branch(rest, run),
+        "tag" => {
+            let mut rest = rest;
+            // Git's `-d` is Opalro's `--delete`; the rest is Opalro's own word as typed.
+            if let Some(d) = rest.iter_mut().find(|a| *a != "--json")
+                && d == "-d"
+            {
+                *d = OsString::from("--delete");
+            }
+            Typed::Opalro(before.into_iter().chain([word]).chain(rest).collect())
+        }
         "fsck" => run("fsck", &["verify"], rest),
         "gc" => run("gc", &["tidy"], rest),
         "add" => Typed::Explain(ADD),
         "restore" => Typed::Explain(RESTORE),
         "rm" | "mv" => Typed::Explain(RM_MV),
         "reset" => Typed::Explain(RESET),
-        "merge" | "rebase" | "cherry-pick" | "tag" | "blame" => Typed::Explain(LATER),
+        "merge" if given().any(|a| a == "--abort") => Typed::Explain(MERGE_ABORT),
+        "merge" if given().any(|a| a == "--continue") => Typed::Explain(MERGE_CONTINUE),
+        "mergetool" => Typed::Explain(MERGETOOL),
+        "merge" if given().any(|a| a == "--no-ff") => Typed::Explain(NO_FF),
+        "merge" if given().any(|a| a == "--squash") => Typed::Explain(SQUASH),
+        // Git merges every line named at once; Opalro would take the second as a message.
+        "merge" if given().filter(|a| !is_option(a)).count() > 1 => Typed::Explain(MERGE_MANY),
+        // Any other option goes to `combine` as typed, which refuses what it doesn't know.
+        "merge" => run("merge", &["combine"], rest),
+        "blame" => run("blame", &["who"], rest),
+        "annotate" => run("annotate", &["who"], rest),
+        "rebase" | "cherry-pick" => Typed::Explain(MOVE_SAVES),
         "clone" | "fetch" | "pull" | "push" | "remote" => Typed::Explain(SYNC),
         "revert" => Typed::Explain(REVERT),
         "clean" => Typed::Explain(CLEAN),
@@ -115,6 +169,51 @@ pub fn translate(mut args: Vec<OsString>) -> Typed {
 
 fn is_option(a: &OsString) -> bool {
     a.to_string_lossy().starts_with('-') && a != "-"
+}
+
+/// `checkout -b <name>` and `switch -c <name>` run `line new`, with `--json` anywhere; any other
+/// form of them, as with a starting point, is explained.
+fn new_line(
+    word: &'static str,
+    flags: &[&str],
+    mut rest: Vec<OsString>,
+    run: impl Fn(&'static str, &[&str], Vec<OsString>) -> Typed,
+) -> Typed {
+    let words: Vec<&OsString> = rest.iter().filter(|a| *a != "--json").collect();
+    let [flag, name] = words.as_slice() else {
+        return Typed::Explain(NEW_LINE);
+    };
+    if !flags.iter().any(|f| *flag == f) || is_option(name) {
+        return Typed::Explain(NEW_LINE);
+    }
+    rest.retain(|a| !flags.iter().any(|f| a == f));
+    run(word, &["line", "new"], rest)
+}
+
+/// `branch -m [<old>] <new>`, `branch -d <name>` and `branch -D <name>` run `line rename` and
+/// `line delete`, with `--json` anywhere; any other option goes to `line` as typed.
+fn branch(
+    mut rest: Vec<OsString>,
+    run: impl Fn(&'static str, &[&str], Vec<OsString>) -> Typed,
+) -> Typed {
+    let words: Vec<&OsString> = rest.iter().filter(|a| *a != "--json").collect();
+    let Some((flag, names)) = words.split_first() else {
+        return run("branch", &["line"], rest);
+    };
+    let names_only = names.iter().all(|n| !is_option(n));
+    let (opalro, yes): (&[&str], bool) = match flag.to_str().unwrap_or_default() {
+        "-m" | "--move" if (1..=2).contains(&names.len()) && names_only => {
+            (&["line", "rename"], false)
+        }
+        "-d" | "--delete" if names.len() == 1 && names_only => (&["line", "delete"], false),
+        "-D" if names.len() == 1 && names_only => (&["line", "delete"], true),
+        _ => return run("branch", &["line"], rest),
+    };
+    if let Some(at) = rest.iter().position(|a| a != "--json") {
+        rest.remove(at);
+    }
+    rest.extend(yes.then(|| OsString::from("--yes")));
+    run("branch", opalro, rest)
 }
 
 /// `stash`, `stash push`, `stash pop [number]` and `stash list` run Opalro's; anything else is
@@ -191,15 +290,31 @@ pub fn hint(word: &str) -> Option<&'static str> {
         "commit" => "in Opalro, commit is save; it takes new files too: opalro save \"message\"",
         "diff" => "in Opalro, diff is changes: opalro changes",
         "log" => "in Opalro, log is history: opalro history",
-        "checkout" => "in Opalro, checkout is goto: opalro goto <line or save>",
-        "switch" => "in Opalro, switch is goto: opalro goto <line>",
+        "checkout" => {
+            "in Opalro, checkout is goto: opalro goto <line or save>\n\
+             With -b, it is `opalro line new <name>`."
+        }
+        "switch" => {
+            "in Opalro, switch is goto: opalro goto <line>\n\
+             With -c, it is `opalro line new <name>`."
+        }
         "stash" => {
             "in Opalro, stash is shelf, which takes new files too: opalro shelf\n\
              A shelf keeps the number `opalro shelf --list` shows, counted from 1."
         }
-        "branch" => "in Opalro, branch is line: opalro line",
+        "branch" => {
+            "in Opalro, branch is line: opalro line\n\
+             With -d, it is `opalro line delete`; with -m, `opalro line rename`."
+        }
+        "merge" => {
+            "in Opalro, merge is combine: opalro combine <line>\n\
+             A combine keeps conflicts and still ends with 0;\n\
+             `opalro combine --only-if-clean <line>` stops instead."
+        }
         "fsck" => "in Opalro, fsck is verify: opalro verify",
         "gc" => "in Opalro, gc is tidy: opalro tidy",
+        "blame" => "in Opalro, blame is who: opalro who <file>",
+        "annotate" => "in Opalro, annotate is who: opalro who <file>",
         _ => return None,
     })
 }
@@ -351,8 +466,26 @@ mod tests {
         }
     }
 
-    const EXPLANATIONS: [&str; 11] = [
-        ADD, RM_MV, RESET, RESTORE, COMMIT, NEW_LINE, STASH, LATER, SYNC, REVERT, CLEAN,
+    const EXPLANATIONS: [&str; 19] = [
+        ADD,
+        RM_MV,
+        RESET,
+        RESTORE,
+        COMMIT,
+        NEW_LINE,
+        STASH,
+        MERGE_ABORT,
+        MERGE_CONTINUE,
+        OURS,
+        THEIRS,
+        MERGETOOL,
+        NO_FF,
+        MERGE_MANY,
+        SQUASH,
+        MOVE_SAVES,
+        SYNC,
+        REVERT,
+        CLEAN,
     ];
 
     #[test]
@@ -368,11 +501,43 @@ mod tests {
             ("stash pop", "stash", "unshelf"),
             ("stash pop 2", "stash", "unshelf 2"),
             ("stash list", "stash", "shelf --list"),
+            ("checkout -b side", "checkout", "line new side"),
+            ("switch -c side", "switch", "line new side"),
+            ("switch --create side", "switch", "line new side"),
+            (
+                "checkout --json -b side",
+                "checkout",
+                "line new --json side",
+            ),
             ("branch", "branch", "line"),
-            ("branch -d x", "branch", "line -d x"),
+            ("branch -m side", "branch", "line rename side"),
+            ("branch -m main side", "branch", "line rename main side"),
+            ("branch --move main side", "branch", "line rename main side"),
+            ("branch -d side", "branch", "line delete side"),
+            ("branch --delete side", "branch", "line delete side"),
+            ("branch -D side", "branch", "line delete side --yes"),
+            (
+                "branch -D side --json",
+                "branch",
+                "line delete side --json --yes",
+            ),
+            // Any other form goes to `line` as typed, which answers in its own words.
             ("branch -a", "branch", "line -a"),
+            ("branch -d", "branch", "line -d"),
+            ("branch -d a b", "branch", "line -d a b"),
+            ("branch -m a b c", "branch", "line -m a b c"),
+            ("branch -D side --force", "branch", "line -D side --force"),
+            ("merge side", "merge", "combine side"),
+            ("merge --json side", "merge", "combine --json side"),
+            // Any other option goes to `combine` as typed, which refuses it.
+            ("merge --edit side", "merge", "combine --edit side"),
+            ("merge", "merge", "combine"),
             ("fsck", "fsck", "verify"),
             ("gc", "gc", "tidy"),
+            ("blame a.txt", "blame", "who a.txt"),
+            ("annotate --json a.txt", "annotate", "who --json a.txt"),
+            // Git's options go to `who` as typed, which refuses them.
+            ("blame -L 1,2 a.txt", "blame", "who -L 1,2 a.txt"),
         ] {
             assert_eq!(runs(typed), (word.to_owned(), opalro.to_owned()), "{typed}");
         }
@@ -413,6 +578,33 @@ mod tests {
         }
     }
 
+    /// `tag` is Opalro's own word: it runs as typed, with no hint, but for Git's `-d`.
+    #[test]
+    fn tag_is_opalros_own_word_and_d_is_delete() {
+        for (line, opalro) in [
+            ("tag", "tag"),
+            ("tag v1.0", "tag v1.0"),
+            ("tag v1.0 -d", "tag v1.0 -d"),
+            ("tag -d v1.0", "tag --delete v1.0"),
+            (
+                "--json tag --json -d v1.0",
+                "--json tag --json --delete v1.0",
+            ),
+            ("tag --delete v1.0", "tag --delete v1.0"),
+            ("tag -d v1.0 --yes", "tag --delete v1.0 --yes"),
+        ] {
+            let Typed::Opalro(args) = typed(line) else {
+                panic!("{line}")
+            };
+            let back: Vec<String> = args
+                .iter()
+                .map(|a| a.to_string_lossy().into_owned())
+                .collect();
+            assert_eq!(back.join(" "), opalro, "{line}");
+        }
+        assert_eq!(hint("tag"), None);
+    }
+
     #[test]
     fn json_stays_where_it_was_typed() {
         assert_eq!(runs("--json commit -m x").1, "--json save -- x");
@@ -451,9 +643,21 @@ mod tests {
         for typed in ["restore", "restore --staged", "restore .", "restore -- a"] {
             assert_eq!(explained(typed), RESTORE, "{typed}");
         }
-        assert_eq!(explained("checkout -b x"), NEW_LINE);
-        assert_eq!(explained("switch -c x"), NEW_LINE);
-        assert_eq!(explained("branch x"), NEW_LINE);
+        for typed in [
+            "checkout -b side main",
+            "checkout -b",
+            "checkout -bside",
+            "checkout side -b",
+            "checkout -b -f",
+            "switch -c side main",
+            "switch --create side main",
+            "switch -cside",
+            "switch --create=side",
+            "branch side",
+            "branch side -d",
+        ] {
+            assert_eq!(explained(typed), NEW_LINE, "{typed}");
+        }
         for typed in [
             "stash apply",
             "stash drop",
@@ -468,8 +672,26 @@ mod tests {
         ] {
             assert_eq!(explained(typed), STASH, "{typed}");
         }
-        for word in ["merge", "rebase", "cherry-pick", "tag", "blame"] {
-            assert_eq!(explained(word), LATER);
+        assert_eq!(explained("merge --abort"), MERGE_ABORT);
+        assert_eq!(explained("merge --continue"), MERGE_CONTINUE);
+        assert_eq!(explained("mergetool a.txt"), MERGETOOL);
+        for word in ["checkout", "restore"] {
+            assert_eq!(explained(&format!("{word} --ours a.txt")), OURS);
+            assert_eq!(explained(&format!("{word} --theirs -- a.txt")), THEIRS);
+            assert_eq!(explained(&format!("{word} --json a.txt --theirs")), THEIRS);
+        }
+        assert_eq!(explained("merge side --no-ff"), NO_FF);
+        assert_eq!(explained("merge --squash side"), SQUASH);
+        for typed in [
+            "merge a b",
+            "merge --json a b",
+            "merge a --json b",
+            "merge -m x side",
+        ] {
+            assert_eq!(explained(typed), MERGE_MANY, "{typed}");
+        }
+        for word in ["rebase", "cherry-pick"] {
+            assert_eq!(explained(word), MOVE_SAVES);
         }
         for word in ["clone", "fetch", "pull", "push", "remote"] {
             assert_eq!(explained(word), SYNC);
@@ -479,9 +701,9 @@ mod tests {
     }
 
     #[test]
-    fn explanations_are_two_or_three_lines_and_name_no_git_word() {
+    fn explanations_are_one_to_three_lines_and_name_no_git_word() {
         for text in EXPLANATIONS {
-            assert!((2..=3).contains(&text.lines().count()), "{text}");
+            assert!((1..=3).contains(&text.lines().count()), "{text}");
             for word in text.split(|c: char| !c.is_ascii_alphanumeric() && c != '-') {
                 assert!(!SHORTCUTS.contains(&word), "{word} in {text}");
             }

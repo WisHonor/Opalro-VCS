@@ -5,6 +5,8 @@
 use std::fs;
 use std::process::Output;
 
+use serde_json::json;
+
 mod support;
 use support::{Env, changed, head, text, write};
 
@@ -42,7 +44,7 @@ fn explained(env: &Env, args: &[&str]) -> String {
     assert_eq!(text(&out.stdout), "", "{args:?}");
     assert_eq!(head(env), before, "{args:?} wrote a diary entry");
     let said = text(&out.stderr);
-    assert!((2..=3).contains(&said.lines().count()), "{args:?}: {said}");
+    assert!((1..=3).contains(&said.lines().count()), "{args:?}: {said}");
     assert!(!said.starts_with("error:"), "{said}");
     said
 }
@@ -235,7 +237,7 @@ fn restore_with_paths_explains_and_discards_nothing() {
 #[test]
 fn branch_with_an_option_gets_lines_own_answer() {
     let env = project();
-    let out = run(&env, &["branch", "-d", "x"]);
+    let out = run(&env, &["branch", "-a"]);
     assert_eq!(out.status.code(), Some(2));
     let said = text(&out.stderr);
     assert!(!said.contains("--line <name>"), "{said}");
@@ -275,11 +277,8 @@ fn each_explained_word_explains() {
         "rm",
         "mv",
         "reset",
-        "merge",
         "rebase",
         "cherry-pick",
-        "tag",
-        "blame",
         "clone",
         "fetch",
         "pull",
@@ -295,21 +294,370 @@ fn each_explained_word_explains() {
         let said = explained(&env, &["stash", sub]);
         assert!(said.contains("opalro unshelf"), "{said}");
     }
+    // Moving saves between lines isn't promised for v0.2.
+    for word in ["rebase", "cherry-pick"] {
+        let said = explained(&env, &[word, "x"]);
+        assert!(said.contains("after v0.2"), "{word}: {said}");
+        assert!(said.contains("opalro save --amend"), "{word}: {said}");
+    }
+}
+
+/// The project with a line `side` one save ahead of `main`, which it is on.
+fn with_side_ahead() -> Env {
+    let env = project();
+    ok(&env, &["line", "new", "side"]);
+    write(&env, "c.txt", "c\n");
+    ok(&env, &["save", "C"]);
+    ok(&env, &["goto", "main"]);
+    env
 }
 
 #[test]
-fn checkout_dash_b_and_branch_with_a_name_explain() {
+fn merge_runs_combine() {
+    let env = with_side_ahead();
+    let shown = ok(&env, &["merge", "side"]);
+    assert!(
+        shown.starts_with("Moved main forward to side: save "),
+        "{shown}"
+    );
+    assert_eq!(head(&env).1.command, "combine");
+    let doc = doc(&run(&env, &["merge", "side", "--json"]).stdout);
+    assert_eq!(doc["result"], "nothing", "{doc}");
+}
+
+#[test]
+fn merge_abort_names_undo() {
+    let env = with_side_ahead();
+    let said = explained(&env, &["merge", "--abort"]);
+    assert_eq!(
+        said,
+        "`opalro undo` takes back the last step;\nright after a combine, that is the combine, \
+         conflicts and all.\n"
+    );
+}
+
+#[test]
+fn merge_continue_names_resolve() {
+    let env = with_side_ahead();
+    let said = explained(&env, &["merge", "--continue"]);
+    assert_eq!(
+        said,
+        "`opalro combine` is done as soon as it runs.\n\
+         `opalro resolve` records the conflicts you fixed.\n"
+    );
+}
+
+const OURS: &str =
+    "`opalro resolve <file> --keep mine` takes your version of a file in conflict.\n";
+const THEIRS: &str = "`opalro resolve <file> --keep theirs` takes the other line's version\n\
+                      of a file in conflict.\n";
+
+#[test]
+fn checkout_ours_and_theirs_name_resolve_keep() {
     let env = project();
+    write(&env, "a.txt", "changed\n");
+    for word in ["checkout", "restore"] {
+        assert_eq!(explained(&env, &[word, "--ours", "a.txt"]), OURS, "{word}");
+        assert_eq!(
+            explained(&env, &[word, "--theirs", "--", "a.txt"]),
+            THEIRS,
+            "{word}"
+        );
+        assert_eq!(explained(&env, &[word, "a.txt", "--ours"]), OURS, "{word}");
+    }
+    assert_eq!(changed(&env), ["a.txt"]);
+    assert_eq!(
+        fs::read_to_string(env.root().join("a.txt")).unwrap(),
+        "changed\n"
+    );
+}
+
+#[test]
+fn mergetool_is_explained() {
+    let env = project();
+    let said = explained(&env, &["mergetool"]);
+    assert_eq!(
+        said,
+        "Opalro starts no other program: fix the file in your editor,\n\
+         or copy a version out to look at with\n\
+         `opalro resolve <file> --copy theirs --to <somewhere>`.\n"
+    );
+}
+
+#[test]
+fn add_names_resolve_after_a_combine() {
+    let env = project();
+    let said = explained(&env, &["add", "a.txt"]);
+    assert!(
+        said.ends_with("\nAfter a combine, `opalro resolve <file>` records a file you fixed.\n"),
+        "{said}"
+    );
+}
+
+#[test]
+fn no_git_word_puts_the_typed_path_in_a_command() {
+    let env = project();
+    let typed = "my-file.txt";
     for args in [
-        &["checkout", "-b", "x"][..],
-        &["switch", "-c", "x"],
-        &["branch", "x"],
+        &["checkout", "--ours", typed][..],
+        &["checkout", "--theirs", typed],
+        &["restore", "--ours", typed],
+        &["restore", "--theirs", typed],
+        &["mergetool", typed],
+        &["add", typed],
     ] {
         let said = explained(&env, args);
-        assert!(said.contains("opalro save --line <name>"), "{said}");
+        assert!(!said.contains(typed), "{args:?}: {said}");
+        assert!(said.contains("<file>"), "{args:?}: {said}");
     }
-    let lines = doc(&run(&env, &["line", "--json"]).stdout);
-    assert_eq!(lines["lines"].as_array().unwrap().len(), 1, "{lines}");
+}
+
+#[test]
+fn merge_no_ff_and_squash_are_explained() {
+    let env = with_side_ahead();
+    let said = explained(&env, &["merge", "--no-ff", "side"]);
+    assert!(
+        said.contains("can't make a combined save every time"),
+        "{said}"
+    );
+    let said = explained(&env, &["merge", "side", "--squash"]);
+    assert!(said.contains("as one plain save"), "{said}");
+    assert_eq!(
+        env.state().1.lines["main"],
+        support::main_tip(&env),
+        "nothing moved"
+    );
+    assert_ne!(env.state().1.lines["main"], env.state().1.lines["side"]);
+}
+
+#[test]
+fn merge_with_another_option_is_refused_as_unknown() {
+    let env = with_side_ahead();
+    let before = head(&env);
+    let out = run(&env, &["merge", "--edit", "side"]);
+    assert_eq!(out.status.code(), Some(2));
+    assert_eq!(text(&out.stdout), "");
+    assert!(
+        text(&out.stderr).contains("--edit"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(head(&env), before);
+}
+
+#[test]
+fn merge_of_two_lines_is_explained_and_changes_nothing() {
+    let env = with_side_ahead();
+    ok(&env, &["line", "new", "other"]);
+    ok(&env, &["goto", "main"]);
+    let lines = env.state().1.lines;
+    for args in [
+        &["merge", "side", "other"][..],
+        &["merge", "--json", "side", "other"],
+        &["merge", "-m", "x", "side"],
+    ] {
+        let said = explained(&env, args);
+        assert_eq!(
+            said,
+            "Opalro combines one line at a time.\n\
+             `opalro combine <line>` brings one line's work into the line you're on;\n\
+             a second word after it is the combined save's message.\n",
+            "{args:?}"
+        );
+    }
+    assert_eq!(env.state().1.lines, lines, "no line moved");
+    // One line is still combined, and none is refused as `combine` with none is.
+    ok(&env, &["merge", "side"]);
+    assert_eq!(head(&env).1.command, "combine");
+    let merge = run(&env, &["merge"]);
+    let combine = run(&env, &["combine"]);
+    assert_eq!(merge.status.code(), Some(2));
+    assert_eq!(merge.status.code(), combine.status.code());
+    assert_eq!(text(&merge.stdout), "");
+    assert_eq!(text(&merge.stderr), text(&combine.stderr));
+}
+
+#[test]
+fn blame_and_annotate_run_who() {
+    let env = project();
+    let who = run(&env, &["who", "a.txt", "--json"]);
+    assert_eq!(who.status.code(), Some(0), "{}", text(&who.stderr));
+    for word in ["blame", "annotate"] {
+        let typed = run(&env, &[word, "a.txt", "--json"]);
+        assert_eq!(typed.status.code(), Some(0), "{word}");
+        assert_eq!(text(&typed.stdout), text(&who.stdout), "{word}");
+        // Git's options are handed on, and refused as `who` refuses any it doesn't take.
+        let git = run(&env, &[word, "-L", "1,2", "a.txt"]);
+        let opalro = run(&env, &["who", "-L", "1,2", "a.txt"]);
+        assert_eq!(git.status.code(), Some(2), "{word}");
+        assert_eq!(text(&git.stderr), text(&opalro.stderr), "{word}");
+    }
+}
+
+/// The project's lines, and the one it is on.
+fn lines(env: &Env) -> (serde_json::Value, serde_json::Value) {
+    let doc = doc(&run(env, &["line", "--json"]).stdout);
+    (doc["lines"].clone(), doc["position"]["line"].clone())
+}
+
+#[test]
+fn checkout_b_and_switch_c_start_a_line() {
+    let env = project();
+    let started = ok(&env, &["checkout", "-b", "wall-run"]);
+    assert!(
+        started.starts_with("Started line wall-run at save "),
+        "{started}"
+    );
+    assert_eq!(
+        lines(&env),
+        (json!(["main", "wall-run"]), json!("wall-run"))
+    );
+    let made = doc(&run(&env, &["switch", "--json", "-c", "side"]).stdout);
+    assert_eq!(made["line"], "side", "{made}");
+    ok(&env, &["switch", "--create", "side-2"]);
+    assert_eq!(
+        lines(&env),
+        (
+            json!(["main", "side", "side-2", "wall-run"]),
+            json!("side-2")
+        )
+    );
+}
+
+#[test]
+fn checkout_b_with_a_starting_point_is_explained() {
+    let env = project();
+    for args in [
+        &["checkout", "-b", "side", "main"][..],
+        &["switch", "-c", "side", "main"],
+        &["switch", "--create", "side", "main"],
+        &["checkout", "-bside"],
+        &["checkout", "side", "-b"],
+        &["checkout", "-b"],
+    ] {
+        let said = explained(&env, args);
+        assert!(said.contains("opalro line new <name>"), "{said}");
+        assert!(said.contains("opalro goto <save>"), "{said}");
+    }
+    assert_eq!(lines(&env), (json!(["main"]), json!("main")));
+}
+
+#[test]
+fn a_new_lines_name_cant_start_with_a_dash() {
+    let env = project();
+    let before = head(&env);
+    for (args, name) in [
+        (&["checkout", "-b", "-"][..], "-"),
+        (&["line", "new", "--", "-x"], "-x"),
+    ] {
+        let out = run(&env, args);
+        assert_eq!(out.status.code(), Some(1), "{args:?}");
+        let said = text(&out.stderr);
+        assert!(
+            said.contains(&format!(
+                "`{name}` can't be a line's name: a line name cannot start with -."
+            )),
+            "{said}"
+        );
+    }
+    assert_eq!(head(&env), before);
+    assert_eq!(lines(&env), (json!(["main"]), json!("main")));
+}
+
+#[test]
+fn the_forms_that_must_not_run_change_nothing() {
+    let env = project();
+    ok(&env, &["line", "new", "side"]);
+    ok(&env, &["goto", "main"]);
+    ok(&env, &["tag", "v1.0"]);
+    let tags = || doc(&run(&env, &["tag", "--json"]).stdout)["tags"].clone();
+    let (before, lines_before, tags_before) = (head(&env), lines(&env), tags());
+    for args in [
+        &["branch", "-d", "main", "side"][..],
+        &["branch", "-M", "main", "side"],
+        &["checkout", "-B", "side"],
+        &["switch", "-C", "side"],
+        &["tag", "-d", "v1.0", "v2.0"],
+        &["tag", "-l"],
+    ] {
+        let out = run(&env, args);
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "{args:?}: {}",
+            text(&out.stderr)
+        );
+        assert_eq!(head(&env), before, "{args:?}");
+    }
+    assert_eq!(lines(&env), lines_before);
+    assert_eq!(tags(), tags_before);
+}
+
+#[test]
+fn branch_m_renames() {
+    let env = project();
+    ok(&env, &["branch", "-m", "wall-run"]);
+    assert_eq!(lines(&env), (json!(["wall-run"]), json!("wall-run")));
+    ok(&env, &["branch", "--move", "wall-run", "side"]);
+    assert_eq!(lines(&env), (json!(["side"]), json!("side")));
+    ok(&env, &["branch", "-m", "side", "wall-run", "--json"]);
+    assert_eq!(lines(&env), (json!(["wall-run"]), json!("wall-run")));
+}
+
+#[test]
+fn branch_d_deletes_and_capital_d_says_yes() {
+    let env = project();
+    ok(&env, &["line", "new", "side"]);
+    ok(&env, &["goto", "main"]);
+    ok(&env, &["branch", "-d", "side"]);
+    assert_eq!(lines(&env).0, json!(["main"]));
+
+    // A line with a save of its own: without a terminal, -d stops and names --yes.
+    ok(&env, &["line", "new", "side"]);
+    write(&env, "a.txt", "side\n");
+    ok(&env, &["save", "On side"]);
+    ok(&env, &["goto", "main"]);
+    for flag in ["-d", "--delete"] {
+        let out = run(&env, &["branch", flag, "side"]);
+        assert_eq!(out.status.code(), Some(1));
+        assert!(text(&out.stderr).contains("--yes"), "{}", text(&out.stderr));
+    }
+    assert_eq!(lines(&env).0, json!(["main", "side"]));
+    ok(&env, &["branch", "-D", "side"]);
+    assert_eq!(lines(&env).0, json!(["main"]));
+}
+
+#[test]
+fn branch_with_a_name_is_still_explained() {
+    let env = project();
+    let said = explained(&env, &["branch", "side"]);
+    assert!(said.contains("opalro line new <name>"), "{said}");
+    assert_eq!(lines(&env), (json!(["main"]), json!("main")));
+}
+
+#[test]
+fn tag_d_deletes() {
+    let env = project();
+    ok(&env, &["tag", "v1.0"]);
+    ok(&env, &["tag", "v2.0"]);
+    ok(&env, &["tag", "-d", "v1.0", "--yes"]);
+    ok(&env, &["tag", "--delete", "v2.0", "--yes"]);
+    let tags = doc(&run(&env, &["tag", "--json"]).stdout);
+    assert_eq!(tags["tags"], json!([]), "{tags}");
+    // Never `--yes` on its own: without a terminal it stops and names it.
+    ok(&env, &["tag", "v1.0"]);
+    let out = run(&env, &["tag", "-d", "v1.0"]);
+    assert_eq!(out.status.code(), Some(1));
+    assert!(text(&out.stderr).contains("--yes"), "{}", text(&out.stderr));
+}
+
+#[test]
+fn tag_goes_to_opalro_as_typed() {
+    let env = project();
+    let typed = ok(&env, &["tag", "v1.0", "First"]);
+    assert!(typed.starts_with("Tagged save "), "{typed}");
+    let listed = doc(&run(&env, &["tag", "--json"]).stdout);
+    assert_eq!(listed["tags"][0]["name"], "v1.0", "{listed}");
 }
 
 /// `opalro` on an 80-column terminal without colour.
@@ -322,6 +670,25 @@ fn on_a_terminal(env: &Env, args: &[&str]) -> Output {
         .args(args)
         .output()
         .unwrap()
+}
+
+/// A script that went on after `git merge` would go on after a combine that kept conflicts too,
+/// so the first `merge` says how to stop instead.
+#[cfg(feature = "fault-injection")]
+#[test]
+fn the_merge_hint_says_a_combine_with_conflicts_still_ends_with_0() {
+    let env = with_side_ahead();
+    let out = on_a_terminal(&env, &["merge", "side"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(
+        text(&out.stderr).ends_with(
+            "\nhint: in Opalro, merge is combine: opalro combine <line>\n      A combine keeps \
+             conflicts and still ends with 0;\n      opalro combine --only-if-clean <line> stops \
+             instead.\n"
+        ),
+        "{}",
+        text(&out.stderr)
+    );
 }
 
 #[cfg(feature = "fault-injection")]
@@ -352,8 +719,10 @@ fn the_hint_shows_once_per_word_on_a_terminal() {
     let failed = on_a_terminal(&env, &["checkout", "nowhere"]);
     assert_eq!(failed.status.code(), Some(1));
     assert!(
-        text(&failed.stderr)
-            .ends_with("\nhint: in Opalro, checkout is goto: opalro goto <line or save>\n"),
+        text(&failed.stderr).ends_with(
+            "\nhint: in Opalro, checkout is goto: opalro goto <line or save>\n      With -b, it \
+             is opalro line new <name>.\n"
+        ),
         "{}",
         text(&failed.stderr)
     );
@@ -490,7 +859,7 @@ fn the_diary_names_opals_command() {
 #[test]
 fn help_never_names_a_git_word() {
     // `tag` is left out: it is Opalro's own word for the tags an import brings.
-    const GIT: [&str; 26] = [
+    const GIT: [&str; 27] = [
         "init",
         "commit",
         "diff",
@@ -510,6 +879,7 @@ fn help_never_names_a_git_word() {
         "rebase",
         "cherry-pick",
         "blame",
+        "annotate",
         "clone",
         "fetch",
         "pull",
@@ -525,8 +895,8 @@ fn help_never_names_a_git_word() {
         text(&run(&env, &[]).stdout),
     ];
     for command in [
-        "start", "setup", "import", "save", "status", "changes", "history", "show", "line", "goto",
-        "discard", "undo", "redo", "shelf", "unshelf", "tidy", "verify",
+        "start", "setup", "import", "save", "status", "changes", "history", "show", "who", "line",
+        "goto", "combine", "discard", "undo", "redo", "shelf", "unshelf", "tidy", "verify",
     ] {
         helps.push(ok(&env, &[command, "--help"]));
         helps.push(ok(&env, &["help", command]));

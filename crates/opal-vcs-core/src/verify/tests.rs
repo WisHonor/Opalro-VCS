@@ -1,6 +1,7 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 use super::*;
 use crate::chunks::{Chunk, ChunkList};
+use crate::conflict::{Own, Record, Term};
 use crate::diary::{Action, FolderChange};
 use crate::history::tip_of;
 use crate::id::hash_content;
@@ -672,7 +673,7 @@ fn verify_writes_nothing() {
 fn found(ids: &[u8]) -> Verdict {
     let kept: BTreeSet<Finding> = ids.iter().map(|b| Finding::Missing(Id([*b; 32]))).collect();
     Verdict::Found(Findings {
-        counts: [kept.len() as u64, 0, 0, 0, 0],
+        counts: [kept.len() as u64, 0, 0, 0, 0, 0],
         diary_gap: false,
         kept,
     })
@@ -1028,6 +1029,7 @@ fn needs_of(repo: &Repository) -> Noted {
     let src = Source {
         store: &store,
         signed: repo.signatures_allowed(),
+        conflicts: repo.keeps_conflicts(),
         folder: repo.packs_folder(),
         packs_dir: repo.packs_dir(),
     };
@@ -1120,7 +1122,7 @@ fn verify_takes_about_twice_as_long_for_twice_the_entries() {
 fn two_looks_past_what_is_kept_tell_the_smaller_count() {
     let keep = |n: u64| Findings {
         kept: (0..=255u8).map(|b| Finding::Missing(Id([b; 32]))).collect(),
-        counts: [n, 0, 0, 0, 0],
+        counts: [n, 0, 0, 0, 0, 0],
         diary_gap: false,
     };
     let both = agreed(&[Verdict::Found(keep(1_500)), Verdict::Found(keep(1_200))]);
@@ -1136,7 +1138,7 @@ fn two_looks_tell_only_the_unreadable_objects_and_the_diary_gap_both_found() {
         let n = ids.len() as u64;
         Verdict::Found(Findings {
             kept,
-            counts: [0, 0, 0, n, n],
+            counts: [0, 0, 0, n, n, 0],
             diary_gap: gap,
         })
     };
@@ -1219,4 +1221,254 @@ fn what_the_check_of_the_packs_told_as_unreadable_is_not_told_again() {
         ..Told::default()
     };
     assert!(!damaged(&told));
+}
+
+fn term(kind: EntryKind, id: Id, size: u64) -> Option<Term> {
+    Some(Term { kind, id, size })
+}
+
+/// A record of three terms: `mine`, nothing where the lines parted, and `theirs`.
+fn three(mine: Option<Term>, theirs: Option<Term>) -> Record {
+    Record {
+        terms: vec![mine, None, theirs],
+        own: None,
+    }
+}
+
+fn entry(name: &str, kind: EntryKind, id: Id) -> Entry {
+    Entry {
+        name: name.into(),
+        kind,
+        id,
+        size: 0,
+    }
+}
+
+/// Commits a save whose top folder holds only `c`, a conflict whose record is `bytes`; gives the
+/// record's ID and the top listing's.
+fn plant_record(repo: &mut Repository, bytes: impl FnOnce(&mut PackSet) -> Vec<u8>) -> (Id, Id) {
+    let mut planted = None;
+    plant_root(repo, |packs| {
+        let bytes = bytes(packs);
+        let id = packs.add_record(ObjectKind::Conflict, &bytes).unwrap();
+        let root = add_listing(packs, vec![entry("c", EntryKind::Conflict, id)]).0;
+        planted = Some((id, root));
+        root
+    });
+    planted.unwrap()
+}
+
+/// [`plant_record`] of the record `build` stores the versions of; gives the record's ID.
+fn plant_conflict(repo: &mut Repository, build: impl FnOnce(&mut PackSet) -> Record) -> Id {
+    plant_record(repo, |packs| build(packs).encode()).0
+}
+
+/// A record whose term count is 4, otherwise well made.
+fn four_terms() -> Vec<u8> {
+    let mut bytes = vec![1, 4, 0, 0, 0, 0];
+    bytes.push(0);
+    bytes
+}
+
+#[test]
+fn verify_decodes_every_conflict_record() {
+    let (_dir, mut repo) = project(0);
+    let (record, _) = plant_record(&mut repo, |_| four_terms());
+    let v = checked(&repo);
+    assert_eq!(kinds(&v), [ProblemKind::ObjectDamaged], "{:?}", v.problems);
+    assert_eq!(v.problems[0].object, Some(record));
+    let said = &v.problems[0].message;
+    assert!(
+        said.starts_with("It doesn't read as a conflict record: "),
+        "{said}"
+    );
+    assert!(said.contains("odd number"), "{said}");
+}
+
+#[test]
+fn verify_finds_a_term_that_is_missing() {
+    let (_dir, mut repo) = project(0);
+    let absent = hash_content(b"in no pack");
+    plant_conflict(&mut repo, |_| {
+        three(term(EntryKind::File, absent, 10), None)
+    });
+    let save = tip(&repo);
+    let v = checked(&repo);
+    assert_eq!(kinds(&v), [ProblemKind::ObjectMissing], "{:?}", v.problems);
+    let p = &v.problems[0];
+    assert_eq!(p.object, Some(absent));
+    assert_eq!(
+        p.message,
+        "It isn't in any pack. A conflict names it as your version."
+    );
+    assert_eq!(p.needed_by, Some((save, "c".to_owned())));
+}
+
+#[test]
+fn verify_finds_a_term_of_the_wrong_size() {
+    let (_dir, mut repo) = project(0);
+    let record = plant_conflict(&mut repo, |packs| {
+        let mine = packs.add_content(b"hello\n").unwrap();
+        three(term(EntryKind::File, mine, 999), None)
+    });
+    let save = tip(&repo);
+    let v = checked(&repo);
+    assert_eq!(kinds(&v), [ProblemKind::ObjectDamaged], "{:?}", v.problems);
+    let p = &v.problems[0];
+    assert_eq!(p.object, Some(record));
+    assert_eq!(
+        p.message,
+        "It gives your version as 999 bytes, but what is stored for it is 6 bytes."
+    );
+    assert_eq!(p.needed_by, Some((save, "c".to_owned())));
+}
+
+#[test]
+fn verify_finds_a_term_of_another_kind() {
+    let (_dir, mut repo) = project(0);
+    let mut listing = None;
+    plant_conflict(&mut repo, |packs| {
+        let x = packs.add_content(b"x").unwrap();
+        let mut file = entry("x", EntryKind::File, x);
+        file.size = 1;
+        let id = add_listing(packs, vec![file]).0;
+        listing = Some(id);
+        three(None, term(EntryKind::File, id, 1))
+    });
+    let save = tip(&repo);
+    let v = checked(&repo);
+    assert_eq!(kinds(&v), [ProblemKind::ObjectMissing], "{:?}", v.problems);
+    assert_eq!(v.problems[0].object, listing);
+    assert_eq!(
+        v.problems[0].message,
+        "It is stored, but as another kind of object than what needs it. A conflict names it as their version."
+    );
+    assert_eq!(v.problems[0].needed_by, Some((save, "c".to_owned())));
+}
+
+#[test]
+fn verify_reports_a_conflict_inside_a_conflict() {
+    for theirs in [false, true] {
+        let (_dir, mut repo) = project(0);
+        let record = plant_conflict(&mut repo, |packs| {
+            let text = packs.add_content(b"inner\n").unwrap();
+            let inner = three(term(EntryKind::File, text, 6), None);
+            let inner = packs
+                .add_record(ObjectKind::Conflict, &inner.encode())
+                .unwrap();
+            // a/b/i: the inner conflict two levels below the folder.
+            let holds = add_listing(packs, vec![entry("i", EntryKind::Conflict, inner)]).0;
+            let b = add_listing(packs, vec![entry("b", EntryKind::Folder, holds)]).0;
+            let a = add_listing(packs, vec![entry("a", EntryKind::Folder, b)]).0;
+            let folder = term(EntryKind::Folder, a, 0);
+            if theirs {
+                let mine = packs.add_content(b"mine\n").unwrap();
+                three(term(EntryKind::File, mine, 5), folder)
+            } else {
+                three(folder, None)
+            }
+        });
+        let v = checked(&repo);
+        if theirs {
+            // Theirs never stands in the folder.
+            assert_eq!(v.problems_total, 0, "{:?}", v.problems);
+            continue;
+        }
+        assert_eq!(kinds(&v), [ProblemKind::NestedConflict], "{:?}", v.problems);
+        assert_eq!(v.count(ProblemKind::NestedConflict), 1);
+        assert_eq!(v.problems[0].object, Some(record));
+        let want = format!(
+            "Conflict record {} stands as a folder that holds another conflict, which Opalro \
+             never writes.",
+            record.short_hex()
+        );
+        assert_eq!(v.problems[0].message, want);
+    }
+}
+
+#[test]
+fn verify_counts_what_a_conflict_stands_as_toward_the_limits() {
+    for theirs in [false, true] {
+        let (_dir, mut repo) = project(0);
+        plant_conflict(&mut repo, |packs| {
+            let x = packs.add_content(b"x").unwrap();
+            let folder = many(packs, 1_000, EntryKind::File, x, 1);
+            let huge = term(
+                EntryKind::Folder,
+                many(packs, 10_001, EntryKind::Folder, folder, 0),
+                0,
+            );
+            if theirs {
+                three(None, huge)
+            } else {
+                three(huge, None)
+            }
+        });
+        let save = tip(&repo);
+        let v = checked(&repo);
+        if theirs {
+            assert_eq!(v.problems_total, 0, "{:?}", v.problems);
+            continue;
+        }
+        assert_eq!(kinds(&v), [ProblemKind::SaveTooBig], "{:?}", v.problems);
+        assert_eq!(v.problems[0].object, Some(save));
+        let said = &v.problems[0].message;
+        assert!(said.contains("files and folders in total"), "{said}");
+    }
+}
+
+#[test]
+fn without_the_feature_verify_reports_as_v01_does() {
+    let (dir, repo) = project(0);
+    drop(repo);
+    let mut repo = crate::test_support::without_conflicts_feature(dir.path());
+    let (record, root) = plant_record(&mut repo, |_| four_terms());
+    let v = checked(&repo);
+    assert_eq!(kinds(&v), [ProblemKind::ObjectDamaged], "{:?}", v.problems);
+    let p = &v.problems[0];
+    assert_eq!(p.object, Some(root));
+    assert!(
+        p.message
+            .contains("holds a conflict, and this project isn't set to keep conflicts."),
+        "{p:?}"
+    );
+    assert!(v.problems.iter().all(|p| p.object != Some(record)));
+}
+
+#[test]
+fn nesting_is_looked_for_in_what_a_conflict_stands_as() {
+    // Own version the folder holding a conflict: reported. Own version a file while yours is that
+    // folder: not, since the file is what stands in the folder.
+    for own_is_folder in [true, false] {
+        let (_dir, mut repo) = project(0);
+        let record = plant_conflict(&mut repo, |packs| {
+            let text = packs.add_content(b"inner\n").unwrap();
+            let inner = three(term(EntryKind::File, text, 6), None);
+            let inner = packs
+                .add_record(ObjectKind::Conflict, &inner.encode())
+                .unwrap();
+            let holds = add_listing(packs, vec![entry("i", EntryKind::Conflict, inner)]).0;
+            let folder = term(EntryKind::Folder, holds, 0);
+            let file = term(EntryKind::File, packs.add_content(b"mine\n").unwrap(), 5);
+            let (mine, own) = if own_is_folder {
+                (file, folder)
+            } else {
+                (folder, file)
+            };
+            Record {
+                terms: vec![mine, None, None],
+                own: Some(Own {
+                    version: own,
+                    marker: 0,
+                }),
+            }
+        });
+        let v = checked(&repo);
+        if !own_is_folder {
+            assert_eq!(v.problems_total, 0, "{:?}", v.problems);
+            continue;
+        }
+        assert_eq!(kinds(&v), [ProblemKind::NestedConflict], "{:?}", v.problems);
+        assert_eq!(v.problems[0].object, Some(record));
+    }
 }

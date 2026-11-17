@@ -6,6 +6,7 @@
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 121](121-format-1-freezes-at-v0.1.md) (what the freeze covers)
 - **Superseded in part by:** [decision 150](150-the-name-is-opalro.md) (the names: Bolt is now Opalro, and `bolt` is now `opalro`, or `opal` in what only the program uses); [decision 154](154-format-1s-zstd-is-exactly-one-frame.md) (the bullet on §11: zstd is exactly one frame); [decision 155](155-more-short-names-of-opalro-are-refused.md) (the bullet on §3: `opalro~5` to `opalro~9` and NTFS's hashed short name are refused too)
+- **Refined by:** [decision 174](174-the-conflict-record.md) (the conflict record's layout is final); [decision 178](178-the-conflicts-feature.md) (what this version does without the feature)
 
 ## Context
 

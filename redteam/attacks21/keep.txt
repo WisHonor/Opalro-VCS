@@ -1,0 +1,38 @@
+   Compiling opal-vcs v0.1.0 (/work/crates/opal-vcs)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.58s
+     Running tests/rt22_keep.rs (target/debug/deps/rt22_keep-acd71a46d159a65e)
+
+running 1 test
+On line main at save pytv "Planted"  (just now)
+
+In conflict (1 place):
+
+    d  your version, still to decide
+
+Changed since then (1 file):
+
+    removed  l  0 B
+
+resolve: 0 Recorded 1 fix in a new save rqwr "Fixed conflicts in d" on main.
+
+    Your newest save isn't a combined save, so the fix is a save of its own.
+    Took theirs for 1 place.
+
+d Folder 9b4b2c0e9ad66a5cc71fc39fc105e151389ff9418523da413753399b817dc8db
+l Folder 9b4b2c0e9ad66a5cc71fc39fc105e151389ff9418523da413753399b817dc8db
+
+thread 'rt22_keep_folder_turns_a_link_with_its_id_into_a_folder' (6829) panicked at crates/opal-vcs/tests/rt22_keep.rs:84:5:
+assertion `left == right` failed: the link became a folder
+  left: Folder
+ right: Symlink
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test rt22_keep_folder_turns_a_link_with_its_id_into_a_folder ... FAILED
+
+failures:
+
+failures:
+    rt22_keep_folder_turns_a_link_with_its_id_into_a_folder
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.65s
+
+error: test failed, to rerun pass `-p opal-vcs --test rt22_keep`

@@ -6,7 +6,10 @@ pub mod corpus;
 mod vs_git;
 
 #[allow(unused_imports)]
-pub use vs_git::{assert_matches_git, assert_matches_git_counting};
+pub use vs_git::{
+    assert_ancestry_matches_git, assert_matches_git, assert_matches_git_counting,
+    assert_starts_match_git,
+};
 
 use std::collections::BTreeMap;
 use std::io::{self, Read, Seek, SeekFrom, Write};
@@ -16,7 +19,8 @@ use std::time::{Duration, Instant};
 
 use assert_cmd::Command as Opalro;
 use opal_core::chunks::{Chunk, ChunkList, chunk_len, is_cut};
-use opal_core::diary::{Action, DiaryEntry, State};
+use opal_core::conflict::Record;
+use opal_core::diary::{Action, DiaryEntry, State, Tag, TagList};
 use opal_core::history::current_save;
 use opal_core::id::{ChangeId, ContentHasher, Id, hash_content};
 use opal_core::listing::{Entry, EntryKind, Listing};
@@ -326,6 +330,56 @@ pub fn saved_files(env: &Env, save: Id) -> Files {
     found
 }
 
+/// Every path of the save `save` with its kind and what it holds: a folder as `'d'`, a conflict
+/// as `'c'` with its record's ID, anything else as `'f'` with its object's ID.
+pub fn saved_paths(env: &Env, save: Id) -> BTreeMap<String, (char, Id)> {
+    let repo = Repository::open(env.root()).unwrap();
+    let store = repo.store();
+    let mut found = BTreeMap::new();
+    let mut folders = vec![(store.save(&save, false).unwrap().root, String::new())];
+    while let Some((id, rel)) = folders.pop() {
+        for e in store.listing(&id).unwrap().entries() {
+            let path = if rel.is_empty() {
+                e.name.clone()
+            } else {
+                format!("{rel}/{}", e.name)
+            };
+            let kind = match e.kind {
+                EntryKind::Folder => {
+                    folders.push((e.id, path.clone()));
+                    'd'
+                }
+                EntryKind::Conflict => 'c',
+                _ => 'f',
+            };
+            let id = if kind == 'd' { Id([0; 32]) } else { e.id };
+            found.insert(path, (kind, id));
+        }
+    }
+    found
+}
+
+/// The paths where two maps differ.
+fn differ<V: PartialEq>(a: &BTreeMap<String, V>, b: &BTreeMap<String, V>) -> Vec<String> {
+    let mut paths: Vec<String> = a.keys().chain(b.keys()).cloned().collect();
+    paths.sort();
+    paths.dedup();
+    paths.retain(|p| a.get(p) != b.get(p));
+    paths
+}
+
+/// Checks that the newest step's recorded folder change, its two saves, differs exactly where
+/// the folder went from `before` (as `entries` read it) to what it holds now; no change recorded
+/// where the folder didn't change.
+pub fn assert_step_records(env: &Env, before: &Entries) {
+    let changed = differ(before, &entries(env.root()));
+    let recorded = match head(env).1.folder_change {
+        Some(c) => differ(&saved_paths(env, c.from), &saved_paths(env, c.to)),
+        None => Vec::new(),
+    };
+    assert_eq!(recorded, changed, "the step records");
+}
+
 // Big files, written and read a block at a time.
 
 /// Writes `size` bytes at `path` that look random, so they don't compress, made from `seed`; their
@@ -478,6 +532,88 @@ pub fn save_here(root: &Path, message: &str) -> Result<SaveOutcome, SaveError> {
     save_folder(&mut repo, &req, &mut |_| {}, &mut |_| true)
 }
 
+/// What a folder holds, every entry by path, `.opalro` at the top left out: a folder, a link (its
+/// target), or a file (its bytes, and whether it is marked executable where marks are kept).
+pub type Entries = BTreeMap<String, (char, Vec<u8>, bool)>;
+
+pub fn entries(dir: &Path) -> Entries {
+    let mut found = BTreeMap::new();
+    let mut folders = vec![(dir.to_path_buf(), String::new())];
+    while let Some((at, rel)) = folders.pop() {
+        for e in std::fs::read_dir(&at).unwrap() {
+            let e = e.unwrap();
+            let name = e.file_name().to_string_lossy().into_owned();
+            if rel.is_empty() && name == ".opalro" {
+                continue;
+            }
+            let path = if rel.is_empty() {
+                name
+            } else {
+                format!("{rel}/{name}")
+            };
+            let kind = e.file_type().unwrap();
+            let held = if kind.is_symlink() {
+                let target = std::fs::read_link(e.path()).unwrap();
+                ('l', target.to_string_lossy().as_bytes().to_vec(), false)
+            } else if kind.is_dir() {
+                folders.push((e.path(), path.clone()));
+                ('d', Vec::new(), false)
+            } else {
+                ('f', std::fs::read(e.path()).unwrap(), executable(&e.path()))
+            };
+            found.insert(path, held);
+        }
+    }
+    found
+}
+
+#[cfg(unix)]
+fn executable(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).unwrap().permissions().mode() & 0o111 != 0
+}
+
+#[cfg(not(unix))]
+fn executable(_: &Path) -> bool {
+    false
+}
+
+/// Checks that the project's folder holds exactly what `opalro goto <save>` writes into an empty
+/// folder: its `.opalro` is copied, put at an empty save, and gone from there to `save`.
+pub fn assert_folder_is_goto_of(env: &Env, save: Id) {
+    let copy = tempfile::tempdir().unwrap();
+    copy_dir(&env.root().join(".opalro"), &copy.path().join(".opalro"));
+    {
+        let mut repo = Repository::open(copy.path()).unwrap();
+        let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
+        let (head, entry) = repo.current().unwrap();
+        let mut pack = repo.new_packs().unwrap();
+        let empty = Listing::new(vec![]).unwrap().encode();
+        let empty = pack.add_record(ObjectKind::FolderListing, &empty).unwrap();
+        let nothing = add_save(&repo, &mut pack, empty, save);
+        let mut state = entry.state.clone();
+        state.position = opal_core::diary::Position::AtSave(nothing);
+        state.lines.insert("check".into(), save);
+        let diary = DiaryEntry {
+            parent: Some(head),
+            action: Action::Command,
+            command: "save".into(),
+            who: repo.store().save(&save, false).unwrap().author,
+            opal_version: "0.1.0".into(),
+            state,
+            folder_change: None,
+        };
+        repo.commit(&lock, pack, &diary).unwrap();
+    }
+    let out = env
+        .opal_in(copy.path())
+        .args(["goto", "check"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(entries(env.root()), entries(copy.path()));
+}
+
 /// Copies the folder `from`, everything in it, to `to`.
 pub fn copy_dir(from: &Path, to: &Path) {
     std::fs::create_dir_all(to).unwrap();
@@ -513,14 +649,31 @@ pub fn add_listing(pack: &mut PackSet, names: &[String], kind: EntryKind, id: Id
 /// Stores the folder listings that hold `entries` (a path, a kind, and a file's bytes or a link's
 /// target, each stored as `add_file` stores it) and returns the top one's ID.
 pub fn listings(pack: &mut PackSet, entries: &[(&str, EntryKind, &[u8])]) -> Id {
-    let mut folders: BTreeMap<String, Vec<Entry>> = BTreeMap::from([(String::new(), vec![])]);
+    listings_with_conflicts(pack, entries, &[])
+}
+
+/// As [`listings`], with a conflict at each path of `conflicts`, its record stored as
+/// [`add_conflict`] stores it.
+pub fn listings_with_conflicts(
+    pack: &mut PackSet,
+    entries: &[(&str, EntryKind, &[u8])],
+    conflicts: &[(&str, &Record)],
+) -> Id {
+    let mut placed: Vec<(&str, EntryKind, Id, u64)> = Vec::new();
     for &(path, kind, bytes) in entries {
+        placed.push((path, kind, add_file(pack, bytes), bytes.len() as u64));
+    }
+    for &(path, record) in conflicts {
+        placed.push((path, EntryKind::Conflict, add_conflict(pack, record), 0));
+    }
+    let mut folders: BTreeMap<String, Vec<Entry>> = BTreeMap::from([(String::new(), vec![])]);
+    for (path, kind, id, size) in placed {
         let (up, name) = path.rsplit_once('/').unwrap_or(("", path));
         folders.entry(up.to_owned()).or_default().push(Entry {
             name: name.to_owned(),
             kind,
-            id: add_file(pack, bytes),
-            size: bytes.len() as u64,
+            id,
+            size,
         });
         // Every folder above, even one that holds only folders.
         let mut at = up;
@@ -660,6 +813,42 @@ pub fn plant_save(root: &Path, build: impl FnOnce(&mut PackSet) -> Id) {
     repo.commit(&lock, pack, &diary).unwrap();
 }
 
+/// Commits, through Opalro's own library, a save on `main` with `main`'s save as its first parent
+/// and `others` after it, holding the same folder; its ID. The others need not be stored.
+pub fn plant_combined(root: &Path, message: &str, others: &[Id]) -> Id {
+    let mut repo = Repository::open(root).unwrap();
+    let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
+    let (head, entry) = repo.current().unwrap();
+    let first = entry.state.lines["main"];
+    let made_on = repo.store().save(&first, false).unwrap();
+    let save = Save {
+        root: made_on.root,
+        parents: [first].into_iter().chain(others.iter().copied()).collect(),
+        author: made_on.author.clone(),
+        saver: made_on.saver,
+        message: message.into(),
+        change_id: ChangeId::random().unwrap(),
+        move_notes: vec![],
+        signature: vec![],
+        extra: made_on.extra,
+    };
+    let mut pack = repo.new_packs().unwrap();
+    let save_id = pack.add_record(ObjectKind::Save, &save.encode()).unwrap();
+    let mut state = entry.state.clone();
+    state.lines.insert("main".into(), save_id);
+    let diary = DiaryEntry {
+        parent: Some(head),
+        action: Action::Command,
+        command: "save".into(),
+        who: made_on.author,
+        opal_version: "0.1.0".into(),
+        state,
+        folder_change: None,
+    };
+    repo.commit(&lock, pack, &diary).unwrap();
+    save_id
+}
+
 // Big files as Opalro stores them, and chunk lists no honest writer makes.
 
 /// `bytes` cut as Opalro cuts a big file: its chunk list, and its chunks.
@@ -703,6 +892,20 @@ pub fn add_file(pack: &mut PackSet, bytes: &[u8]) -> Id {
     } else {
         pack.add_content(bytes).unwrap()
     }
+}
+
+/// Stores a conflict record, for saves planted before a combine can make them; its ID.
+pub fn add_conflict(pack: &mut PackSet, record: &Record) -> Id {
+    pack.add_record(ObjectKind::Conflict, &record.encode())
+        .unwrap()
+}
+
+/// The `format` of a project v0.1 made, which doesn't keep conflicts.
+pub const V01_FORMAT: &str = "opalro-repository 1\nhash blake3\nfeature chunks\n";
+
+/// Makes the project at `root` one as v0.1 made it: its `format` lists `chunks` only.
+pub fn without_conflicts_feature(root: &Path) {
+    std::fs::write(root.join(".opalro/format"), V01_FORMAT).unwrap();
 }
 
 /// Stores `record` as it is, however it decodes, as a chunk list of the file `file` of `size`
@@ -777,11 +980,15 @@ pub fn opal_with_open_files(config: &Path, dir: &Path, most: u32, args: &[&str])
     cmd
 }
 
-/// Runs `cmd` as the test user, with no fault point and its own settings folder `config`.
+/// Runs `cmd` as the test user, with no fault point, no progress line and its own settings folder
+/// `config`.
 fn as_test_user(cmd: &mut Command, config: &Path) {
     cmd.env("OPALRO_USER_NAME", "Test")
         .env("OPALRO_USER_EMAIL", "test@example.com")
         .env_remove("OPALRO_FAULT_AT")
+        // Progress waits ten minutes, so it never comes in first on a slow machine; a test about
+        // progress sets its own.
+        .env("OPALRO_PROGRESS_QUIET_MS", "600000")
         .env("OPALRO_CONFIG_DIR", config)
         // Git's own settings and ignore list are found from here (decision 047), and only here.
         .env("HOME", config)
@@ -995,6 +1202,39 @@ impl Env {
         let repo = Repository::open(self.root()).unwrap();
         let state = repo.current().unwrap().1.state;
         (repo, state)
+    }
+
+    /// Gives the save `at` the tags `names`, in place of the tags there were, written as one step
+    /// through Opalro's own library: names the tag command would refuse too.
+    pub fn plant_tags(&self, names: impl Iterator<Item = String>, at: Id) {
+        let mut repo = Repository::open(self.root()).unwrap();
+        let lock = repo.lock_for_change("tag", &mut |_| {}).unwrap();
+        let (head, entry) = repo.current().unwrap();
+        let tag = Tag {
+            save: at,
+            message: String::new(),
+            git_tags: vec![],
+        };
+        let list = TagList {
+            tags: names.map(|name| (name, tag.clone())).collect(),
+        };
+        let mut packs = repo.new_packs().unwrap();
+        let mut state = entry.state.clone();
+        state.tags = Some(
+            packs
+                .add_record(ObjectKind::TagList, &list.encode())
+                .unwrap(),
+        );
+        let diary = DiaryEntry {
+            parent: Some(head),
+            action: Action::Command,
+            command: "tag".into(),
+            who: entry.who,
+            opal_version: "0.1.0".into(),
+            state,
+            folder_change: None,
+        };
+        repo.commit(&lock, packs, &diary).unwrap();
     }
 
     /// `opalro save` with these arguments, whatever happens.

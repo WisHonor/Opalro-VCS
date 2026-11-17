@@ -2,6 +2,7 @@
 
 use std::collections::{HashMap, HashSet};
 
+use crate::conflict::Term;
 use crate::encoding::{DecodeError, Reader, Writer};
 use crate::id::{Flavor, Id, hash_record};
 use crate::names::{MAX_NAME_BYTES, MAX_PATH_BYTES, validate_name};
@@ -18,6 +19,7 @@ pub const MAX_SAVE_ENTRIES: u64 = 10_000_000;
 
 /// The limits for a whole save, and how much of a save one walk has met so far. Every walk over a
 /// save takes one of these (two when it compares two saves), so the rule lives here.
+#[derive(Debug)]
 pub struct SaveLimits {
     max_depth: usize,
     max_entries: u64,
@@ -38,6 +40,8 @@ pub(crate) struct Measure {
     pub(crate) depth: usize,
     /// Its longest path, from below it.
     pub(crate) longest: usize,
+    /// Its conflict entries and all below them, counted by path as `entries` is.
+    pub(crate) conflicts: u64,
 }
 
 impl Measure {
@@ -46,6 +50,8 @@ impl Measure {
     pub(crate) fn add_folder(&mut self, below: Measure, times: u64, name: usize) {
         let all = below.entries.saturating_mul(times);
         self.entries = self.entries.saturating_add(all);
+        let conflicts = below.conflicts.saturating_mul(times);
+        self.conflicts = self.conflicts.saturating_add(conflicts);
         self.depth = self.depth.max(below.depth.saturating_add(1));
         // The folder's own path is a path too, and the only one of an empty folder.
         let path = match below.longest {
@@ -151,7 +157,34 @@ impl SaveLimits {
         at: usize,
         read: impl FnMut(&Id) -> Result<Listing, E>,
     ) -> Result<Result<(), String>, E> {
-        let m = match self.measure(id, depth, read)? {
+        Ok(self
+            .add_measured(id, depth, at, read, |_| Ok(None))?
+            .map(drop))
+    }
+
+    /// `add_all`, with each conflict entry counted as what it stands as (`stand` reads that from
+    /// the record): a folder it stands as is counted with everything in it. Gives the number of
+    /// kind-6 entries met, a listing again for each path it is reached by.
+    pub(crate) fn add_all_standing<E>(
+        &mut self,
+        id: Id,
+        depth: usize,
+        at: usize,
+        read: impl FnMut(&Id) -> Result<Listing, E>,
+        stand: impl FnMut(&Id) -> Result<Option<Term>, E>,
+    ) -> Result<Result<u64, String>, E> {
+        self.add_measured(id, depth, at, read, stand)
+    }
+
+    fn add_measured<E>(
+        &mut self,
+        id: Id,
+        depth: usize,
+        at: usize,
+        read: impl FnMut(&Id) -> Result<Listing, E>,
+        stand: impl FnMut(&Id) -> Result<Option<Term>, E>,
+    ) -> Result<Result<u64, String>, E> {
+        let m = match self.measure(id, depth, read, stand)? {
             Ok(m) => m,
             Err(why) => return Ok(Err(why)),
         };
@@ -162,22 +195,25 @@ impl SaveLimits {
         Ok(self
             .check_depth(depth.saturating_add(m.depth))
             .and_then(|()| self.check_path(longest))
-            .and_then(|()| self.count(m.entries)))
+            .and_then(|()| self.count(m.entries))
+            .map(|()| m.conflicts))
     }
 
     /// Measures the listing `id`, of a folder `depth` levels down; a listing that would be deeper
-    /// than the limit stops it, unread.
+    /// than the limit stops it, unread. A conflict entry that `stand` says stands as a folder is
+    /// measured as if it were that folder.
     fn measure<E>(
         &mut self,
         id: Id,
         depth: usize,
         mut read: impl FnMut(&Id) -> Result<Listing, E>,
+        mut stand: impl FnMut(&Id) -> Result<Option<Term>, E>,
     ) -> Result<Result<Measure, String>, E> {
         enum Step {
             Read(Id, usize),
-            /// A listing's entries and longest name of a file, and its folders with their names'
-            /// lengths, once all of those are measured.
-            Sum(Id, u64, usize, Vec<(Id, usize)>),
+            /// A listing's entries, conflicts and longest name of a file, and its folders with
+            /// their names' lengths, once all of those are measured.
+            Sum(Id, u64, u64, usize, Vec<(Id, usize)>),
         }
         // Below every folder first, without a call per level: a save may nest deeper than a stack.
         let mut todo = vec![Step::Read(id, depth)];
@@ -191,27 +227,42 @@ impl SaveLimits {
                         return Ok(Err(why));
                     }
                     let listing = read(&id)?;
-                    let (mut longest, mut folders) = (0, Vec::new());
+                    let (mut longest, mut folders, mut conflicts) = (0, Vec::new(), 0u64);
                     for e in listing.entries() {
-                        if e.kind == EntryKind::Folder {
-                            folders.push((e.id, e.name.len()));
-                        } else {
-                            longest = longest.max(e.name.len());
+                        let folder = match e.kind {
+                            EntryKind::Folder => Some(e.id),
+                            EntryKind::Conflict => {
+                                conflicts += 1;
+                                match stand(&e.id)? {
+                                    Some(Term {
+                                        kind: EntryKind::Folder,
+                                        id,
+                                        ..
+                                    }) => Some(id),
+                                    _ => None,
+                                }
+                            }
+                            _ => None,
+                        };
+                        match folder {
+                            Some(f) => folders.push((f, e.name.len())),
+                            None => longest = longest.max(e.name.len()),
                         }
                     }
                     let mut below: Vec<Id> = folders.iter().map(|&(f, _)| f).collect();
                     below.sort_unstable();
                     below.dedup();
                     let entries = listing.entries().len() as u64;
-                    todo.push(Step::Sum(id, entries, longest, folders));
+                    todo.push(Step::Sum(id, entries, conflicts, longest, folders));
                     let next = level.saturating_add(1);
                     todo.extend(below.into_iter().map(|f| Step::Read(f, next)));
                 }
-                Step::Sum(id, entries, longest, folders) => {
+                Step::Sum(id, entries, conflicts, longest, folders) => {
                     let mut m = Measure {
                         entries,
                         depth: 0,
                         longest,
+                        conflicts,
                     };
                     for (folder, name) in folders {
                         // Each was measured before this: a listing that holds itself is read
@@ -493,6 +544,146 @@ mod tests {
         }
     }
 
+    fn no_conflicts(_: &Id) -> Result<Option<Term>, &'static str> {
+        Ok(None)
+    }
+
+    fn entry(name: &str, kind: EntryKind, id: Id) -> Entry {
+        let size = u64::from(kind.has_size());
+        Entry {
+            name: name.into(),
+            kind,
+            id,
+            size,
+        }
+    }
+
+    impl Held {
+        /// Holds a listing of `entries`; its ID.
+        fn of(&mut self, entries: Vec<Entry>) -> Id {
+            let listing = Listing::new(entries).unwrap();
+            let id = listing.id();
+            self.listings.insert(id, listing);
+            id
+        }
+    }
+
+    fn folder(id: Id) -> Option<Term> {
+        Some(Term {
+            kind: EntryKind::Folder,
+            id,
+            size: 0,
+        })
+    }
+
+    #[test]
+    fn a_conflict_counts_as_what_it_stands_as() {
+        let mut held = Held::default();
+        let three = held.add(names("f", 3), EntryKind::File, Id([7; 32]));
+        let record = Id([9; 32]);
+        let top = held.of(vec![entry("x", EntryKind::Conflict, record)]);
+        let file = Some(Term {
+            kind: EntryKind::File,
+            id: Id([7; 32]),
+            size: 1,
+        });
+        let measured = |held: &mut Held, stands: Option<Term>| {
+            let mut asked = 0;
+            let mut limits = SaveLimits::default();
+            let stand = |id: &Id| {
+                assert_eq!(*id, record);
+                asked += 1;
+                Ok(stands)
+            };
+            let m = limits.measure(top, 0, |id| held.read(id), stand);
+            assert_eq!(asked, 1);
+            m.unwrap().unwrap()
+        };
+        let as_folder = Measure {
+            entries: 4,
+            depth: 1,
+            longest: "x/f00000".len(),
+            conflicts: 1,
+        };
+        assert_eq!(measured(&mut held, folder(three)), as_folder);
+        let alone = Measure {
+            entries: 1,
+            depth: 0,
+            longest: 1,
+            conflicts: 1,
+        };
+        assert_eq!(measured(&mut held, file), alone);
+        assert_eq!(measured(&mut held, None), alone);
+        // The count `add_all_standing` gives, and every entry counted.
+        let mut limits = SaveLimits::default();
+        let stand = |_: &Id| Ok(folder(three));
+        let counted = limits.add_all_standing(top, 0, 0, |id| held.read(id), stand);
+        assert_eq!(counted, Ok(Ok(1)));
+        assert_eq!(limits.entries, 4);
+    }
+
+    #[test]
+    fn kind_6_entries_are_counted_by_path() {
+        let mut held = Held::default();
+        let one = held.of(vec![entry("x", EntryKind::Conflict, Id([9; 32]))]);
+        let top = held.add(["a".into(), "b".into()], EntryKind::Folder, one);
+        let mut limits = SaveLimits::default();
+        let stand = |_: &Id| Ok(None);
+        let counted = limits.add_all_standing(top, 0, 0, |id| held.read(id), stand);
+        assert_eq!(counted, Ok(Ok(2)));
+        assert_eq!(limits.entries, 4);
+    }
+
+    #[test]
+    fn a_folder_a_conflict_stands_as_is_held_to_the_depth_limit() {
+        // The conflict stands as d, which holds e/f: three levels below the top.
+        let mut held = Held::default();
+        let f = held.of(vec![]);
+        let e = held.of(vec![entry("f", EntryKind::Folder, f)]);
+        let d = held.of(vec![entry("e", EntryKind::Folder, e)]);
+        let top = held.of(vec![entry("c", EntryKind::Conflict, Id([9; 32]))]);
+        let mut add = |max_depth: usize, standing: bool| {
+            let mut limits = SaveLimits::new(max_depth, MAX_SAVE_ENTRIES);
+            let read = |id: &Id| held.read(id);
+            if standing {
+                let stand = |_: &Id| Ok(folder(d));
+                limits.add_all_standing(top, 0, 0, read, stand).unwrap()
+            } else {
+                limits.add_all(top, 0, 0, read).unwrap().map(|()| 1)
+            }
+        };
+        assert_eq!(add(3, true), Ok(1));
+        let why = add(2, true).unwrap_err();
+        assert_eq!(why, "its folders nest more than 2 levels deep");
+        // Measured as an entry only, it is no folder at all.
+        assert_eq!(add(0, false), Ok(1));
+    }
+
+    #[test]
+    fn theirs_folder_term_is_not_counted() {
+        let mut held = Held::default();
+        let theirs = held.add(names("t", 5), EntryKind::File, Id([7; 32]));
+        let record = crate::conflict::Record {
+            terms: vec![
+                Some(Term {
+                    kind: EntryKind::File,
+                    id: Id([7; 32]),
+                    size: 1,
+                }),
+                None,
+                folder(theirs),
+            ],
+            own: None,
+        };
+        let top = held.of(vec![entry("c", EntryKind::Conflict, record.id())]);
+        let mut limits = SaveLimits::default();
+        let stand = |_: &Id| Ok(crate::conflict::stands_as(&record));
+        let counted = limits.add_all_standing(top, 0, 0, |id| held.read(id), stand);
+        assert_eq!(counted, Ok(Ok(1)));
+        assert_eq!(limits.entries, 1);
+        assert!(!held.reads.contains_key(&theirs));
+    }
+
     fn names(prefix: &str, n: usize) -> impl Iterator<Item = String> + '_ {
         (0..n).map(move |i| format!("{prefix}{i:05}"))
     }
@@ -513,18 +704,27 @@ mod tests {
         let mut held = Held::default();
         let top = chain(&mut held);
         let mut limits = SaveLimits::default();
-        let m = limits.measure(top, 0, |id| held.read(id)).unwrap().unwrap();
+        let m = limits
+            .measure(top, 0, |id| held.read(id), no_conflicts)
+            .unwrap()
+            .unwrap();
         // The 2^25 files at the bottom, and the 2^25 - 2 folders above them.
         let want = Measure {
             entries: (1 << 26) - 2,
             depth: 24,
             longest: "a/".len() * 24 + 1,
+            conflicts: 0,
         };
         assert_eq!(m, want);
         assert_eq!(held.reads.len(), 25);
         assert!(held.reads.values().all(|&n| n == 1), "{:?}", held.reads);
         // Kept for the rest of the walk: met again, nothing is read.
-        assert_eq!(limits.measure(top, 0, |id| held.read(id)).unwrap(), Ok(m));
+        assert_eq!(
+            limits
+                .measure(top, 0, |id| held.read(id), no_conflicts)
+                .unwrap(),
+            Ok(m)
+        );
         assert!(held.reads.values().all(|&n| n == 1));
     }
 
@@ -537,7 +737,9 @@ mod tests {
         let listing = held.listings[&id].clone();
         held.listings.insert(looped, listing);
         let mut limits = SaveLimits::new(10, MAX_SAVE_ENTRIES);
-        let why = limits.measure(looped, 0, |id| held.read(id)).unwrap();
+        let why = limits
+            .measure(looped, 0, |id| held.read(id), no_conflicts)
+            .unwrap();
         assert_eq!(why, Err("its folders nest more than 10 levels deep".into()));
     }
 
@@ -600,7 +802,7 @@ mod tests {
         let (under, over) = (shared_save(&mut held, 989), shared_save(&mut held, 991));
         let mut limits = SaveLimits::default();
         let m = limits
-            .measure(under, 0, |id| held.read(id))
+            .measure(under, 0, |id| held.read(id), no_conflicts)
             .unwrap()
             .unwrap();
         assert_eq!(m.entries, 9_999_999);

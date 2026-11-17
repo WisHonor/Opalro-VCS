@@ -1,0 +1,156 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+mod support;
+use support::{Env, text};
+
+fn run(env: &Env, args: &[&str]) -> (i32, String) {
+    let out = env.opalro().args(args).output().unwrap();
+    let said = format!("{}{}", text(&out.stdout), text(&out.stderr));
+    (out.status.code().unwrap_or(-1), said)
+}
+
+fn ok(env: &Env, args: &[&str]) -> String {
+    let (code, said) = run(env, args);
+    assert_eq!(code, 0, "{args:?}: {said}");
+    said
+}
+
+const PIC_START: &[u8] = b"\x89PNG\r\n\x1a\n\0start";
+const PIC_SIDE: &[u8] = b"\x89PNG\r\n\x1a\n\0side";
+const PIC_MAIN: &[u8] = b"\x89PNG\r\n\x1a\n\0main";
+
+/// `main` and `side` changed `a.txt`, `pic.png` and `b.png` apart; `other` stays at the start.
+fn combined(env: &Env) {
+    ok(env, &["start", "--preset", "custom"]);
+    env.overwrite("a.txt", "1\n2\n3\n4\n5\n6\n7\n8\n");
+    support::write(env, "pic.png", PIC_START);
+    support::write(env, "b.png", PIC_START);
+    ok(env, &["save", "A"]);
+    ok(env, &["line", "new", "other"]);
+    ok(env, &["goto", "main"]);
+    ok(env, &["line", "new", "side"]);
+    env.overwrite("a.txt", "1\nside\n3\n4\n5\n6\n7\n8\n");
+    support::write(env, "pic.png", PIC_SIDE);
+    support::write(env, "b.png", PIC_SIDE);
+    ok(env, &["save", "On side"]);
+    ok(env, &["goto", "main"]);
+    env.overwrite("a.txt", "1\nmain\n3\n4\n5\n6\n7\n8\n");
+    support::write(env, "pic.png", PIC_MAIN);
+    support::write(env, "b.png", PIC_MAIN);
+    ok(env, &["save", "On main"]);
+    println!("{}", ok(env, &["combine", "side"]));
+}
+
+fn tidy_far_ahead(env: &Env) {
+    let mut repo = opal_core::repo::Repository::open(env.root()).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let later = now + 40 * 24 * 3600 * 1000;
+    let report =
+        opal_core::tidy::tidy(&mut repo, 1, later, &mut |_| {}, &mut |_| {}).unwrap();
+    println!("tidy: {report:?}");
+}
+
+fn copy_all(env: &Env, paths: &[&str]) {
+    for p in paths {
+        for pick in ["mine", "theirs", "before"] {
+            let to = env.config().join(format!("{}-{pick}", p.replace('/', "_")));
+            let (code, said) = run(
+                env,
+                &["resolve", p, "--copy", pick, "--to", to.to_str().unwrap()],
+            );
+            println!("copy {p} {pick}: {code} {said}");
+            assert!(
+                code == 0 || said.contains("nothing to copy"),
+                "{p} {pick}: {said}"
+            );
+        }
+    }
+}
+
+#[test]
+fn rt22_tidy_past_the_window_keeps_kept_conflicts() {
+    let env = Env::empty();
+    combined(&env);
+    // A half-fixed text saved twice.
+    let marked = std::fs::read_to_string(env.root().join("a.txt")).unwrap();
+    env.overwrite("a.txt", &format!("{marked}extra one\n"));
+    ok(&env, &["save", "half one"]);
+    env.overwrite("a.txt", &format!("{marked}extra one\nextra two\n"));
+    ok(&env, &["save", "half two"]);
+    // A safety copy: b.png changed in place, unsaved, then a side kept over it.
+    support::write(&env, "b.png", b"\x89PNG\r\n\x1a\n\0unsaved work");
+    println!("{}", ok(&env, &["resolve", "b.png", "--keep", "theirs"]));
+    ok(&env, &["line", "delete", "side", "--yes"]);
+    println!("{}", ok(&env, &["status"]));
+    tidy_far_ahead(&env);
+    verify_at(&env, 40);
+    copy_all(&env, &["a.txt", "pic.png"]);
+    println!("{}", ok(&env, &["resolve", "pic.png", "--keep", "theirs"]));
+    assert_eq!(std::fs::read(env.root().join("pic.png")).unwrap(), PIC_SIDE);
+    println!("{}", ok(&env, &["resolve", "a.txt", "--keep", "theirs"]));
+    verify_at(&env, 40);
+    // The safety copy of b.png: undo is past its window, so look for it.
+    println!("{}", run(&env, &["undo", "--list"]).1);
+}
+
+#[test]
+fn rt22_tidy_past_the_window_keeps_a_conflict_only_a_shelf_reaches() {
+    let env = Env::empty();
+    combined(&env);
+    let marked = std::fs::read_to_string(env.root().join("a.txt")).unwrap();
+    env.overwrite("a.txt", &format!("{marked}half done\n"));
+    support::write(&env, "pic.png", b"\x89PNG\r\n\x1a\n\0engine");
+    println!("{}", ok(&env, &["shelf"]));
+    ok(&env, &["goto", "other"]);
+    ok(&env, &["line", "delete", "main", "--yes"]);
+    ok(&env, &["line", "delete", "side", "--yes"]);
+    tidy_far_ahead(&env);
+    verify_at(&env, 40);
+    println!("{}", ok(&env, &["shelf", "--list"]));
+    let (code, said) = run(&env, &["unshelf"]);
+    println!("unshelf: {code} {said}");
+    println!("{}", run(&env, &["status"]).1);
+    println!(
+        "a.txt now:\n{}",
+        std::fs::read_to_string(env.root().join("a.txt")).unwrap_or_default()
+    );
+}
+
+#[test]
+fn rt22_tidy_past_the_window_control_without_conflicts() {
+    let env = Env::empty();
+    ok(&env, &["start", "--preset", "custom"]);
+    env.overwrite("a.txt", "1\n");
+    ok(&env, &["save", "A"]);
+    ok(&env, &["line", "new", "side"]);
+    env.overwrite("a.txt", "side\n");
+    ok(&env, &["save", "On side"]);
+    ok(&env, &["goto", "main"]);
+    env.overwrite("a.txt", "main\n");
+    ok(&env, &["save", "On main"]);
+    env.overwrite("a.txt", "main two\n");
+    ok(&env, &["save", "On main 2"]);
+    env.overwrite("a.txt", "unsaved\n");
+    ok(&env, &["shelf"]);
+    ok(&env, &["line", "delete", "side", "--yes"]);
+    tidy_far_ahead(&env);
+    verify_at(&env, 0);
+    verify_at(&env, 40);
+    verify_at(&env, 41);
+}
+fn verify_at(env: &Env, ahead_days: i64) {
+    let repo = opal_core::repo::Repository::open(env.root()).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64;
+    let v = opal_core::verify::verify(&repo, 1, now + ahead_days * 24 * 3600 * 1000, &mut |_, _| {});
+    println!("verify ahead {ahead_days}d: {} problems", v.problems_total);
+    for p in &v.problems {
+        let by = p.needed_by.as_ref().map(|(s, path)| format!("{} {path}", s.to_hex()));
+        println!("   {:?} {:?} by {by:?}: {}", p.kind, p.object.map(|o| o.to_hex()), p.message);
+    }
+}

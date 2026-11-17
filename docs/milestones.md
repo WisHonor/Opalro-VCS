@@ -1,6 +1,6 @@
 # Opalro Milestones
 
-> **Status:** design-phase plan (2026-10-31), [decision 018](decisions/018-milestone-plan.md). Milestone 1 is broken into small steps below; each later milestone gets its own step list when it starts. **Milestone 1 is done** (2026-11-01; plan: [plans/2026-10-31-milestone-1-first-save.md](plans/2026-10-31-milestone-1-first-save.md)). The fixes from its two red-team sessions (2026-11-01 and 2026-11-02) are done too: plan [plans/2026-11-01-red-team-m1-fixes.md](plans/2026-11-01-red-team-m1-fixes.md), rulings in decisions [025](decisions/025-red-team-m1-rulings.md) to [029](decisions/029-red-team-m1-final-review-rulings.md). **Milestone 2 is built** (2026-11-03), and both its red-team sessions are done (2026-11-03, rulings in decisions [043](decisions/043-red-team-m2-rulings.md) and [044](decisions/044-red-team-m2-final-rulings.md)); its final review is done too, and it was merged into `main` on 2026-11-04. **Milestone 2 is done** (2026-11-04): the owner imported one of their own repositories and tried a project inside a OneDrive folder; the results are below its steps. It was planned on 2026-11-02 after decisions [030](decisions/030-administrators-only-when-elevated.md) to [041](decisions/041-several-packs-per-command.md), and [decision 042](decisions/042-trust-hint-skips-folders-anyone-can-write-to.md) settled one more question; its steps are below and its plan is [plans/2026-11-02-milestone-2-coming-from-git.md](plans/2026-11-02-milestone-2-coming-from-git.md). **Milestone 3 was planned on 2026-11-05** after decisions [048](decisions/048-handle-relative-file-access.md) to [059](decisions/059-bolt-spellings-left-out-like-git-spellings.md); its steps are below and its plan is [plans/2026-11-05-milestone-3-working-folder.md](plans/2026-11-05-milestone-3-working-folder.md). **Milestone 3 is done** (2026-11-06): both its red-team sessions and its whole-branch review are done, and it was merged into `main` after the owner approved its `unsafe` code. **Milestone 4 was planned on 2026-11-06** after decisions [070](decisions/070-undo-and-redo-step-through-the-diary.md) to [077](decisions/077-tidy-and-the-undo-window.md); its steps are below and its plan is [plans/2026-11-06-milestone-4-undo-everything.md](plans/2026-11-06-milestone-4-undo-everything.md). **Milestone 4 is done** (2026-11-08): built on 2026-11-07, both its red-team sessions and its whole-branch review are done, and it was merged into `main` (pull request #15); rulings: [plans/2026-11-06-milestone-4-rulings.md](plans/2026-11-06-milestone-4-rulings.md). The OneDrive "Free up space" check of decision 069 is still to be tried. **Milestone 5 was planned on 2026-11-08** after decisions [082](decisions/082-how-big-files-are-cut-into-chunks.md) to [088](decisions/088-benchmarks-and-the-speed-gates.md); its steps are below and its plan is [plans/2026-11-08-milestone-5-big-files.md](plans/2026-11-08-milestone-5-big-files.md). **Milestone 5 is done** (2026-11-09): built on 2026-11-08 and 2026-11-09, with decisions [089](decisions/089-git-lfs-objects-kept-elsewhere.md) to [093](decisions/093-a-family-rebuild-builds-every-member.md) made while building it; both its red-team sessions are done and their findings fixed (decisions [094](decisions/094-red-team-m5-rulings.md) to [098](decisions/098-a-blob-is-also-judged-in-its-crlf-form.md)), its whole-branch review is done, and it was merged into `main` (pull request #21); rulings: [plans/2026-11-08-milestone-5-rulings.md](plans/2026-11-08-milestone-5-rulings.md). **Milestone 6 was planned on 2026-11-09 and 2026-11-10**: two sessions build it at once, one for presets and polish (decided on 2026-11-09, decisions [113](decisions/113-presets-what-each-writes-and-how-start-picks-one.md) to [123](decisions/123-follow-ups-done-or-moved-past-v0.1.md), plan [plans/2026-11-10-milestone-6-presets-and-polish.md](plans/2026-11-10-milestone-6-presets-and-polish.md)) and one for speed and space; each lists its steps below. **Milestone 6 is done** (2026-11-10): both halves were built on 2026-11-10, with decisions [104](decisions/104-an-import-keeps-96-mib-of-rebuilt-objects.md) to [110](decisions/110-the-last-saves-listings-are-read-ahead-of-the-walk.md), [124](decisions/124-restore-is-explained-and-a-shortcut-takes-nothing-for-what-it-isnt.md) and [125](decisions/125-a-safe-folders-entry-is-judged-by-one-look.md) made while building them; each half's two red-team sessions are done and their findings fixed (decisions [111](decisions/111-rulings-after-the-first-red-team-session-on-the-speed-work.md), [112](decisions/112-rulings-after-the-second-red-team-session-on-the-speed-work.md), [126](decisions/126-verify-also-finds-a-save-that-cant-be-written-out.md) and [127](decisions/127-what-verify-holds-is-bounded-and-two-costs-are-written-down.md)), each half's whole-branch review is done, and both were merged into `main`, speed and space first (pull request #27) and presets and polish second (#28), once the two had been measured together ([benchmarks.md](benchmarks.md) §9); rulings: [plans/2026-11-10-milestone-6-rulings.md](plans/2026-11-10-milestone-6-rulings.md) and [plans/2026-11-10-milestone-6-speed-rulings.md](plans/2026-11-10-milestone-6-speed-rulings.md). **v0.1 itself has not shipped:** two sessions prepared it on 2026-11-11 ("Release: v0.1" below): the third speed gate passes under its new rule (decisions [128](decisions/128-v0.1-ships-without-goto-within-twice-gits-time.md) and [132](decisions/132-gotos-limit-is-three-and-a-half-times-gits-time.md)), Opalro is closed source ([decision 140](decisions/140-bolt-is-closed-source.md)), and publishing the release is the owner's. Items milestone 1's reviews deferred, and the ones milestones 2 to 5 deferred, are in [plans/2026-11-01-milestone-1-follow-ups.md](plans/2026-11-01-milestone-1-follow-ups.md); each later plan pulls in the ones that apply.
+> **Status:** design-phase plan (2026-10-31), [decision 018](decisions/018-milestone-plan.md). Milestone 1 is broken into small steps below; each later milestone gets its own step list when it starts. **Milestone 1 is done** (2026-11-01; plan: [plans/2026-10-31-milestone-1-first-save.md](plans/2026-10-31-milestone-1-first-save.md)). The fixes from its two red-team sessions (2026-11-01 and 2026-11-02) are done too: plan [plans/2026-11-01-red-team-m1-fixes.md](plans/2026-11-01-red-team-m1-fixes.md), rulings in decisions [025](decisions/025-red-team-m1-rulings.md) to [029](decisions/029-red-team-m1-final-review-rulings.md). **Milestone 2 is built** (2026-11-03), and both its red-team sessions are done (2026-11-03, rulings in decisions [043](decisions/043-red-team-m2-rulings.md) and [044](decisions/044-red-team-m2-final-rulings.md)); its final review is done too, and it was merged into `main` on 2026-11-04. **Milestone 2 is done** (2026-11-04): the owner imported one of their own repositories and tried a project inside a OneDrive folder; the results are below its steps. It was planned on 2026-11-02 after decisions [030](decisions/030-administrators-only-when-elevated.md) to [041](decisions/041-several-packs-per-command.md), and [decision 042](decisions/042-trust-hint-skips-folders-anyone-can-write-to.md) settled one more question; its steps are below and its plan is [plans/2026-11-02-milestone-2-coming-from-git.md](plans/2026-11-02-milestone-2-coming-from-git.md). **Milestone 3 was planned on 2026-11-05** after decisions [048](decisions/048-handle-relative-file-access.md) to [059](decisions/059-bolt-spellings-left-out-like-git-spellings.md); its steps are below and its plan is [plans/2026-11-05-milestone-3-working-folder.md](plans/2026-11-05-milestone-3-working-folder.md). **Milestone 3 is done** (2026-11-06): both its red-team sessions and its whole-branch review are done, and it was merged into `main` after the owner approved its `unsafe` code. **Milestone 4 was planned on 2026-11-06** after decisions [070](decisions/070-undo-and-redo-step-through-the-diary.md) to [077](decisions/077-tidy-and-the-undo-window.md); its steps are below and its plan is [plans/2026-11-06-milestone-4-undo-everything.md](plans/2026-11-06-milestone-4-undo-everything.md). **Milestone 4 is done** (2026-11-08): built on 2026-11-07, both its red-team sessions and its whole-branch review are done, and it was merged into `main` (pull request #15); rulings: [plans/2026-11-06-milestone-4-rulings.md](plans/2026-11-06-milestone-4-rulings.md). The OneDrive "Free up space" check of decision 069 is still to be tried. **Milestone 5 was planned on 2026-11-08** after decisions [082](decisions/082-how-big-files-are-cut-into-chunks.md) to [088](decisions/088-benchmarks-and-the-speed-gates.md); its steps are below and its plan is [plans/2026-11-08-milestone-5-big-files.md](plans/2026-11-08-milestone-5-big-files.md). **Milestone 5 is done** (2026-11-09): built on 2026-11-08 and 2026-11-09, with decisions [089](decisions/089-git-lfs-objects-kept-elsewhere.md) to [093](decisions/093-a-family-rebuild-builds-every-member.md) made while building it; both its red-team sessions are done and their findings fixed (decisions [094](decisions/094-red-team-m5-rulings.md) to [098](decisions/098-a-blob-is-also-judged-in-its-crlf-form.md)), its whole-branch review is done, and it was merged into `main` (pull request #21); rulings: [plans/2026-11-08-milestone-5-rulings.md](plans/2026-11-08-milestone-5-rulings.md). **Milestone 6 was planned on 2026-11-09 and 2026-11-10**: two sessions build it at once, one for presets and polish (decided on 2026-11-09, decisions [113](decisions/113-presets-what-each-writes-and-how-start-picks-one.md) to [123](decisions/123-follow-ups-done-or-moved-past-v0.1.md), plan [plans/2026-11-10-milestone-6-presets-and-polish.md](plans/2026-11-10-milestone-6-presets-and-polish.md)) and one for speed and space; each lists its steps below. **Milestone 6 is done** (2026-11-10): both halves were built on 2026-11-10, with decisions [104](decisions/104-an-import-keeps-96-mib-of-rebuilt-objects.md) to [110](decisions/110-the-last-saves-listings-are-read-ahead-of-the-walk.md), [124](decisions/124-restore-is-explained-and-a-shortcut-takes-nothing-for-what-it-isnt.md) and [125](decisions/125-a-safe-folders-entry-is-judged-by-one-look.md) made while building them; each half's two red-team sessions are done and their findings fixed (decisions [111](decisions/111-rulings-after-the-first-red-team-session-on-the-speed-work.md), [112](decisions/112-rulings-after-the-second-red-team-session-on-the-speed-work.md), [126](decisions/126-verify-also-finds-a-save-that-cant-be-written-out.md) and [127](decisions/127-what-verify-holds-is-bounded-and-two-costs-are-written-down.md)), each half's whole-branch review is done, and both were merged into `main`, speed and space first (pull request #27) and presets and polish second (#28), once the two had been measured together ([benchmarks.md](benchmarks.md) §9); rulings: [plans/2026-11-10-milestone-6-rulings.md](plans/2026-11-10-milestone-6-rulings.md) and [plans/2026-11-10-milestone-6-speed-rulings.md](plans/2026-11-10-milestone-6-speed-rulings.md). **v0.1 was never published:** two sessions prepared it on 2026-11-11 ("Release: v0.1" below): the third speed gate passes under its new rule (decisions [128](decisions/128-v0.1-ships-without-goto-within-twice-gits-time.md) and [132](decisions/132-gotos-limit-is-three-and-a-half-times-gits-time.md)), and Opalro is closed source ([decision 140](decisions/140-bolt-is-closed-source.md)); on 2026-11-16 the owner decided that v0.2 is the first published version and v0.1's draft is never published ([decision 190](decisions/190-v0.2-is-the-first-published-version.md)). Items milestone 1's reviews deferred, and the ones milestones 2 to 5 deferred, are in [plans/2026-11-01-milestone-1-follow-ups.md](plans/2026-11-01-milestone-1-follow-ups.md); each later plan pulls in the ones that apply. **v0.2 was planned on 2026-11-14** as milestones 7 to 10 ([decision 157](decisions/157-v0.2-in-four-milestones.md)), built on the branch `v0.2`, while `main` holds v0.1's code, which was never published ([decision 190](decisions/190-v0.2-is-the-first-published-version.md)); **milestone 7 was planned the same day** after decisions [158](decisions/158-making-renaming-and-deleting-lines.md) to [160](decisions/160-whether-a-save-is-in-anothers-history.md), and its steps are at the end of this page.
 
 ## v0.1: solo, local, games first
 
@@ -23,7 +23,7 @@
 
 Benchmark results against Git and Git LFS are published either way ([benchmarks.md](benchmarks.md)). The first two gates passed when measured on 2026-11-09 and every time since. The third was added on 2026-11-10 and failed five of its six checks before milestone 6's speed work; after it, going back on Linux took 1.79 to 2.65 times Git's time over ten runs, so on 2026-11-11 the owner ruled that v0.1 ships without it, holding `status` and the small save to twice Git's time (decision 128). On the finished code the gate against Git passed ten runs in ten on both systems, and the Nightly run passed the memory and status gates ([benchmarks.md](benchmarks.md) §10).
 
-After v0.1: v0.2 adds combining lines (plus renaming and deleting them); v0.3 adds syncing and locking ([design.md](design.md) §1).
+After v0.1: v0.2 adds combining lines, with making, renaming and deleting them, tags and `who` ("v0.2: lines and combining" below); v0.3 adds syncing and locking ([design.md](design.md) §1).
 
 ## Milestone 1: First save
 
@@ -444,3 +444,170 @@ The owner decided that Opalro is closed source ([decision 140](decisions/140-bol
 
 **11. The rulings, the page for the owner, and the merge** ✅ (2026-11-11/12; Tasks 15–17)
 - *Done when:* the rulings file and `docs/releases/v0.1.0-before-you-publish.md` are written, and the pull request's checks pass on all three systems.
+
+## v0.2: lines and combining
+
+Planned on 2026-11-14 ([decision 157](decisions/157-v0.2-in-four-milestones.md)). Claude decided 157 to 160 at the owner's request while the owner was away, and 161 to 163 while building milestone 7; each can be reversed. v0.2 was built on the branch `v0.2`: each milestone on a branch of its own, merged into `v0.2` after its red-team session. While it was built, `main` kept v0.1's code, which was never published ([decision 190](decisions/190-v0.2-is-the-first-published-version.md)); `v0.2` goes into `main` only at the owner's word: on 2026-11-16 the owner had Claude merge it ([decision 192](decisions/192-the-owner-has-claude-merge-v0.2-into-main.md)).
+
+| # | Milestone | Done when |
+|---|---|---|
+| 7 | **Lines and tags** | `line new`, `line rename` and `line delete` work, `save --line` works from a line, `tag` makes, lists, moves and deletes tags, and a tag's name is taken by `goto` and `show`; Opalro can tell whether one save is in another's history through every parent |
+| 8 | **Combine** | `combine <line>` joins two lines when no file conflicts: it finds where they parted, merges the folders file by file and text line by line, follows files that moved, and only moves the line forward when that is all it takes; `save` records the moves it is sure of; `history`, `show` and `goto` reach the saves a combine brought in. A combine that would leave a conflict stops, names the files and changes nothing |
+| 9 | **Conflicts** | A combine with conflicts is kept: the conflict record is final in the storage spec, text files get markers, other files keep your version, `resolve` records a fix, and every command knows what a conflict is |
+| 10 | **`who`, and v0.2** | `who <file>` names the save behind each line of a file; `save --amend` refuses a save another line reaches through a combine; going back is measured against twice Git's time; v0.2 is packaged up to, but not including, publishing |
+
+Each milestone's own questions are decided before its plan is written, and each ends with its red-team session ([decision 024](decisions/024-red-team-gate.md)). Format 1 holds everything milestones 7 and 8 store, so a project used with them still opens in v0.1; only conflicts (milestone 9) need something new on disk.
+
+## Milestone 7: Lines and tags
+
+Planned on 2026-11-14 after decisions [158](decisions/158-making-renaming-and-deleting-lines.md) to [160](decisions/160-whether-a-save-is-in-anothers-history.md): [plans/2026-11-14-milestone-7-lines-and-tags.md](plans/2026-11-14-milestone-7-lines-and-tags.md). Each step ends with tests passing on Windows, macOS and Linux; the plan's task numbers are in brackets. A ✅ marks a step that is done.
+
+**1. Whose history a save is in** ✅ (2026-11-14; Task 1)
+- One walk through every parent, newest first, that counts the saves a line has and nothing else has ([decision 160](decisions/160-whether-a-save-is-in-anothers-history.md)).
+- *Done when:* it agrees with a full walk on generated histories, whatever their clocks say about "held or not", and reads only what two sides don't share.
+
+**2. Lines made, renamed and deleted** ✅ (2026-11-14; Tasks 2 to 5)
+- `opalro line new`, `line rename`, `line delete`, and `save --line` from a line, each one diary step ([decision 158](decisions/158-making-renaming-and-deleting-lines.md)); `undo` says what came back without naming a save that was never made.
+- *Done when:* each works from the command line with `--json`, `line delete` asks exactly when nothing else holds the line's saves, and undo, redo and `tidy` treat the steps as any other.
+
+**3. Tags** ✅ (2026-11-14; Tasks 6 to 9)
+- `opalro tag` makes, lists, moves and deletes tags; a tag's name is taken where a save is asked for; `history` and `show` name them ([decision 159](decisions/159-tags.md)).
+- *Done when:* moving and deleting ask first, an imported tag's name and message are shown escaped, and a project with 100,000 tags stays quick.
+
+**4. Git's words** ✅ (2026-11-14; Task 10)
+- `checkout -b`, `switch -c`, `branch -m`, `branch -d` and `tag -d` run Opalro's commands; `branch <name>` is still explained.
+
+**5. Proof** ✅ (2026-11-14; Tasks 11 and 12)
+- The model test makes, renames and deletes lines and tags among its random steps; the ancestry walk is compared with `git rev-list` on every imported repository.
+
+**6. Docs, red team, review and merge** ✅ (2026-11-14; Tasks 13 to 15)
+- **Docs** ✅: the design, the guide, [terminal.md](terminal.md), [json.md](json.md), [security.md](security.md), [testing.md](testing.md) and [benchmarks.md](benchmarks.md) §11 say what is built.
+- **Red team** ✅ (2026-11-14): two sessions from the sandbox, RT17 (2 Medium, 3 Low) and RT18 on its fixes (1 Medium, 5 Low), every finding fixed ([decisions 162](decisions/162-red-team-m7-rulings.md) and [163](decisions/163-red-team-m7-session-2-rulings.md); [security.md](security.md) §6).
+- **Review and merge** ✅ (2026-11-14): a whole-branch review found nothing that had to be fixed first; the calls made on the way, with twelve for the owner to confirm, are in [the rulings](plans/2026-11-14-milestone-7-rulings.md); merged into `v0.2`.
+- *Done when:* every proven finding is fixed or ruled on, every document matches the code, and the branch is merged into `v0.2`.
+
+## Milestone 8: Combine
+
+Planned on 2026-11-14 after decisions [164](decisions/164-where-two-lines-parted.md) to [169](decisions/169-saves-reached-through-a-combine.md), which Claude made at the owner's request while the owner was away: [plans/2026-11-14-milestone-8-combine.md](plans/2026-11-14-milestone-8-combine.md). Each step ends with tests passing on Windows, macOS and Linux; the plan's task numbers are in brackets. A ✅ marks a step that is done.
+
+**1. Where two lines parted** ✅ (2026-11-14; Task 1)
+- Every common starting point of two saves, exact whatever the saves' clocks say ([decision 164](decisions/164-where-two-lines-parted.md)): with saves dated alike or clocks running backwards the walk can find extra candidates, and an exact check drops them ([decision 170](decisions/170-what-building-milestone-8-refined.md)).
+- *Done when:* it agrees with a full walk on generated histories and with `git merge-base --all` on imported ones, and reads only what the two sides don't share.
+
+**2. Merging** ✅ (2026-11-14; Tasks 2 to 4)
+- Which rule in `opalro.toml` decides for a file, its patterns matching whatever their letter case; text merged line by line ([decision 167](decisions/167-merging-text-line-by-line.md)); two versions of the project merged entry by entry, every pair of names alike the two sides bring refused ([decision 166](decisions/166-merging-two-versions-of-the-project.md)).
+- *Done when:* the text merge gives `git merge-file`'s result wherever lines don't repeat (where they repeat, the two can differ, and the differences are counted: decision 170), the tree merge agrees with a model written apart from it, and nothing is stored when a merge is refused.
+
+**3. Moves** ✅ (2026-11-14; Tasks 5 and 6)
+- `save` notes a move when Opalro is certain of it, within bounds, and never fails for its notes; a combine follows the notes true of their own saves, and identical contents for the files the notes don't account for, warning when that was too much to follow ([decisions 168](decisions/168-moves-in-saves-and-in-combines.md) and 170).
+- *Done when:* a change to a moved file lands where the file went, and a move against a removal is a conflict.
+
+**4. `opalro combine`** ✅ (2026-11-14; Tasks 7 and 8)
+- Nothing to do, the line moved forward, or a combined save, switched to as `goto` switches; one diary step; Git's word `merge`, with two lines explained, not run ([decisions 165](decisions/165-combine-the-command.md) and 170).
+- *Done when:* a combine stopped at any point is finished or never happened, `undo` takes it back, unsaved work is never overwritten, and a combine that would leave a conflict stops and changes nothing.
+
+**5. Saves a combine brought in** ✅ (2026-11-14; Tasks 9 and 10)
+- A save is found by its ID through every parent; `history` marks a combined save and lists from another place; `show` names the other parent ([decision 169](decisions/169-saves-reached-through-a-combine.md)).
+
+**6. Proof** ✅ (2026-11-14; Tasks 11 and 12)
+- The model test combines lines among its random steps; whole combines are compared with `git merge` on generated histories, which showed one accepted difference (a file moved and changed in one save, and removed on the other line, is kept without a question; decision 170) and a combine that left an emptied folder behind, now fixed.
+
+**7. Docs, red team, review and merge** ✅ (2026-11-14; Tasks 13 to 15)
+- **Docs** ✅: the design, the guide, [security.md](security.md), [testing.md](testing.md) and [benchmarks.md](benchmarks.md) §12 and §13 say what is built; [terminal.md](terminal.md), [json.md](json.md) and [storage-format.md](storage-format.md) were written with the code.
+- **Red team** ✅ (2026-11-14): two sessions from the sandbox, RT19 (2 Low) and RT20 on its fixes (1 Medium), every finding fixed or ruled on ([decisions 171](decisions/171-red-team-m8-rulings.md) and [172](decisions/172-red-team-m8-session-2-rulings.md); [security.md](security.md) §6). Left for the owner: reading very large saves stays slow.
+- **Review and merge** ✅ (2026-11-14): a whole-branch review found nothing that loses or mixes what a person saved; its one open point became [decision 173](decisions/173-the-rules-of-both-lines-decide-what-a-combine-merges.md) (a combine asks the rules of both lines); the calls made on the way, with twenty-one for the owner to confirm, are in [the rulings](plans/2026-11-14-milestone-8-rulings.md); merged into `v0.2`.
+
+## Milestone 9: Conflicts
+
+Planned on 2026-11-14 after decisions [174](decisions/174-the-conflict-record.md) to [179](decisions/179-every-command-and-a-conflict.md), which Claude made at the owner's request while the owner was away: [plans/2026-11-14-milestone-9-conflicts.md](plans/2026-11-14-milestone-9-conflicts.md). Each step ends with tests passing on Windows, macOS and Linux; the plan's task numbers are in brackets. A ✅ marks a step that is done.
+
+**1. The conflict record** ✅ (2026-11-14; Task 1)
+- Its final layout in the storage spec, with test vectors and a fuzz target, before anything writes one ([decision 174](decisions/174-the-conflict-record.md)).
+- *Done when:* every record the layout allows reads back, and every one it forbids is refused.
+
+**2. The `conflicts` feature** ✅ (2026-11-14; Task 2)
+- New projects list it; `opalro setup --upgrade` turns it on in an older one, asking first; without it nothing changes ([decision 178](decisions/178-the-conflicts-feature.md)).
+- *Done when:* the `format` file keeps every feature a project has, and a stopped upgrade leaves the file whole.
+
+**3. `tidy`, `verify` and a save's limits** ✅ (2026-11-14; Task 3)
+- `tidy` keeps everything a kept conflict names, `verify` reads every record, and what a conflict stands as counts toward a save's limits.
+- *Done when:* no version a kept conflict names is ever freed.
+
+**4. A conflict in the folder** ✅ (2026-11-14 and 2026-11-15; Tasks 4 to 6)
+- A conflict is met where its entry is met: `status` and `changes` list it with how it stands; `goto`, `discard`, the shelf, `undo` and `redo` write and protect its place as what it stands as ([decisions 176](decisions/176-a-conflict-in-the-folder.md) and [179](decisions/179-every-command-and-a-conflict.md)).
+- *Done when:* a project without conflicts reads nothing it didn't read before, and the folder after any of these equals what `goto` to that save writes.
+
+**5. `save` with conflicts** ✅ (2026-11-15; Task 7)
+- Half-fixed files are saved as the conflict's own version; a text with no markers left is fixed; a picture changed in place stays to decide ([decision 177](decisions/177-recording-a-fix-save-and-resolve.md)).
+- *Done when:* saving never loses a version and never decides a conflict that has no markers.
+
+**6. The merge keeps conflicts** ✅ (2026-11-15; Tasks 8 to 11)
+- The marked text; each kind of clash kept at its place, moves included; starting points that disagree give an unknown starting version, never a guess ([decisions 175](decisions/175-what-a-combine-keeps-as-a-conflict.md) and [176](decisions/176-a-conflict-in-the-folder.md)).
+- *Done when:* nothing a line saved is left out of the result without a conflict that holds it.
+
+**7. `opalro combine` keeps conflicts** ✅ (2026-11-15; Task 12)
+- The outcome with its conflicts, `--only-if-clean`, and the stop in a project that can't keep them yet.
+- *Done when:* `undo` takes a combine back, conflicts and all.
+
+**8. `opalro resolve`** ✅ (2026-11-15; Tasks 13 and 14)
+- Records fixes, into the combined save when it may be replaced; `--keep mine` or `theirs`; `--copy` to look at a version ([decision 177](decisions/177-recording-a-fix-save-and-resolve.md)).
+- *Done when:* a fix is recorded only for what the person fixed or chose.
+
+**9. `show`, `changes --save` and Git's words** ✅ (2026-11-15; Task 15)
+- `show` and `changes --save` name a place a save put in conflict, kept in conflict or fixed, and count them; `merge --continue`, `checkout --ours` and `--theirs`, `restore`'s alike and `mergetool` are explained with `resolve`'s forms ([decision 179](decisions/179-every-command-and-a-conflict.md)).
+
+**10. The model test and the comparison with `git merge`** ✅ (2026-11-15; Task 16)
+- The model of the whole command line keeps and fixes conflicts by its own rules; the comparison with `git merge` holds that where Git reports a conflict Opalro keeps one at the same places, and, where a case is set aside because Git followed a move, that nothing either line added was lost ([testing.md](testing.md) §3; [decision 181](decisions/181-what-building-milestone-9-refined.md) names the two faults it found).
+
+**11. Docs, red team, review and merge** ✅ (2026-11-15; Tasks 17 to 19)
+- **Docs** ✅ (2026-11-15): the design, the guide, [security.md](security.md), [testing.md](testing.md) and [benchmarks.md](benchmarks.md) §14 say what is built; [terminal.md](terminal.md), [json.md](json.md) and [storage-format.md](storage-format.md) were written with the code; what building refined is [decision 181](decisions/181-what-building-milestone-9-refined.md), and the calls made on the way are in [the rulings](plans/2026-11-14-milestone-9-rulings.md).
+- **Red team, review and merge** ✅ (2026-11-15): two red-team sessions (RT21: 2 Medium and 2 Low; RT22, on the fixes: 1 Low; all fixed, [decisions 182](decisions/182-red-team-m9-rulings.md) and [183](decisions/183-red-team-m9-session-2-rulings.md)), a whole-branch review by four readers, one round of fixes checked item by item, and the merge into `v0.2`.
+- *Done when:* every proven finding is fixed or ruled on, every document matches the code, and the branch is merged into `v0.2`.
+
+## Milestone 10: `who`, and v0.2
+
+Planned on 2026-11-15 after decisions [184](decisions/184-opalro-who-the-save-behind-each-line.md) to [187](decisions/187-v0.2s-package.md), which Claude made at the owner's request while the owner was away: [plans/2026-11-15-milestone-10-who-and-v0.2.md](plans/2026-11-15-milestone-10-who-and-v0.2.md). Each step ends with tests passing on Windows, macOS and Linux; the plan's task numbers are in brackets. A ✅ marks a step that is done. The rulings made along the way, and what the owner is asked to confirm: [plans/2026-11-15-milestone-10-rulings.md](plans/2026-11-15-milestone-10-rulings.md).
+
+**1. Which of these saves holds this one** ✅ (2026-11-15; Task 1)
+- One more question for the module that answers everything about ancestry: of a set of saves, one that is a given save or has it in its history, through any parent, whatever the clocks say ([decision 185](decisions/185-save-amend-and-a-save-something-else-holds.md)).
+- *Done when:* it agrees with a search through every parent on random histories, with clocks that lie.
+
+**2. The note of the save made last** ✅ (2026-11-15; Tasks 2 and 3)
+- A small cache, `cache/last-made`: for each line whose newest save this computer made, that save and the diary entry that recorded it (one note for the whole project, as first built, made an amend after work on another line ask about everything: [decision 185](decisions/185-save-amend-and-a-save-something-else-holds.md), its correction); its layout in the storage format with a vector, before any code writes it. `cache/other-lines` is marked as written by Opalro 0.1 only.
+- *Done when:* the vector test and the fuzz target pass.
+
+**3. An amend asks the exact question, of what moved** ✅ (2026-11-15; Task 3)
+- `opalro save --amend` is refused when another line, a tag or a server line names the save or has it in its history, through any parent; `opalro resolve` decides by the same rule whether a fix replaces the combined save. With the note, only what is new or has moved since the save was made is asked about; an amend right after a save reads nothing of the other lines.
+- *Done when:* an amend of a save another line combined in is refused; the counted reads hold; the model follows the same rule in its own words.
+
+**4. One file of the folder, and a typed path's stored spelling** ✅ (2026-11-15; Task 4)
+- Two small tools `who` needs, each in the one place that owns its rule.
+- *Done when:* `changes` and `resolve` use them and their tests pass unchanged.
+
+**5. `who`, in the engine** ✅ (2026-11-15; Task 5)
+- The save behind each line of a file: the folder's file or a save's; through every parent, the first one first; recorded moves followed; a place in conflict read as what stands there; lines compared without their endings ([decision 184](decisions/184-opalro-who-the-save-behind-each-line.md)).
+- *Done when:* every line gets exactly one save, or is marked unsaved, on random histories; each rule is broken once on purpose and a test catches it.
+
+**6. `opalro who`** ✅ (2026-11-15; Task 6)
+- The command, its rows and its `--json`; Git's `blame` and `annotate` run it.
+- *Done when:* the words are in [terminal.md](terminal.md) and [json.md](json.md), and the guide teaches it.
+
+**7. `who` against `git blame`** ✅ (2026-11-15; Task 7)
+- On generated histories, each line's save is the commit `git blame` names; on Git's own repository, timed against it in the nightly run. The two differ by design where a combine took a later parent's file whole ([decision 184](decisions/184-opalro-who-the-save-behind-each-line.md), its correction): the generator keeps that shape out and fixed tests pin both answers. On Git's own history every line where they differ was looked at, and none was found where `who` named a save that neither wrote nor moved the line ([benchmarks.md](benchmarks.md) §15).
+- *Done when:* the comparison passes and fails when it compares nothing.
+
+**8. Timers, then the work done twice** ✅ (2026-11-15; Task 8)
+- `goto` and `status` timed part by part; only changes that alter no write, no flush and no check; the rest written up for the owner ([decision 186](decisions/186-speed-before-v0.2.md)).
+- *Done when:* the table is in [benchmarks.md](benchmarks.md) and the gate is run before and after.
+- Two changes kept: the folder walk's lookups done once per folder, which took back about two thirds of what milestone 9 had cost `status` and `goto`; and the file cache a `goto` loaded twice, now once (its first form made `status` slower and was rebuilt). The ten flushes of a `goto`, what each is for and what it costs, are written up for the owner to rule on ([benchmarks.md](benchmarks.md) §15). The gate's run on the milestone's last code comes with the Nightly run that closes it.
+
+**9. The package** ✅ (2026-11-16; Task 9)
+- Version 0.2.0 with its notes; every document a release carries brought to v0.2; a page of what is left for the owner ([decision 187](decisions/187-v0.2s-package.md)). `USER-AGREEMENT.md` is not touched.
+- *Done when:* the program says `opalro 0.2.0` and the guide names this version's archives.
+
+**10. Docs, red team, review, merge, and the package's run** ✅ (2026-11-16; Tasks 10 to 12)
+- The documents; a red-team session; a whole-branch review and one round of fixes; the merge into `v0.2`; the release workflow started by hand on `v0.2`, where its draft job does not run.
+- **Docs** ✅ (2026-11-16): the design, the guide, [security.md](security.md), [testing.md](testing.md), [benchmarks.md](benchmarks.md) §15 and the [follow-ups](plans/2026-11-01-milestone-1-follow-ups.md) say what is built, ruled and measured; [terminal.md](terminal.md), [json.md](json.md) and [storage-format.md](storage-format.md) were written with the code; what building corrected is in decisions [184](decisions/184-opalro-who-the-save-behind-each-line.md) and [185](decisions/185-save-amend-and-a-save-something-else-holds.md), and the calls made on the way are in [the rulings](plans/2026-11-15-milestone-10-rulings.md).
+- **Red team, review and merge** ✅ (2026-11-16): two red-team sessions (RT23: nothing proved; RT24, after the fix wave: one Low finding, ruled in [decision 188](decisions/188-red-team-m10-rulings.md) and left for the owner), a whole-branch review by four readers (nothing Critical; what it found fixed in one wave), and the merge into `v0.2` on 2026-11-16.
+- **The package's run** ✅ (2026-11-16): the release workflow was started by hand on `v0.2` at `e4c0017` ([run 43915614285](https://github.com/WisHonor/Opalro-VCS/actions/runs/43915614285)); all thirteen jobs it runs passed (`prepare`, the four builds, `sums`, the five clean-machine checks and the two ordinary-computers checks), and its `release` job, the only one that can make a draft, was skipped, as it is on every branch but `main`. It was run there again the same day, with the same result, after the owner's review changed the user agreement's sentence ([run 43927685057](https://github.com/WisHonor/Opalro-VCS/actions/runs/43927685057), at `cedd38a`), and a third time, again with the same result, after the pages became a first release's ([run 43938713517](https://github.com/WisHonor/Opalro-VCS/actions/runs/43938713517), at `a56e065`; [decision 190](decisions/190-v0.2-is-the-first-published-version.md)): that last run is the one [the owner's page](releases/v0.2.0-before-you-publish.md) names. Nothing was tagged, drafted, merged into `main` or opened as a pull request by then; later that day the owner had Claude merge `v0.2` into `main` ([decision 192](decisions/192-the-owner-has-claude-merge-v0.2-into-main.md)), and still nothing is tagged or drafted.
+- *Done when:* every proven finding is fixed or ruled on, every document matches the code, the branch is merged into `v0.2`, and the workflow's run is green. Nothing is tagged, drafted, merged into `main` or opened as a pull request.

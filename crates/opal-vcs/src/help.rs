@@ -29,7 +29,10 @@ pub const GROUPS: [(&str, &[Row]); 3] = [
     (
         "Lines, shelves and details",
         &[
-            ("line", "List your lines", None),
+            ("line", "List, make, rename and delete lines", None),
+            ("tag", "Name a save, like v1.0, or list your tags", None),
+            ("combine", "Bring another line's work into yours", None),
+            ("resolve", "Record fixed conflicts", None),
             ("shelf", "Set your unsaved changes aside", Some("unshelf")),
             (
                 "discard",
@@ -37,6 +40,7 @@ pub const GROUPS: [(&str, &[Row]); 3] = [
                 None,
             ),
             ("show", "Show everything about one save", None),
+            ("who", "Show the save behind each line of a file", None),
         ],
     ),
     (
@@ -97,7 +101,7 @@ pub fn examples(command: &str) -> &'static [(&'static str, &'static str)] {
             ),
             (
                 "opalro save --line wall-run \"Try wall running\"",
-                "At a save, start the new line wall-run",
+                "Start the new line wall-run with this save",
             ),
         ],
         "changes" => &[
@@ -111,10 +115,16 @@ pub fn examples(command: &str) -> &'static [(&'static str, &'static str)] {
                 "What the newest save on main changed",
             ),
         ],
-        "history" => &[(
-            "opalro history",
-            "List the saves on your line, newest first",
-        )],
+        "history" => &[
+            (
+                "opalro history",
+                "List the saves on your line, newest first",
+            ),
+            (
+                "opalro history wall-run",
+                "List from another line, a tag or a save",
+            ),
+        ],
         "goto" => &[
             ("opalro goto main", "Go to the line main"),
             ("opalro goto kxqmz", "Go to a save, by its change ID"),
@@ -140,7 +150,51 @@ pub fn examples(command: &str) -> &'static [(&'static str, &'static str)] {
             ("opalro redo", "Bring back the step undone last"),
             ("opalro redo 2", "Bring back the last two"),
         ],
-        "line" => &[("opalro line", "List the lines, marking the one you're on")],
+        "line" => &[
+            ("opalro line", "List your lines"),
+            (
+                "opalro line new wall-run",
+                "Start a new line where you are, and move onto it",
+            ),
+            ("opalro line rename wall-run wall-running", "Rename a line"),
+            (
+                "opalro line delete wall-run",
+                "Delete a line; undo brings it back",
+            ),
+        ],
+        "tag" => &[
+            ("opalro tag", "List your tags"),
+            (
+                "opalro tag v1.0 \"First playable\"",
+                "Tag the save you're at",
+            ),
+            ("opalro tag v1.0 --save main", "Tag another save"),
+            (
+                "opalro tag --delete v1.0",
+                "Delete a tag; undo brings it back",
+            ),
+        ],
+        "combine" => &[
+            (
+                "opalro combine wall-run",
+                "Bring line wall-run's work into the line you're on",
+            ),
+            (
+                "opalro combine wall-run \"Wall running is in\"",
+                "The same, with your own message",
+            ),
+        ],
+        "resolve" => &[
+            ("opalro resolve", "Record every conflict you fixed"),
+            (
+                "opalro resolve Main.unity --keep theirs",
+                "Take the other line's version of a file",
+            ),
+            (
+                "opalro resolve Hero.png --copy theirs --to Hero-theirs.png",
+                "Look at the other line's version first",
+            ),
+        ],
         "shelf" => &[
             ("opalro shelf", "Set your unsaved changes aside"),
             (
@@ -167,6 +221,16 @@ pub fn examples(command: &str) -> &'static [(&'static str, &'static str)] {
             ("opalro show", "Show the save you're at"),
             ("opalro show kxqmz", "Show a save, by its change ID"),
         ],
+        "who" => &[
+            (
+                "opalro who Assets/Scripts/Player.cs",
+                "Show the save behind each line of a file",
+            ),
+            (
+                "opalro who Assets/Scripts/Player.cs --save v1.0",
+                "The same, as tag v1.0's save has the file",
+            ),
+        ],
         "start" => &[
             (
                 "opalro start",
@@ -186,6 +250,10 @@ pub fn examples(command: &str) -> &'static [(&'static str, &'static str)] {
             (
                 "opalro setup --preset code --yes",
                 "Make those changes without asking",
+            ),
+            (
+                "opalro setup --upgrade",
+                "Turn on the features this version of Opalro knows that this project doesn't use yet",
             ),
         ],
         "import" => &[(
@@ -232,6 +300,45 @@ pub fn page(root: &mut Command, name: &str) -> Option<String> {
     let usage = command.clone().render_usage().to_string();
     let usage = usage.strip_prefix("Usage: ").unwrap_or(&usage);
     text += &format!("\n{}\n{usage}\n", s.paint(Role::Bold, "Usage"));
+    // Each form with its usage, naming its own options (those the command itself doesn't take),
+    // and what it does; each own option's help under it.
+    let forms: Vec<(String, String, Vec<String>)> = command
+        .get_subcommands()
+        .map(|form| {
+            let own: Vec<&clap::Arg> = form
+                .get_arguments()
+                .filter(|a| {
+                    !a.is_positional() && command.get_arguments().all(|b| b.get_id() != a.get_id())
+                })
+                .collect();
+            let flags: String = own
+                .iter()
+                .filter_map(|a| a.get_long())
+                .map(|long| format!("[--{long}] "))
+                .collect();
+            let usage = form.clone().render_usage().to_string();
+            let usage = usage.strip_prefix("Usage: ").unwrap_or(&usage);
+            let helps = own
+                .iter()
+                .filter_map(|a| Some(format!("    --{}  {}", a.get_long()?, a.get_help()?)))
+                .collect();
+            let about = form.get_about().map(ToString::to_string);
+            (
+                usage.replace("[OPTIONS] ", &flags),
+                about.unwrap_or_default(),
+                helps,
+            )
+        })
+        .collect();
+    if let Some(wide) = forms.iter().map(|(usage, ..)| style::columns(usage)).max() {
+        text += &format!("\n{}\n", s.paint(Role::Bold, "Forms"));
+        for (usage, does, helps) in &forms {
+            text += &format!("{usage:<wide$}  {does}\n");
+            for help in helps {
+                text += &format!("{help}\n");
+            }
+        }
+    }
     for (title, tag) in [("Arguments", "{positionals}"), ("Options", "{options}")] {
         let rendered = command
             .clone()

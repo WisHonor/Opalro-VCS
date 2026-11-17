@@ -33,7 +33,7 @@ jobs:
           restore-keys: fuzz-corpus-opalro-
       - name: Fuzz every target
         run: |
-          for t in decode_listing decode_save decode_diary decode_tag_list decode_server_lines decode_project_link open_pack name_rules format_file ignore_rules git_loose git_pack git_delta git_objects git_refs git_config change_ids other_lines file_cache decode_journal decode_chunk_list cut_chunks parse_rules; do
+          for t in decode_listing decode_save decode_diary decode_tag_list decode_server_lines decode_project_link open_pack name_rules format_file ignore_rules git_loose git_pack git_delta git_objects git_refs git_config change_ids last_made file_cache decode_journal decode_chunk_list cut_chunks parse_rules decode_conflict; do
             cargo +nightly fuzz run "$t" -- -max_total_time="$FUZZ_SECONDS" -timeout=10 -rss_limit_mb=2048 || exit 1
           done
       - name: Upload crash files
@@ -45,7 +45,8 @@ jobs:
           if-no-files-found: ignore
 
   # Imports Git's own repository, then compares every commit, tree, file and ref with Git. The
-  # test prints how long the import took and its peak memory. Nightly and by hand, not on pushes.
+  # test prints how long the import took and its peak memory, and times `opalro who` against
+  # `git blame` on five files. Nightly and by hand, not on pushes.
   differential:
     if: github.event_name != 'push'
     runs-on: ubuntu-latest
@@ -102,6 +103,24 @@ jobs:
           # A name that matches no test passes too, so the test must have run.
           grep -q "test result: ok. 1 passed" chunks.txt
 
+  # A save that moves 100,001 files notes the first 100,000. Too slow for every push, so it is
+  # ignored there and runs here.
+  move-notes:
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Save 100,001 moved files
+        shell: bash
+        run: |
+          cargo test --release -p opal-vcs-core --lib -- --ignored --exact snapshot::tests::a_save_moving_more_than_100000_files_notes_the_first_100000 2>&1 | tee notes.txt
+          # A name that matches no test passes too, so the test must have run.
+          grep -q "test result: ok. 1 passed" notes.txt
+
   # The model test of edits, saves, switches, shelves and undos (testing.md §3) with 1,024
   # cases, not the 64 of every push.
   model:
@@ -119,7 +138,7 @@ jobs:
           PROPTEST_CASES: "1024"
         run: |
           cargo test --release -p opal-vcs --test model 2>&1 | tee model.txt
-          grep -q "test result: ok. 1 passed" model.txt
+          grep -Eq "test result: ok\. [1-9][0-9]* passed; 0 failed" model.txt
 
   # The status gate: status on an unchanged 100,000-file project. The test prints both times and
   # fails when either takes 2 s or more. Nightly and by hand, not on pushes.

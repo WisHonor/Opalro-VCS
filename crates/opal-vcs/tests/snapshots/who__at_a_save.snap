@@ -1,0 +1,11 @@
+---
+source: crates/opal-vcs/tests/who.rs
+expression: shown
+---
+Each line of moves.txt as save nylq has it, and the save it is from:
+
+poxq  Ana Lima    2023-11-14  1 | jump:
+nylq  Ben Okafor  2023-11-15  2 | 	height 3
+poxq  Ana Lima    2023-11-14  3 | 	sound hop
+poxq  Ana Lima    2023-11-14  4 | end
+nylq  Ben Okafor  2023-11-15  5 | fall:

@@ -5,17 +5,19 @@
 
 mod support;
 
+use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::Path;
 use std::time::Instant;
 
+use opal_core::id::Id;
 use opal_core::import::{ImportRequest, import_git};
 use opal_core::names::holdable_here;
 use opal_core::repo::Repository;
 use opal_core::save::Person;
 use support::{
-    Env, assert_matches_git, assert_matches_git_counting, copy_dir, git, git_with_input, text,
-    top_folder,
+    Env, assert_ancestry_matches_git, assert_matches_git, assert_matches_git_counting,
+    assert_starts_match_git, copy_dir, git, git_commit, git_with_input, text, top_folder,
 };
 
 /// Writes `bytes` into the repository as a blob, and returns its ID.
@@ -117,6 +119,10 @@ fn everyday_history_matches_git() {
     env.import();
     // Git wrote every commit itself, so each save rebuilds its commit from its own fields.
     assert_eq!(assert_matches_git(env.root()), 0);
+    // Nine lines and three server lines across the merges: held ones, ones that hold some, and
+    // ones parted at a fork.
+    assert_eq!(assert_ancestry_matches_git(env.root()), (64, true, 0));
+    assert_eq!(assert_starts_match_git(env.root()), 64);
     // The renaming rule, pinned: `+` becomes `-`, and of names alike but for letter case, the
     // later one in byte order takes a suffix.
     let (repo, state) = env.state();
@@ -148,6 +154,8 @@ fn everyday_history_matches_git() {
         .assert()
         .success();
     assert_eq!(assert_matches_git(detached.path()), 0);
+    assert_eq!(assert_ancestry_matches_git(detached.path()), (64, true, 0));
+    assert_eq!(assert_starts_match_git(detached.path()), 64);
 }
 
 #[test]
@@ -242,6 +250,8 @@ fn unusual_commits_match_git() {
     env.git(&["update-ref", "refs/heads/main", &last]);
     env.import();
     let counted = assert_matches_git_counting(env.root());
+    assert_eq!(assert_ancestry_matches_git(env.root()), (0, true, 0));
+    assert_eq!(assert_starts_match_git(env.root()), 0);
     // All but the plain two, the one in no encoding and the one without a newline keep their
     // Git header.
     assert_eq!(counted.headers, 8);
@@ -287,6 +297,82 @@ fn packed_and_loose_objects_match_git() {
     );
     env.import();
     assert_eq!(assert_matches_git(env.root()), 0);
+    assert_eq!(assert_ancestry_matches_git(env.root()), (2, true, 0));
+    assert_eq!(assert_starts_match_git(env.root()), 2);
+}
+
+#[test]
+fn a_history_dated_backwards_matches_git() {
+    let env = Env::new();
+    // The third commit on main is dated before its parent, as Git allows. Apart from main, X, then
+    // S dated before it, then a at a merge of S and X, and b after S.
+    let mut stream = String::new();
+    for (mark, (branch, from, merge, time)) in [
+        ("main", None, None, 1_700_002_000),
+        ("main", None, None, 1_700_003_000),
+        ("main", None, None, 1_700_001_000),
+        ("main", None, None, 1_700_004_000),
+        ("side", Some(2), None, 1_700_003_500),
+        ("a", None, None, 1_600_000_050),
+        ("b", Some(6), None, 1_600_000_010),
+        ("a", Some(7), Some(6), 1_600_000_100),
+        ("b", None, None, 1_600_000_090),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let _ = write!(
+            stream,
+            "commit refs/heads/{branch}\nmark :{}\ncommitter Ada <ada@example.com> {time} +0000\n\
+             data 2\nc{}\n",
+            mark + 1,
+            mark + 1
+        );
+        if let Some(from) = from {
+            let _ = writeln!(stream, "from :{from}");
+        }
+        if let Some(merge) = merge {
+            let _ = writeln!(stream, "merge :{merge}");
+        }
+    }
+    // A line main holds.
+    stream.push_str("reset refs/heads/old\nfrom :1\n\n");
+    let made = git_with_input(env.root(), &["fast-import", "--quiet"], stream.as_bytes());
+    assert!(made.status.success(), "{}", text(&made.stderr));
+    env.git(&["reset", "-q", "--hard"]);
+    env.import();
+    assert_eq!(assert_matches_git(env.root()), 0);
+    // old is held, main and side each hold some, and main's walk from side crosses the commit
+    // dated back. From a against b the walk reads X before S and counts it too (2 where Git
+    // counts 1): the one count that comes out high.
+    let (pairs, exact, higher) = assert_ancestry_matches_git(env.root());
+    assert_eq!((pairs, exact, higher), (20, false, 1));
+    assert_eq!(assert_starts_match_git(env.root()), 20);
+}
+
+#[test]
+fn a_criss_cross_matches_git() {
+    let env = Env::new();
+    env.commit("a.txt", "a\n", "Base");
+    env.git(&["branch", "left"]);
+    env.git(&["branch", "right"]);
+    env.git(&["checkout", "-q", "left"]);
+    env.commit("l.txt", "l\n", "Left");
+    env.git(&["checkout", "-q", "right"]);
+    env.commit("r.txt", "r\n", "Right");
+    // Each takes the other's first commit, then goes on.
+    env.git(&["merge", "-q", "--no-edit", "left"]);
+    env.git(&["checkout", "-q", "left"]);
+    env.git(&["merge", "-q", "--no-edit", "right~1"]);
+    env.commit("l.txt", "l2\n", "Left again");
+    env.git(&["checkout", "-q", "right"]);
+    env.commit("r.txt", "r2\n", "Right again");
+    let bases = env.git(&["merge-base", "--all", "left", "right"]);
+    assert_eq!(bases.lines().count(), 2, "{bases}");
+    env.import();
+    assert_eq!(assert_matches_git(env.root()), 0);
+    assert_eq!(assert_ancestry_matches_git(env.root()), (6, true, 0));
+    assert_eq!(assert_starts_match_git(env.root()), 6);
 }
 
 #[test]
@@ -329,6 +415,8 @@ fn sha256_repositories_match_git() {
     env.git(&["update-ref", "refs/remotes/origin/main", "HEAD~1"]);
     env.import();
     assert_eq!(assert_matches_git(env.root()), 0);
+    assert_eq!(assert_ancestry_matches_git(env.root()), (6, true, 0));
+    assert_eq!(assert_starts_match_git(env.root()), 6);
 }
 
 #[test]
@@ -364,6 +452,8 @@ fn optional_git_files_are_ignored() {
     assert!(!git_dir.join("refs/heads/main").exists());
     env.import();
     assert_eq!(assert_matches_git(env.root()), 0);
+    assert_eq!(assert_ancestry_matches_git(env.root()), (2, true, 0));
+    assert_eq!(assert_starts_match_git(env.root()), 2);
 }
 
 #[test]
@@ -392,6 +482,8 @@ fn windows_cant_hold_some_names_and_saving_keeps_them() {
     env.git(&["update-ref", "refs/heads/main", &commit]);
     env.import();
     assert_eq!(assert_matches_git(env.root()), 0);
+    assert_eq!(assert_ancestry_matches_git(env.root()), (0, true, 0));
+    assert_eq!(assert_starts_match_git(env.root()), 0);
 
     // What Git would write out here: each name this system can hold. Where letter case doesn't
     // count, the second of the twins is written over the first.
@@ -501,6 +593,95 @@ fn a_real_repository_matches_git() {
          ({:.1} s to compare).",
         began.elapsed().as_secs_f64()
     );
+    // A clone's server lines give the walk tips enough, without a branch of its own beside main.
+    let (pairs, ..) = assert_ancestry_matches_git(work.path());
+    assert_eq!(assert_starts_match_git(work.path()), pairs);
+    assert!(
+        pairs > 0,
+        "no pairs of tips to compare the ancestry walk on"
+    );
+    // A change ID no save has reads every save the lines and tags reach, through every parent.
+    let repo = Repository::open(work.path()).unwrap();
+    let began = Instant::now();
+    let missed = opal_core::history::resolve(&repo, "zzzzzzzzzzzzzzzz");
+    assert!(missed.is_err());
+    println!(
+        "A change ID no save has took {:.2} s to look for.",
+        began.elapsed().as_secs_f64()
+    );
+    who_against_git_blame(&repo, work.path());
+}
+
+/// Times `opalro who` against `git blame` on five files of different ages and sizes at the
+/// current branch's tip, and prints the share of lines on which the two name the same commit.
+/// Only that `who` names a save for every line is asserted.
+fn who_against_git_blame(repo: &Repository, dir: &Path) {
+    let branch = text(&git(dir, &["symbolic-ref", "--short", "HEAD"]));
+    let branch = branch.trim();
+    let tip = text(&git(dir, &["rev-parse", branch]));
+    let env = Env::empty();
+    let mut commits = BTreeMap::new();
+    for file in [
+        "Makefile",
+        "diff.c",
+        "git-compat-util.h",
+        "README.md",
+        "t/t8002-blame.sh",
+    ] {
+        let began = Instant::now();
+        let out = (env.opal_in(dir))
+            .args(["who", file, "--save", branch, "--json"])
+            .output()
+            .unwrap();
+        let who_took = began.elapsed();
+        assert_eq!(out.status.code(), Some(0), "{file}: {}", text(&out.stderr));
+        let doc: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+        let mut ours = Vec::new();
+        for run in doc["runs"].as_array().unwrap() {
+            let save = run["save"].as_str();
+            let save = save.unwrap_or_else(|| panic!("{file}: a line with no save: {run}"));
+            let commit = (commits.entry(save.to_owned()))
+                .or_insert_with(|| git_commit(repo, &Id::from_hex(save).unwrap()));
+            ours.extend(std::iter::repeat_n(
+                commit.clone(),
+                run["lines"].as_u64().unwrap() as usize,
+            ));
+        }
+        assert!(!ours.is_empty(), "{file} has no lines");
+        assert_eq!(ours.len() as u64, doc["lines"].as_u64().unwrap(), "{file}");
+
+        let began = Instant::now();
+        let blamed = text(&git(dir, &["blame", "--porcelain", tip.trim(), "--", file]));
+        let git_took = began.elapsed();
+        // Each line's header (its commit first) comes before the line, which starts with a tab.
+        let mut theirs = Vec::new();
+        let mut header = true;
+        for line in blamed.lines() {
+            if header {
+                theirs.push(line.split(' ').next().unwrap().to_owned());
+                header = false;
+            } else if line.starts_with('\t') {
+                header = true;
+            }
+        }
+        // A save for every line of the file, which has as many lines as Git reads in it.
+        assert_eq!(ours.len(), theirs.len(), "{file}");
+        let same = ours.iter().zip(&theirs).filter(|(a, b)| a == b).count();
+        println!(
+            "who {file}: {} lines, {:.2} s; git blame: {} lines, {:.2} s; the same commit on \
+             {:.1}% of lines{}",
+            ours.len(),
+            who_took.as_secs_f64(),
+            theirs.len(),
+            git_took.as_secs_f64(),
+            100.0 * same as f64 / ours.len() as f64,
+            if doc["coarse"] == true {
+                " (who was coarse)"
+            } else {
+                ""
+            }
+        );
+    }
 }
 
 /// The most memory this process has held, as Linux reports it (VmHWM). Other systems need a

@@ -1,0 +1,88 @@
+---
+source: crates/opal-vcs/tests/conflicts.rs
+expression: "support::masked(doc)"
+---
+{
+  "changes": [
+    {
+      "change": "modified",
+      "kind": "file",
+      "new_size": 4,
+      "old_size": 4,
+      "path": "plain.txt"
+    }
+  ],
+  "conflicts": [
+    {
+      "path": "changed.png",
+      "places_left": null,
+      "standing": "changed",
+      "terms": 3
+    },
+    {
+      "path": "closing.txt",
+      "places_left": 0,
+      "standing": "markers",
+      "terms": 3
+    },
+    {
+      "path": "fixed.txt",
+      "places_left": null,
+      "standing": "fixed",
+      "terms": 3
+    },
+    {
+      "path": "gone.png",
+      "places_left": null,
+      "standing": "nothing",
+      "terms": 3
+    },
+    {
+      "path": "half.txt",
+      "places_left": 1,
+      "standing": "markers",
+      "terms": 3
+    },
+    {
+      "path": "marked.txt",
+      "places_left": 2,
+      "standing": "markers",
+      "terms": 3
+    },
+    {
+      "path": "yours.png",
+      "places_left": null,
+      "standing": "yours",
+      "terms": 3
+    }
+  ],
+  "not_written": [],
+  "opalro_json": 1,
+  "position": {
+    "line": "main"
+  },
+  "save": {
+    "author": {
+      "email": "test@example.com",
+      "name": "Test",
+      "time_ms": "[redacted]",
+      "tz_offset_min": "[redacted]"
+    },
+    "change_id": "[redacted]",
+    "change_id_short": "[redacted]",
+    "id": "[redacted]",
+    "line": "main",
+    "message": "Planted",
+    "parents": [
+      "[redacted]"
+    ],
+    "saver": {
+      "email": "test@example.com",
+      "name": "Test",
+      "time_ms": "[redacted]",
+      "tz_offset_min": "[redacted]"
+    }
+  },
+  "unfinished_switch": false,
+  "warnings": []
+}

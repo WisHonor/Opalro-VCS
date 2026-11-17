@@ -3,6 +3,7 @@
 use std::cmp::Ordering;
 use std::collections::HashMap;
 
+use crate::conflict::Listings;
 use crate::id::Id;
 use crate::listing::{Entry, EntryKind, Listing, MAX_SAVE_DEPTH, MAX_SAVE_ENTRIES, SaveLimits};
 use crate::store::{Store, StoreError};
@@ -14,6 +15,24 @@ pub enum ChangeKind {
     Modified,
     /// Same path, different kind of file (say, a file became executable or a symlink).
     KindChanged,
+    /// Between two saves of a project that keeps conflicts: the place became a conflict.
+    InConflict,
+    /// A conflict on both sides, with another record.
+    StillInConflict,
+    /// It was a conflict and isn't any more.
+    ConflictFixed,
+}
+
+impl ChangeKind {
+    /// One of the kinds a conflict's place gets between two saves, for which no lines are
+    /// compared.
+    #[must_use]
+    pub fn is_conflict(self) -> bool {
+        matches!(
+            self,
+            ChangeKind::InConflict | ChangeKind::StillInConflict | ChangeKind::ConflictFixed
+        )
+    }
 }
 
 /// A file that differs between two saves. The path is borrowed from the walk's own buffer and is
@@ -55,43 +74,82 @@ pub(crate) fn for_each_change_in<E: From<StoreError>>(
     new_root: Id,
     each: impl FnMut(FileChange<'_>) -> Result<(), E>,
 ) -> Result<(), E> {
-    walk_files(store, unstored, old_root, new_root, MAX_SAVE_ENTRIES, each)
+    let stored = Listings::stored(store, unstored);
+    for_each_change_with(&stored, &stored, old_root, new_root, each)
+}
+
+/// [`for_each_change`], each side's listings read through its own reader: as a save holds them,
+/// or as they stand in the folder.
+pub(crate) fn for_each_change_with<E: From<StoreError>>(
+    old: &Listings,
+    new: &Listings,
+    old_root: Option<Id>,
+    new_root: Id,
+    each: impl FnMut(FileChange<'_>) -> Result<(), E>,
+) -> Result<(), E> {
+    walk_files((old, new), old_root, Some(new_root), MAX_SAVE_ENTRIES, each)
+}
+
+/// [`for_each_change_in`] between two folders either of which may be missing.
+pub(crate) fn for_each_change_between<E: From<StoreError>>(
+    store: &Store,
+    unstored: &HashMap<Id, Listing>,
+    old: Option<Id>,
+    new: Option<Id>,
+    each: impl FnMut(FileChange<'_>) -> Result<(), E>,
+) -> Result<(), E> {
+    let stored = Listings::stored(store, unstored);
+    walk_files((&stored, &stored), old, new, MAX_SAVE_ENTRIES, each)
 }
 
 /// The walk, handing out only files that differ, with the entry limit of the saves as a
 /// parameter.
 fn walk_files<E: From<StoreError>>(
-    store: &Store,
-    unstored: &HashMap<Id, Listing>,
+    sides: (&Listings, &Listings),
     old_root: Option<Id>,
-    new_root: Id,
+    new_root: Option<Id>,
     max_entries: u64,
     mut each: impl FnMut(FileChange<'_>) -> Result<(), E>,
 ) -> Result<(), E> {
-    let files = |path: &str, o: Option<&Entry>, n: Option<&Entry>| {
-        let (fo, fnew) = (file(o), file(n));
-        let change = match (fo, fnew) {
-            (Some(_), None) => ChangeKind::Removed,
-            (None, Some(_)) => ChangeKind::Added,
-            (Some(a), Some(b)) if a.kind != b.kind => ChangeKind::KindChanged,
-            (Some(a), Some(b)) if a.id != b.id => ChangeKind::Modified,
-            _ => return Ok(()),
-        };
-        let Some(shown) = fnew.or(fo) else {
-            return Ok(());
-        };
-        each(FileChange {
-            path,
-            change,
-            kind: shown.kind,
-            old_kind: fo.map(|e| e.kind),
-            old_size: fo.map(|e| e.size),
-            new_size: fnew.map(|e| e.size),
-            old_id: fo.map(|e| e.id),
-            new_id: fnew.map(|e| e.id),
-        })
+    let files = |path: &str, o: Option<&Entry>, n: Option<&Entry>| match change_at(path, o, n) {
+        Some(c) => each(c),
+        None => Ok(()),
     };
-    walk(store, unstored, old_root, new_root, max_entries, files)
+    walk(sides, old_root, new_root, max_entries, files)
+}
+
+/// The change at `path` between the entries `o` and `n` [`for_each_entry_change_in`] handed out,
+/// if it is a change [`for_each_change`] hands out.
+pub(crate) fn change_at<'a>(
+    path: &'a str,
+    o: Option<&Entry>,
+    n: Option<&Entry>,
+) -> Option<FileChange<'a>> {
+    let (fo, fnew) = (file(o), file(n));
+    let change = file_change(o, n)?;
+    let shown = fnew.or(fo)?;
+    Some(FileChange {
+        path,
+        change,
+        kind: shown.kind,
+        old_kind: fo.map(|e| e.kind),
+        old_size: fo.map(|e| e.size),
+        new_size: fnew.map(|e| e.size),
+        old_id: fo.map(|e| e.id),
+        new_id: fnew.map(|e| e.id),
+    })
+}
+
+/// How the file at a path changed between two entries [`for_each_entry_change_in`] handed out,
+/// if it is a change [`for_each_change`] counts.
+pub(crate) fn file_change(o: Option<&Entry>, n: Option<&Entry>) -> Option<ChangeKind> {
+    match (file(o), file(n)) {
+        (Some(_), None) => Some(ChangeKind::Removed),
+        (None, Some(_)) => Some(ChangeKind::Added),
+        (Some(a), Some(b)) if a.kind != b.kind => Some(ChangeKind::KindChanged),
+        (Some(a), Some(b)) if a.id != b.id => Some(ChangeKind::Modified),
+        _ => None,
+    }
 }
 
 /// Hands `each` every path whose entries differ between two saves, with the entry on each side:
@@ -104,7 +162,19 @@ pub(crate) fn for_each_entry_change_in<E: From<StoreError>>(
     new_root: Id,
     each: impl FnMut(&str, Option<&Entry>, Option<&Entry>) -> Result<(), E>,
 ) -> Result<(), E> {
-    walk(store, unstored, old_root, new_root, MAX_SAVE_ENTRIES, each)
+    let stored = Listings::stored(store, unstored);
+    for_each_entry_change_with(&stored, &stored, old_root, new_root, each)
+}
+
+/// [`for_each_entry_change_in`], each side's listings read through its own reader.
+pub(crate) fn for_each_entry_change_with<E: From<StoreError>>(
+    old: &Listings,
+    new: &Listings,
+    old_root: Option<Id>,
+    new_root: Id,
+    each: impl FnMut(&str, Option<&Entry>, Option<&Entry>) -> Result<(), E>,
+) -> Result<(), E> {
+    walk((old, new), old_root, Some(new_root), MAX_SAVE_ENTRIES, each)
 }
 
 /// How many files differ between the two saves. It is the walk of [`for_each_change`] with nothing
@@ -159,14 +229,13 @@ impl Todo {
 
 /// The walk behind [`for_each_change`], with the entry limit of the saves as a parameter.
 fn walk<E: From<StoreError>>(
-    store: &Store,
-    unstored: &HashMap<Id, Listing>,
+    (old_side, new_side): (&Listings, &Listings),
     old_root: Option<Id>,
-    new_root: Id,
+    new_root: Option<Id>,
     max_entries: u64,
     mut each: impl FnMut(&str, Option<&Entry>, Option<&Entry>) -> Result<(), E>,
 ) -> Result<(), E> {
-    if old_root == Some(new_root) {
+    if old_root == new_root {
         return Ok(());
     }
     let too_large = |detail| StoreError::SaveTooLarge { detail };
@@ -183,12 +252,12 @@ fn walk<E: From<StoreError>>(
         at: 0,
         step: Step::Folder {
             old: old_root,
-            new: Some(new_root),
+            new: new_root,
             depth: 0,
             counted: (false, false),
         },
     }];
-    let read = |id: &Id| listing_of(store, unstored, Some(*id));
+    let (read_old, read_new) = (|id: &Id| old_side.read(id), |id: &Id| new_side.read(id));
     // The path of what is being worked on (`/` after every folder's name) is the only path in
     // memory. A waiting name carries just the length of its folder's path: what was pushed after it
     // is deeper, so when it is popped, the path up to that length is still its folder's.
@@ -211,10 +280,7 @@ fn walk<E: From<StoreError>>(
                 if depth > 0 {
                     path.push('/');
                 }
-                let (old, new) = (
-                    listing_of(store, unstored, old)?,
-                    listing_of(store, unstored, new)?,
-                );
+                let (old, new) = (listing_of(old_side, old)?, listing_of(new_side, new)?);
                 if !counted.0 {
                     old_seen.add(old.entries().len()).map_err(too_large)?;
                 }
@@ -229,8 +295,8 @@ fn walk<E: From<StoreError>>(
                         // counted whole before its paths are walked.
                         let at = here + name.len();
                         let counted = (
-                            counted.0 || again(&mut old_seen, of, depth + 1, at, read)?,
-                            counted.1 || again(&mut new_seen, nf, depth + 1, at, read)?,
+                            counted.0 || again(&mut old_seen, of, depth + 1, at, read_old)?,
+                            counted.1 || again(&mut new_seen, nf, depth + 1, at, read_new)?,
                         );
                         todo.push(Todo {
                             name: name.to_owned(),
@@ -299,7 +365,7 @@ fn pairs<'a>(
 
 /// Whether one side of the walk went into the folder listing `id` before, and so has counted all
 /// of it now; see [`SaveLimits::enter`].
-fn again(
+pub(crate) fn again(
     seen: &mut SaveLimits,
     id: Option<Id>,
     depth: usize,
@@ -313,17 +379,10 @@ fn again(
         .map_err(|detail| StoreError::SaveTooLarge { detail })
 }
 
-fn listing_of(
-    store: &Store,
-    unstored: &HashMap<Id, Listing>,
-    id: Option<Id>,
-) -> Result<Listing, StoreError> {
+fn listing_of(listings: &Listings, id: Option<Id>) -> Result<Listing, StoreError> {
     match id {
         None => Ok(Listing::empty()),
-        Some(id) => unstored
-            .get(&id)
-            .cloned()
-            .map_or_else(|| store.listing(&id), Ok),
+        Some(id) => listings.read(&id),
     }
 }
 
@@ -363,7 +422,9 @@ mod tests {
         max_entries: u64,
     ) -> Result<Vec<Seen>, StoreError> {
         let mut seen = Vec::new();
-        walk_files(store, &HashMap::new(), old, new, max_entries, |c| {
+        let unstored = HashMap::new();
+        let stored = Listings::stored(store, &unstored);
+        walk_files((&stored, &stored), old, Some(new), max_entries, |c| {
             seen.push(Seen {
                 path: c.path.to_owned(),
                 change: c.change,

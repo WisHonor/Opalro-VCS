@@ -7,6 +7,7 @@ use opal_core::changes::file_lines;
 use opal_core::diff::{ChangeKind, FileChange};
 use opal_core::listing::EntryKind;
 use opal_core::presets::{Engine, Found, Language, Looked, Preset, suggested};
+use opal_core::repo::CONFLICTS;
 use opal_core::rules::{Rules, RulesRead, size_text};
 use opal_core::setup::RuleFileChange;
 use opal_core::text::{bytes, escape, thousands};
@@ -278,6 +279,57 @@ pub fn rules_shown(read: &RulesRead, block_lines: Option<usize>) -> String {
         text += &format!("    {label:<width$}{value}\n");
     }
     text
+}
+
+/// The line `opalro setup` ends its list with when `opalro setup --upgrade` has something to turn on.
+pub fn upgrade_row(features: &[&str]) -> String {
+    if features.is_empty() {
+        return String::new();
+    }
+    let s = style::out();
+    format!(
+        "\nUpgrade available: {} ({})\n",
+        features.join(", "),
+        s.paint(Role::Command, "opalro setup --upgrade")
+    )
+}
+
+/// What a feature allows, in words.
+fn allows(feature: &str) -> &'static str {
+    match feature {
+        CONFLICTS => "a combine can keep conflicts, and you fix them when you choose.",
+        // Only `conflicts` is ever offered; a later feature gets its own words here.
+        _ => "a feature this version of Opalro adds.",
+    }
+}
+
+/// What `opalro setup --upgrade` says before it asks: each feature, and what turning it on costs.
+pub fn upgrade_offer(features: &[&str]) -> String {
+    let count = match features.len() {
+        1 => "1 feature".to_owned(),
+        n => format!("{} features", thousands(n as u64)),
+    };
+    let mut text = format!("This version of Opalro can turn on {count} in this project:\n");
+    for feature in features {
+        text += &format!("  {feature}: {}\n", allows(feature));
+    }
+    text += if features.len() == 1 {
+        "Once it is on, Opalro 0.1 can't open this project, and opalro undo can't turn it off.\n"
+    } else {
+        "Once they are on, Opalro 0.1 can't open this project, and opalro undo can't turn them \
+         off.\n"
+    };
+    text
+}
+
+/// What `opalro setup --upgrade` says once it turned `features` on.
+pub fn upgraded(features: &[&str]) -> String {
+    let s = style::out();
+    let mut text = format!("{} {}", s.paint(Role::Ok, "Turned on"), features.join(", "));
+    if features.contains(&CONFLICTS) {
+        text += ": this project can keep conflicts now";
+    }
+    text + ".\n"
 }
 
 /// A rule's pattern, escaped. One that holds a space of any kind or a double quote is between

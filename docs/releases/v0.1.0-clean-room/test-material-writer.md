@@ -1,3 +1,5 @@
+> v0.1 was prepared and never published: v0.2 is the first published version ([decision 190](../../decisions/190-v0.2-is-the-first-published-version.md)). This page is kept as the record.
+
 # Task 11 report: the remaining test material, replaced
 
 Status: DONE_WITH_CONCERNS (one scope note, below). Commit `be98331` on `v0.1-engine` (not pushed).

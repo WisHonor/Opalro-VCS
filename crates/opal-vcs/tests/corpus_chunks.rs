@@ -143,7 +143,7 @@ fn over(make: impl Fn(&Path) -> Planted, expect: Expect) {
     let (code, doc, _) = case.run_json(&["show"]);
     assert_eq!(code, Some(0), "{doc}");
     let added = json!([{"path": "big.bin", "change": "added", "kind": "file",
-        "old_size": null, "new_size": p.size}]);
+        "old_size": null, "new_size": p.size, "in_conflict": false}]);
     assert_eq!((&doc["changes"], kinds(&doc).len()), (&added, 0), "{doc}");
     let (code, doc, _) = case.run_json(&["changes"]);
     match &expect {

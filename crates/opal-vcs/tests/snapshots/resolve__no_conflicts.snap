@@ -1,0 +1,19 @@
+---
+source: crates/opal-vcs/tests/resolve.rs
+assertion_line: 451
+expression: "support::masked(none)"
+---
+{
+  "conflict_count": 0,
+  "conflicts": [],
+  "more_conflicts": 0,
+  "opalro_json": 1,
+  "recorded": [],
+  "removed": 0,
+  "replaced": null,
+  "result": "no_conflicts",
+  "safety_copies": 0,
+  "save": null,
+  "warnings": [],
+  "written": 0
+}

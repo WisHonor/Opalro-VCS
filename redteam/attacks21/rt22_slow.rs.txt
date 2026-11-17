@@ -1,0 +1,78 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+mod support;
+use opal_core::conflict::{Record, Term};
+use opal_core::id::Id;
+use opal_core::listing::{Entry, EntryKind, Listing};
+use opal_core::pack::ObjectKind;
+use support::Env;
+
+/// `width` versions, the first present (so it stands as a file), differing by `i`.
+fn rec(i: u64, width: usize, file: Id) -> Record {
+    let mut terms = vec![None; width];
+    let mut id = [7u8; 32];
+    id[..8].copy_from_slice(&i.to_le_bytes());
+    terms[width / 2] = Some(Term {
+        kind: EntryKind::File,
+        id: Id(id),
+        size: 1,
+    });
+    terms[0] = Some(Term { kind: EntryKind::File, id: file, size: 1 });
+    Record { terms, own: None }
+}
+
+#[cfg(unix)]
+#[test]
+fn rt22_time_of_many_conflicts_in_one_folder() {
+    let sizes: Vec<u64> = std::env::var("RT22_SIZES")
+        .unwrap_or_else(|_| "10000,20000,40000".into())
+        .split(',')
+        .map(|s| s.parse().unwrap())
+        .collect();
+    for shared in [false, true] {
+        for &n in &sizes {
+            let env = Env::empty();
+            env.opalro()
+                .args(["start", "--preset", "custom"])
+                .assert()
+                .success();
+            support::plant_save(env.root(), |pack| {
+                let file = pack.add_content(b"x").unwrap();
+                let one = support::add_conflict(pack, &rec(0, 255, file));
+                let entries = (0..n)
+                    .map(|i| Entry {
+                        name: format!("c{i:07}"),
+                        kind: EntryKind::Conflict,
+                        id: if shared {
+                            one
+                        } else {
+                            support::add_conflict(pack, &rec(i, 255, file))
+                        },
+                        size: 0,
+                    })
+                    .collect();
+                pack.add_record(
+                    ObjectKind::FolderListing,
+                    &Listing::new(entries).unwrap().encode(),
+                )
+                .unwrap()
+            });
+            for args in [
+                &["status"][..],
+                &["goto", "main"][..],
+                &["resolve"][..],
+                &["save", "again"][..],
+            ] {
+                let cmd = support::opal_capped_at(env.config(), env.root(), 3_500_000, args);
+                let ended = support::run_limited(cmd, 600);
+                println!(
+                    "shared={shared} n={n} {args:?}: code {:?} {:.1}s peak {} MB {}",
+                    ended.code,
+                    ended.secs,
+                    ended.peak_mb,
+                    ended.stderr.lines().next().unwrap_or("")
+                );
+            }
+        }
+    }
+}

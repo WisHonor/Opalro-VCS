@@ -1,0 +1,152 @@
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+mod support;
+use support::{Env, files, text};
+
+fn run(env: &Env, args: &[&str]) -> (i32, String) {
+    let out = env.opalro().args(args).output().unwrap();
+    let said = format!("{}{}", text(&out.stdout), text(&out.stderr));
+    (out.status.code().unwrap_or(-1), said)
+}
+
+fn ok(env: &Env, args: &[&str]) -> String {
+    let (code, said) = run(env, args);
+    assert_eq!(code, 0, "{args:?}: {said}");
+    said
+}
+
+const PIC_START: &[u8] = b"\x89PNG\r\n\x1a\n\0start";
+const PIC_SIDE: &[u8] = b"\x89PNG\r\n\x1a\n\0side";
+const PIC_MAIN: &[u8] = b"\x89PNG\r\n\x1a\n\0main";
+
+/// Combined with `a.txt` and `pic.png` in conflict; `a.txt` fixed by hand, `pic.png` changed in
+/// place, `u.txt` unsaved work. `tagged`: the combined save is tagged, so a fix is its own save.
+fn base(tagged: bool) -> Env {
+    let env = Env::empty();
+    ok(&env, &["start", "--preset", "custom"]);
+    env.overwrite("a.txt", "1\n2\n3\n4\n5\n6\n7\n8\n");
+    env.overwrite("u.txt", "saved\n");
+    support::write(&env, "pic.png", PIC_START);
+    ok(&env, &["save", "A"]);
+    ok(&env, &["line", "new", "side"]);
+    env.overwrite("a.txt", "1\nside\n3\n4\n5\n6\n7\n8\n");
+    support::write(&env, "pic.png", PIC_SIDE);
+    ok(&env, &["save", "On side"]);
+    ok(&env, &["goto", "main"]);
+    env.overwrite("a.txt", "1\nmain\n3\n4\n5\n6\n7\n8\n");
+    support::write(&env, "pic.png", PIC_MAIN);
+    ok(&env, &["save", "On main"]);
+    ok(&env, &["combine", "side"]);
+    if tagged {
+        ok(&env, &["tag", "v1.0"]);
+    }
+    env.overwrite("a.txt", "1\nboth\n3\n4\n5\n6\n7\n8\n");
+    env.overwrite("u.txt", "unsaved work\n");
+    support::write(&env, "pic.png", b"\x89PNG\r\n\x1a\n\0by hand");
+    env
+}
+
+fn copy(from: &Env) -> Env {
+    let env = Env::empty();
+    support::copy_dir(from.root(), env.root());
+    support::copy_dir(from.config(), env.config());
+    env
+}
+
+fn tmp_left(env: &Env) -> Vec<String> {
+    match std::fs::read_dir(env.root().join(".opalro/tmp")) {
+        Ok(rd) => rd
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect(),
+        Err(_) => vec![],
+    }
+}
+
+fn crash_each(tagged: bool, args: &[&str]) {
+    let base = base(tagged);
+    let before = files(base.root());
+    let mut problems = Vec::new();
+    for n in 1..200u32 {
+        let env = copy(&base);
+        let out = env
+            .opalro()
+            .args(args)
+            .env("OPALRO_FAULT_AT", n.to_string())
+            .output()
+            .unwrap();
+        let err = text(&out.stderr);
+        if !err.contains("injected crash") {
+            assert_eq!(out.status.code(), Some(0), "{err}");
+            println!("{args:?} tagged={tagged}: {} fault points", n - 1);
+            break;
+        }
+        let at = err.lines().find(|l| l.contains("injected crash")).unwrap_or("").to_owned();
+        let mut note = |what: String| problems.push(format!("fault {n} ({at}): {what}"));
+        let now = files(env.root());
+        if now.get("u.txt") != before.get("u.txt") {
+            note("u.txt changed by the stop".into());
+        }
+        let (code, said) = run(&env, &["status"]);
+        if code != 0 {
+            note(format!("status after the stop: {said}"));
+        }
+        if files(env.root()).get("u.txt") != before.get("u.txt") {
+            note("u.txt changed after status".into());
+        }
+        let left = tmp_left(&env);
+        if !left.is_empty() {
+            note(format!(".opalro/tmp holds {left:?} after status"));
+        }
+        let (code, again) = run(&env, args);
+        if code != 0 && !again.contains("Nothing to") {
+            note(format!("again: {again}"));
+        }
+        let (_, st) = run(&env, &["status"]);
+        if st.contains("a.txt") && st.contains("conflict") {
+            note(format!("a.txt still in conflict after running again: {st}"));
+        }
+        // undo until the folder is what it was, at most three steps.
+        let mut back = false;
+        for _ in 0..3 {
+            let (code, said) = run(&env, &["undo"]);
+            if code != 0 {
+                note(format!("undo: {said}"));
+                break;
+            }
+            if files(env.root()) == before {
+                back = true;
+                break;
+            }
+        }
+        if !back {
+            let after = files(env.root());
+            let diff: Vec<_> = before
+                .keys()
+                .chain(after.keys())
+                .filter(|k| before.get(*k) != after.get(*k))
+                .collect();
+            note(format!("undo never gave back the folder; differs at {diff:?}"));
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+#[test]
+fn rt22_resolve_stopped_into_the_combined_save() {
+    crash_each(false, &["resolve", "a.txt", "pic.png"]);
+}
+
+#[test]
+fn rt22_resolve_stopped_as_a_save_of_its_own() {
+    crash_each(true, &["resolve", "a.txt", "pic.png"]);
+}
+
+#[test]
+fn rt22_resolve_keep_stopped_into_the_combined_save() {
+    crash_each(false, &["resolve", "pic.png", "a.txt", "--keep", "theirs"]);
+}
+
+#[test]
+fn rt22_resolve_keep_stopped_as_a_save_of_its_own() {
+    crash_each(true, &["resolve", "pic.png", "a.txt", "--keep", "theirs"]);
+}

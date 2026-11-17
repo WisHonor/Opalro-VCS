@@ -117,6 +117,61 @@ fn goto_a_line_moves_the_folder_and_the_head() {
 }
 
 #[test]
+fn a_goto_loads_the_file_cache_once() {
+    use crate::filecache::counted::{decodes, loads};
+    let (dir, mut repo) = two_lines();
+    repo.set_cache_key([7; 32]);
+    // A status stores the cache, and one more decodes it once, for its own read only.
+    crate::status::status(&repo, false, None).unwrap();
+    let decoded = decodes(&repo.cache_dir());
+    crate::status::status(&repo, false, None).unwrap();
+    assert_eq!(decodes(&repo.cache_dir()) - decoded, 1);
+    let (loaded, decoded) = (loads(), decodes(&repo.cache_dir()));
+    let target = Target::Line("main".into());
+    let done = goto(&mut repo, &target, &who(), "goto", None, &mut |_| {}).unwrap();
+    // The scan's load, and what it stored decoded again for the switch.
+    assert_eq!(loads() - loaded, 1);
+    assert_eq!(decodes(&repo.cache_dir()) - decoded, 2);
+    assert_eq!(done.applied.written, 3);
+    assert_eq!(files(dir.path()), holding(NEW));
+}
+
+#[test]
+fn a_goto_that_may_store_no_cache_loads_it_again_and_decides_the_same() {
+    let handles: [fn(&mut Repository); 2] = [
+        |_| {},
+        |repo| {
+            repo.set_cache_key([7; 32]);
+            repo.store_no_caches();
+        },
+    ];
+    let target = Target::Line("main".into());
+    for handle in handles {
+        let (dir, mut repo) = two_lines();
+        handle(&mut repo);
+        write_all(dir.path(), &[("mine.txt", b"mine")]);
+        let before = crate::filecache::counted::loads();
+        let done = goto(&mut repo, &target, &who(), "goto", None, &mut |_| {}).unwrap();
+        assert_eq!(crate::filecache::counted::loads() - before, 2);
+        assert_eq!((done.applied.written, done.carried), (3, 1));
+        let mut now = holding(NEW);
+        now.insert("mine.txt".into(), b"mine".to_vec());
+        assert_eq!(files(dir.path()), now);
+
+        // Unsaved work in the way still stops it.
+        let (dir, mut repo) = two_lines();
+        handle(&mut repo);
+        write_all(dir.path(), &[("a.txt", b"edited")]);
+        let err = goto(&mut repo, &target, &who(), "goto", None, &mut |_| {}).unwrap_err();
+        assert!(
+            matches!(&err, SwitchError::Collisions { paths } if paths == &["a.txt"]),
+            "{err:?}"
+        );
+        assert_eq!(fs::read(dir.path().join("a.txt")).unwrap(), b"edited");
+    }
+}
+
+#[test]
 fn goto_where_the_project_is_records_nothing() {
     let (_dir, mut repo) = two_lines();
     let head = repo.head().unwrap();

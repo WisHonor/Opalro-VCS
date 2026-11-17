@@ -1,0 +1,121 @@
+//! RT20 exploration: tidy after a combine.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+use opal_core::repo::Repository;
+
+mod support;
+use support::{Env, files, text};
+
+fn run(env: &Env, args: &[&str]) -> (i32, String) {
+    let out = env.opalro().args(args).output().unwrap();
+    (
+        out.status.code().unwrap_or(-1),
+        format!("{}{}", text(&out.stdout), text(&out.stderr)),
+    )
+}
+
+fn ok(env: &Env, args: &[&str]) -> String {
+    let (c, s) = run(env, args);
+    assert_eq!(c, 0, "{args:?}: {s}");
+    s
+}
+
+fn now_ms() -> i64 {
+    let since = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    i64::try_from(since.as_millis()).unwrap()
+}
+
+fn age(env: &Env) {
+    let packs = env.root().join(".opalro/store/packs");
+    for e in std::fs::read_dir(packs).unwrap() {
+        let f = std::fs::File::options()
+            .write(true)
+            .open(e.unwrap().path())
+            .unwrap();
+        f.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(5 * 86400))
+            .unwrap();
+    }
+}
+
+fn tidy_at(env: &Env, days_later: i64) {
+    age(env);
+    let mut repo = Repository::open(env.root()).unwrap();
+    let later = now_ms() + days_later * 24 * 3600 * 1000;
+    let done = opal_core::tidy::tidy(&mut repo, 1, later, &mut |_| {}, &mut |_| {});
+    assert!(done.is_ok(), "{:?}", done.err());
+}
+
+fn apart() -> Env {
+    let env = Env::empty();
+    ok(&env, &["start", "--preset", "custom"]);
+    support::write(&env, "a.txt", "1\n2\n3\n4\n5\n6\n7\n8\n");
+    ok(&env, &["save", "A"]);
+    ok(&env, &["line", "new", "side"]);
+    support::write(&env, "a.txt", "one\n2\n3\n4\n5\n6\n7\n8\n");
+    support::write(&env, "s1.txt", "only on side, first\n");
+    ok(&env, &["save", "S1"]);
+    support::write(&env, "s2.txt", "only on side, second\n");
+    ok(&env, &["save", "S2"]);
+    ok(&env, &["goto", "main"]);
+    support::write(&env, "a.txt", "1\n2\n3\n4\n5\n6\n7\neight\n");
+    ok(&env, &["save", "M"]);
+    env
+}
+
+fn packs(env: &Env) -> usize {
+    std::fs::read_dir(env.root().join(".opalro/store/packs"))
+        .unwrap()
+        .count()
+}
+
+#[test]
+fn rt20_tidy_after_combine() {
+    // Combined, side deleted, tidied past the window: side's saves are still reached.
+    let env = apart();
+    let side = env.state().1.lines["side"];
+    ok(&env, &["combine", "side"]);
+    ok(&env, &["line", "delete", "side"]);
+    tidy_at(&env, 3);
+    ok(&env, &["verify"]);
+    ok(&env, &["goto", &side.to_hex()]);
+    assert!(files(env.root()).contains_key("s1.txt"));
+    ok(&env, &["goto", "main"]);
+    let h = ok(&env, &["history", &side.to_hex(), "--json"]);
+    assert!(h.contains("S1"), "{h}");
+
+    // Combined and undone, tidied within the window: redo still works.
+    let env = apart();
+    ok(&env, &["combine", "side"]);
+    let combined = files(env.root());
+    ok(&env, &["undo"]);
+    ok(&env, &["line", "delete", "side", "--yes"]);
+    {
+        let mut repo = Repository::open(env.root()).unwrap();
+        age(&env);
+        let done = opal_core::tidy::tidy(&mut repo, 30, now_ms(), &mut |_| {}, &mut |_| {});
+        assert!(done.is_ok());
+    }
+    ok(&env, &["undo"]); // the delete
+    ok(&env, &["redo"]); // the delete again
+    ok(&env, &["undo"]);
+    ok(&env, &["redo"]);
+    ok(&env, &["verify"]);
+    let _ = combined;
+
+    // A refused combine leaves no pack.
+    let env = apart();
+    ok(&env, &["goto", "side"]);
+    support::write(&env, "a.txt", "1\n2\n3\n4\n5\n6\n7\nEIGHT\n");
+    ok(&env, &["save", "conflicting"]);
+    ok(&env, &["goto", "main"]);
+    let before = packs(&env);
+    let (code, said) = run(&env, &["combine", "side"]);
+    assert_eq!(code, 1, "{said}");
+    assert_eq!(packs(&env), before, "{said}");
+    let tmp: Vec<_> = std::fs::read_dir(env.root().join(".opalro/tmp"))
+        .unwrap()
+        .collect();
+    assert!(tmp.is_empty());
+}

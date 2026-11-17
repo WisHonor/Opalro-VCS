@@ -1,0 +1,165 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 11.89s
+     Running tests/rt24_explore.rs (target/debug/deps/rt24_explore-f63da37da39bacd2)
+
+running 2 tests
+test rt24_cache_states_switch ... variant 0 goto: Some(1) a.txt "one\nWORK\n" | error: Your unsaved changes, or files Opalro ignores, are in the way, so nothing was changed:
+variant 0 combine: Some(1) a.txt "one\nWORK\n" | error: Your unsaved changes, or files Opalro ignores, are in the way of the combine, so nothing was changed:
+variant 1 goto: Some(1) a.txt "one\nWORK\n" | error: Your unsaved changes, or files Opalro ignores, are in the way, so nothing was changed:
+variant 1 combine: Some(1) a.txt "one\nWORK\n" | error: Your unsaved changes, or files Opalro ignores, are in the way of the combine, so nothing was changed:
+variant 2 goto: Some(1) a.txt "one\nWORK\n" | error: Your unsaved changes, or files Opalro ignores, are in the way, so nothing was changed:
+variant 2 combine: Some(1) a.txt "one\nWORK\n" | error: Your unsaved changes, or files Opalro ignores, are in the way of the combine, so nothing was changed:
+variant 3 goto: Some(1) a.txt "one\nWORK\n" | error: Your unsaved changes, or files Opalro ignores, are in the way, so nothing was changed:
+variant 3 combine: Some(1) a.txt "one\nWORK\n" | error: Your unsaved changes, or files Opalro ignores, are in the way of the combine, so nothing was changed:
+variant 4 goto: Some(1) a.txt "one\nWORK\n" | error: Your unsaved changes, or files Opalro ignores, are in the way, so nothing was changed:
+variant 4 combine: Some(1) a.txt "one\nWORK\n" | error: Your unsaved changes, or files Opalro ignores, are in the way of the combine, so nothing was changed:
+variant 5 goto: Some(1) a.txt "one\nWORK\n" | error: Your unsaved changes, or files Opalro ignores, are in the way, so nothing was changed:
+variant 5 combine: Some(1) a.txt "one\nWORK\n" | error: Your unsaved changes, or files Opalro ignores, are in the way of the combine, so nothing was changed:
+variant 6 goto: Some(1) a.txt "one\nWORK\n" | error: Your unsaved changes, or files Opalro ignores, are in the way, so nothing was changed:
+variant 6 combine: Some(1) a.txt "one\nWORK\n" | error: Your unsaved changes, or files Opalro ignores, are in the way of the combine, so nothing was changed:
+ok
+test rt24_conflict_under_moved_folder ... mover side: combine Some(0)
+Combined side into main: save xqrz "Combine side into main", with 1 place in conflict:
+  d/x.txt: changed on main, removed on side; your version is in the folder
+
+    2 files written, 1 removed.
+status:
+On line main at save xqrz "Combine side into main"  (just now)
+
+In conflict (1 place):
+
+    d/x.txt  your version, still to decide
+folder ["d", "d/x.txt", "e", "e/x.txt", "e/y.txt"]
+resolve --keep mine: Some(2) error: the following required arguments were not provided:
+  <PATHS>...
+
+Usage: opalro resolve --keep <KEEP> <PATHS>...
+
+For more information, try '--help'.
+status:
+On line main at save xqrz "Combine side into main"  (just now)
+
+In conflict (1 place):
+
+    d/x.txt  your version, still to decide
+folder ["d", "d/x.txt", "e", "e/x.txt", "e/y.txt"]
+who d/x.txt: Some(0)
+Each line of d/x.txt and the save it is from:
+
+ywkk  Test  2026-11-16  1 | one
+zoxx  Test  2026-11-16  2 | main
+ywkk  Test  2026-11-16  3 | three
+
+who e/x.txt: Some(0)
+Each line of e/x.txt and the save it is from:
+
+wlxz  Test  2026-11-16  1 | one
+wlxz  Test  2026-11-16  2 | side
+wlxz  Test  2026-11-16  3 | three
+
+mover side: combine Some(0)
+Combined side into main: save spom "Combine side into main", with 1 place in conflict:
+  d/x.txt: changed on main, removed on side; your version is in the folder
+
+    2 files written, 1 removed.
+status:
+On line main at save spom "Combine side into main"  (just now)
+
+In conflict (1 place):
+
+    d/x.txt  your version, still to decide
+folder ["d", "d/x.txt", "e", "e/x.txt", "e/y.txt"]
+resolve --keep theirs: Some(2) error: the following required arguments were not provided:
+  <PATHS>...
+
+Usage: opalro resolve --keep <KEEP> <PATHS>...
+
+For more information, try '--help'.
+status:
+On line main at save spom "Combine side into main"  (just now)
+
+In conflict (1 place):
+
+    d/x.txt  your version, still to decide
+folder ["d", "d/x.txt", "e", "e/x.txt", "e/y.txt"]
+who d/x.txt: Some(0)
+Each line of d/x.txt and the save it is from:
+
+xyop  Test  2026-11-16  1 | one
+suyk  Test  2026-11-16  2 | main
+xyop  Test  2026-11-16  3 | three
+
+who e/x.txt: Some(0)
+Each line of e/x.txt and the save it is from:
+
+smky  Test  2026-11-16  1 | one
+smky  Test  2026-11-16  2 | side
+smky  Test  2026-11-16  3 | three
+
+mover main: combine Some(0)
+Combined side into main: save tsky "Combine side into main", with 1 place in conflict:
+  d/x.txt: changed on side, removed on main; nothing is in your folder
+
+    No file needed changing.
+status:
+On line main at save tsky "Combine side into main"  (just now)
+
+In conflict (1 place):
+
+    d/x.txt  not in your folder, still to decide
+folder ["d", "e", "e/x.txt", "e/y.txt"]
+resolve --keep mine: Some(2) error: the following required arguments were not provided:
+  <PATHS>...
+
+Usage: opalro resolve --keep <KEEP> <PATHS>...
+
+For more information, try '--help'.
+status:
+On line main at save tsky "Combine side into main"  (just now)
+
+In conflict (1 place):
+
+    d/x.txt  not in your folder, still to decide
+folder ["d", "e", "e/x.txt", "e/y.txt"]
+who e/x.txt: Some(0)
+Each line of e/x.txt and the save it is from:
+
+kvkl  Test  2026-11-16  1 | one
+kvkl  Test  2026-11-16  2 | main
+kvkl  Test  2026-11-16  3 | three
+
+mover main: combine Some(0)
+Combined side into main: save tstv "Combine side into main", with 1 place in conflict:
+  d/x.txt: changed on side, removed on main; nothing is in your folder
+
+    No file needed changing.
+status:
+On line main at save tstv "Combine side into main"  (just now)
+
+In conflict (1 place):
+
+    d/x.txt  not in your folder, still to decide
+folder ["d", "e", "e/x.txt", "e/y.txt"]
+resolve --keep theirs: Some(2) error: the following required arguments were not provided:
+  <PATHS>...
+
+Usage: opalro resolve --keep <KEEP> <PATHS>...
+
+For more information, try '--help'.
+status:
+On line main at save tstv "Combine side into main"  (just now)
+
+In conflict (1 place):
+
+    d/x.txt  not in your folder, still to decide
+folder ["d", "e", "e/x.txt", "e/y.txt"]
+who e/x.txt: Some(0)
+Each line of e/x.txt and the save it is from:
+
+nklt  Test  2026-11-16  1 | one
+nklt  Test  2026-11-16  2 | main
+nklt  Test  2026-11-16  3 | three
+
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 4 filtered out; finished in 55.53s
+

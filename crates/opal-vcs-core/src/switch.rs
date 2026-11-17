@@ -3,8 +3,8 @@
 
 use std::path::Path;
 
-use crate::diary::{Action, DiaryEntry, FolderChange, MAX_SHELVES, Position, State};
-use crate::drive::{self, Drive};
+use crate::diary::{Action, DiaryEntry, FolderChange, MAX_SHELVES, Position, State, is_plain};
+use crate::drive::Drive;
 use crate::history::{ResolveError, tip_of};
 use crate::id::Id;
 use crate::journal::{Change, Journal};
@@ -35,6 +35,10 @@ pub struct GotoOutcome {
     pub carried: usize,
     /// Whether this goto recorded a step of its own; not when the project already was there.
     pub recorded: bool,
+    /// Whether a folder of the save gone to that this goto read holds a place in conflict,
+    /// whatever it stands as (nothing included). It may not say so when the folder already held
+    /// that conflict, since the switch then needn't read that folder.
+    pub holds_conflicts: bool,
 }
 
 /// What `discard` did.
@@ -169,9 +173,9 @@ pub struct ShelfCollisions {
     pub label: String,
     /// The save the shelf was made on.
     pub base: Id,
-    /// `opalro goto` reaches `base` by the first 12 hex digits of its ID; worked out only when the
-    /// save the project is on changed something in the way.
-    pub goto_reaches_base: bool,
+    /// What `opalro goto` reaches `base` by, if anything; worked out only when the save the
+    /// project is on changed something in the way.
+    pub goto_base: Option<String>,
     /// Unsaved work, or files Opalro ignores.
     pub unsaved: Vec<String>,
     /// What the save the project is on changed since `base`.
@@ -266,29 +270,37 @@ impl SwitchError {
                 Some("opalro shelf --list shows the shelves there are.".to_owned())
             }
             SwitchError::ShelfInTheWay(c) => {
-                let unshelf = format!("opalro unshelf {}", escape(&c.label, false));
+                // A planted label could be shell text; Opalro's own are numbers. Without it, the
+                // shelf is named by its label, since a new shelf would be the newest.
+                let (bring, bring_there, newest, list) = if is_plain(&c.label) {
+                    let run = format!("run opalro unshelf {}", c.label);
+                    let there = format!("{run} there");
+                    (run, there, " (a new shelf would be the newest)", "")
+                } else {
+                    let by_label = "bring this shelf back by its label with opalro unshelf <label>";
+                    let list = " opalro shelf --list shows the label.";
+                    (by_label.to_owned(), by_label.to_owned(), "", list)
+                };
                 let not_yet = "Opalro can't yet bring a shelf back onto changes saved since it was \
                                made";
-                let (elsewhere, newest) = if c.goto_reaches_base {
-                    let goto = format!("opalro goto {}", c.base.short_hex());
-                    let there = format!(
-                        "go to the save it was made on with {goto}, then run {unshelf} there"
-                    );
-                    (there, " (a new shelf would be the newest)")
+                let (elsewhere, newest_there, list_there) = if let Some(base) = &c.goto_base {
+                    let goto = format!("opalro goto {base}");
+                    let there = format!("go to the save it was made on with {goto}, then {bring_there}");
+                    (there, newest, list)
                 } else {
                     let gone = "opalro goto can't reach the save it was made on, and opalro undo \
                                 --list shows the steps that can bring it back";
-                    (gone.to_owned(), "")
+                    (gone.to_owned(), "", "")
                 };
                 Some(match (c.unsaved.is_empty(), c.changed.is_empty()) {
                     (false, true) => format!(
                         "Save, shelve or discard your changes there, and move ignored files \
-                         somewhere else, then run {unshelf} (a new shelf would be the newest)."
+                         somewhere else, then {bring}{newest}.{list}"
                     ),
-                    (true, _) => format!("{not_yet}: {elsewhere}."),
+                    (true, _) => format!("{not_yet}: {elsewhere}.{list_there}"),
                     (false, false) => format!(
                         "Save, shelve or discard your unsaved changes there, and move ignored files \
-                         somewhere else. {not_yet}: {elsewhere}{newest}."
+                         somewhere else. {not_yet}: {elsewhere}{newest_there}.{list_there}"
                     ),
                 })
             }
@@ -557,6 +569,7 @@ fn throw_away(
         plan,
         drive,
         packs,
+        cache: None,
     };
     let applied = switch(repo, lock, to_make, who, command, earlier)?;
     // What had changed again since the plan stays as it is.
@@ -610,32 +623,9 @@ fn go(
 ) -> Result<GotoOutcome, SwitchError> {
     let (head, entry) = repo.current()?;
     let from = tip_of(&entry)?;
-    // Read again under the lock: another command may have moved the line.
-    let (position, to) = match target {
-        Target::Line(line) => match entry.state.lines.get(line) {
-            Some(save) => (Position::OnLine(line.clone()), *save),
-            None => return Err(ResolveError::NotFound(line.clone()).into()),
-        },
-        Target::ServerLine { server, line, .. } => {
-            let servers = repo.server_lines(&entry.state)?;
-            match servers
-                .servers
-                .get(server)
-                .and_then(|lines| lines.get(line))
-            {
-                Some(save) => (Position::AtSave(*save), *save),
-                None => return Err(ResolveError::NotFound(format!("{line}@{server}")).into()),
-            }
-        }
-        Target::Save(save) => (Position::AtSave(*save), *save),
-    };
-    let drive = drive::probe(repo.tmp_folder()).map_err(RepoError::from)?;
-    let plan = writeout::plan(repo, from, to, None, false, drive, git_excludes)?;
-    if !plan.collisions.is_empty() {
-        return Err(SwitchError::Collisions {
-            paths: plan.collisions,
-        });
-    }
+    let (position, to) = landing(repo, &entry.state, target)?;
+    let (plan, drive, cache) = plan_switch(repo, from, to, git_excludes)?;
+    let holds_conflicts = plan.holds_conflicts;
     let mut state = entry.state.clone();
     state.position = position.clone();
     if state == entry.state && plan.actions.is_empty() {
@@ -647,23 +637,21 @@ fn go(
             safety_copies: 0,
             carried: 0,
             recorded: false,
+            holds_conflicts,
         });
     }
-    let carried = plan.carried;
-    let mut packs = repo.new_packs()?;
-    let kept_from = kept_on(&entry.state, from, command, &[], who);
-    let (folder_change, safety_copies) =
-        kept::switch_saves(repo, &plan, from, to, &kept_from, drive, &mut packs)?;
-    let to_make = Switch {
+    let planned = Planned {
         head,
-        action: Action::Command,
+        before: &entry.state,
         state,
-        folder_change,
+        from,
+        to,
         plan,
         drive,
-        packs,
+        cache,
     };
-    let applied = switch(repo, lock, to_make, who, command, earlier)?;
+    let (applied, safety_copies, carried) =
+        make_switch(repo, lock, planned, who, command, earlier)?;
     Ok(GotoOutcome {
         position,
         save: to,
@@ -671,6 +659,98 @@ fn go(
         safety_copies,
         carried,
         recorded: true,
+        holds_conflicts,
+    })
+}
+
+/// Plans switching the folder from the save `from` to `to`, as `goto` plans it: unsaved work in
+/// the way stops it with `Collisions`. Gives the body of the file-state cache the read of the
+/// folder stored too, if that is known: the switch is made with it if nothing reads the folder
+/// in between.
+pub(crate) fn plan_switch(
+    repo: &Repository,
+    from: Id,
+    to: Id,
+    git_excludes: Option<&Path>,
+) -> Result<(Plan, Drive, Option<Vec<u8>>), SwitchError> {
+    let drive = repo.drive()?;
+    let (plan, cache) = writeout::plan_keeping_cache(repo, from, to, drive, git_excludes)?;
+    if !plan.collisions.is_empty() {
+        return Err(SwitchError::Collisions {
+            paths: plan.collisions,
+        });
+    }
+    Ok((plan, drive, cache))
+}
+
+/// A switch from the save `from` to `to`, planned, to be made as one diary step after `head`
+/// that records `state`; `before` is the state `head` records.
+pub(crate) struct Planned<'a> {
+    pub head: Id,
+    pub before: &'a State,
+    pub state: State,
+    pub from: Id,
+    pub to: Id,
+    pub plan: Plan,
+    pub drive: Drive,
+    /// The file-state cache's body from `plan_switch`, if nothing read the folder since.
+    pub cache: Option<Vec<u8>>,
+}
+
+/// Makes a planned switch as `goto` does: safety copies of unsaved work kept first, then the
+/// switch. Gives what was done, how many safety copies were kept, and how many unsaved changes
+/// came along.
+pub(crate) fn make_switch(
+    repo: &mut Repository,
+    lock: &ChangeLock,
+    p: Planned,
+    who: &Person,
+    command: &str,
+    earlier: &mut Earlier,
+) -> Result<(Applied, usize, usize), SwitchError> {
+    let carried = p.plan.carried;
+    let mut packs = repo.new_packs()?;
+    let kept_from = kept_on(p.before, p.from, command, &[], who);
+    let (folder_change, safety_copies) =
+        kept::switch_saves(repo, &p.plan, p.from, p.to, &kept_from, p.drive, &mut packs)?;
+    let to_make = Switch {
+        head: p.head,
+        action: Action::Command,
+        state: p.state,
+        folder_change,
+        plan: p.plan,
+        drive: p.drive,
+        packs,
+        cache: p.cache,
+    };
+    let applied = switch(repo, lock, to_make, who, command, earlier)?;
+    Ok((applied, safety_copies, carried))
+}
+
+/// Where `target` leads now, read under the lock: the position and the save.
+pub(crate) fn landing(
+    repo: &Repository,
+    state: &State,
+    target: &Target,
+) -> Result<(Position, Id), SwitchError> {
+    // Read again under the lock: another command may have moved the line.
+    Ok(match target {
+        Target::Line(line) => match state.lines.get(line) {
+            Some(save) => (Position::OnLine(line.clone()), *save),
+            None => return Err(ResolveError::NotFound(line.clone()).into()),
+        },
+        Target::ServerLine { server, line, .. } => {
+            let servers = repo.server_lines(state)?;
+            match servers
+                .servers
+                .get(server)
+                .and_then(|lines| lines.get(line))
+            {
+                Some(save) => (Position::AtSave(*save), *save),
+                None => return Err(ResolveError::NotFound(format!("{line}@{server}")).into()),
+            }
+        }
+        Target::Save(save) => (Position::AtSave(*save), *save),
     })
 }
 
@@ -731,6 +811,8 @@ pub(crate) struct Switch {
     pub drive: Drive,
     /// What is stored with its diary entry.
     pub packs: PackSet,
+    /// The body `cache/files` holds now, if known; else the switch loads the file-state cache.
+    pub cache: Option<Vec<u8>>,
 }
 
 /// Makes a planned switch in this order: its packs and diary entry are stored, then
@@ -762,7 +844,7 @@ pub(crate) fn switch(
         actions: s.plan.actions.clone(),
     };
     journal.write(repo, lock)?;
-    let applied = writeout::carry_out(repo, lock, &journal, s.drive)?;
+    let applied = writeout::carry_out_with(repo, lock, &journal, s.drive, s.cache)?;
     crate::merge::merge_after_commit(repo, lock);
     let applied = switch_warnings(s.plan, applied, earlier);
     if !applied.in_use.is_empty() {

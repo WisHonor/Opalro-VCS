@@ -1,7 +1,8 @@
 //! `opalro save`: walks the project folder, stores its files, and commits the save.
 
+use std::borrow::Cow;
 use std::cmp::Reverse;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::ffi::OsStr;
 use std::fmt::{self, Write as _};
 use std::fs::File;
@@ -11,24 +12,30 @@ use std::sync::Arc;
 
 use opal_platform::dir::{Dir, EntryMeta, EntryType};
 
+use crate::ancestry;
 use crate::changeids::ChangeIds;
-use crate::diary::{Action, DiaryEntry, Position, State, line_named_alike, validate_line_name};
+use crate::conflict::standing::as_it_stands;
+use crate::conflict::{self, Record, Recording, Settled, Summary, markers};
+use crate::diary::{Action, DiaryEntry, Position, State};
 use crate::diff::count_changes;
-use crate::drive::{self, Drive};
-use crate::encoding::DecodeError;
+use crate::drive::Drive;
 use crate::filecache::{self, FileCache, FileState};
 use crate::fsio;
 use crate::history;
 use crate::id::{ChangeId, ContentHasher, Id, hash_content};
 use crate::ingest::{self, IngestError, Ready};
+use crate::lastmade::LastMade;
+use crate::lines::{self, Holder, NameError, check_new_name};
 use crate::link;
 use crate::listing::{Entry, EntryKind, Listing, SaveLimits};
+use crate::moves;
 use crate::names::{Given, PortabilityProblem, folder_problems};
-use crate::otherlines::OtherLines;
 use crate::pack::{ObjectKind, PackError, PackSet};
 use crate::repo::{RepoError, Repository};
 use crate::rules::Rules;
-use crate::save::{EXTRA_GIT_COMMIT, EXTRA_LINE, GIT_FIELDS, Person, Save};
+use crate::save::{
+    EXTRA_GIT_COMMIT, EXTRA_LINE, GIT_FIELDS, MAX_MOVE_NOTES, MoveNote, Person, Save,
+};
 use crate::scope::Scope;
 use crate::store::{Store, StoreError};
 use crate::text::{self, escape, thousands};
@@ -79,6 +86,8 @@ pub enum SaveOutcome {
         warnings: Vec<Warning>,
         /// The save an amend replaced, which stays stored.
         replaced: Option<Id>,
+        /// The places in conflict the save met, still in conflict in it.
+        conflicts: u64,
     },
     /// The folder matches the line's current save, which is `current`; for an amend, the message
     /// matches too.
@@ -160,6 +169,13 @@ pub enum SaveError {
         kept_in_the_way(kept)
     )]
     InTheWay { path: String, kept: String },
+    #[error(
+        "Opalro can't save {}: the last save has a folder there holding {}, which is still in \
+         conflict, and a save can't hold both under one name.",
+        escape(path, false),
+        escape(kept, false)
+    )]
+    ConflictInTheWay { path: String, kept: String },
     #[error("{}", line_endings_changed(*count, first))]
     LineEndingsChanged {
         /// How many files, of which `first` names the first few by project path.
@@ -176,20 +192,9 @@ pub enum SaveError {
     NeedsMessage,
     #[error("You're at a save, not on a line, so this save needs a new line to go on.")]
     NeedsLineName,
-    // `reason` is Opalro's own wording.
-    #[error("`{}` can't be a line's name: {reason}.", escape(name, false))]
-    BadLineName { name: String, reason: &'static str },
-    #[error(
-        "There is already a line {}, and two lines can't have names that differ only by letter \
-         case.",
-        escape(taken, false)
-    )]
-    LineTaken { taken: String },
-    #[error(
-        "You're on line {}, and making a new line from a line comes in v0.2.",
-        escape(line, false)
-    )]
-    LineFromLine { line: String },
+    /// `--line` named a line that can't be made; never [`NameError::Repo`].
+    #[error(transparent)]
+    Name(NameError),
     #[error(
         "{} matches nothing in your files or in the last save.",
         escape(given, false)
@@ -226,9 +231,12 @@ pub enum SaveError {
     LargeSave(LargeSave),
     #[error("You're at a save, not on a line, so there is no newest save of a line to amend.")]
     AmendAtSave,
+    #[error("An amend replaces the newest save of your line, so it can't start a new line.")]
+    AmendNewLine,
     #[error("{}", shown_too(by))]
     AmendShared {
-        /// Who else shows the save: `line x`, `server line y@origin` or `tag v1`.
+        /// Who else shows the save, each as shown, escaped: `line x`, `server line y@origin` or
+        /// `tag v1`.
         by: Vec<String>,
     },
 }
@@ -237,6 +245,15 @@ pub enum SaveError {
 impl From<StoreError> for SaveError {
     fn from(e: StoreError) -> Self {
         SaveError::Repo(e.into())
+    }
+}
+
+impl From<NameError> for SaveError {
+    fn from(e: NameError) -> Self {
+        match e {
+            NameError::Repo(e) => SaveError::Repo(e),
+            e => SaveError::Name(e),
+        }
     }
 }
 
@@ -320,7 +337,18 @@ fn lfs_pointers_in_folder(paths: &[String], count: u64) -> String {
 
 /// Names the first few of those that show the save an amend would replace, and counts the rest.
 fn shown_too(by: &[String]) -> String {
-    let mut named: Vec<String> = by.iter().take(NAMED).map(|b| escape(b, false)).collect();
+    format!(
+        "Opalro can't amend this save: {} it too, and two saves you can see would then share one \
+         change ID.",
+        who_shows(by)
+    )
+}
+
+/// `line b shows`, or `tag v1, tag v2 and 3 more show`: the first few of `by`, as an amend's
+/// refusal names them.
+#[must_use]
+pub fn who_shows(by: &[String]) -> String {
+    let mut named: Vec<String> = by.iter().take(NAMED).cloned().collect();
     let more = by.len().saturating_sub(NAMED);
     if more > 0 {
         named.push(format!("{more} more"));
@@ -330,24 +358,27 @@ fn shown_too(by: &[String]) -> String {
         _ => named.concat(),
     };
     let show = if by.len() == 1 { "shows" } else { "show" };
-    format!(
-        "Opalro can't amend this save: {who} {show} it too, and two saves you can see would then \
-         share one change ID."
-    )
+    format!("{who} {show}")
 }
 
 impl SaveError {
     /// What the user can do next after a save, if there is something to say.
     #[must_use]
     pub fn hint(&self) -> Option<String> {
-        self.next_step(true)
+        self.next_step(Shown::Saving)
     }
 
     /// The same, for a command that only reads the folder, such as `status`: nothing was going
     /// to be saved.
     #[must_use]
     pub fn hint_when_reading(&self) -> Option<String> {
-        self.next_step(false)
+        self.next_step(Shown::Reading)
+    }
+
+    /// The same, for `resolve`, which records fixes through a save's checks.
+    #[must_use]
+    pub fn hint_when_resolving(&self) -> Option<String> {
+        self.next_step(Shown::Resolving)
     }
 
     /// This error, met reading the folders of the save `save`: a spelling of `.opalro` is told as
@@ -360,18 +391,35 @@ impl SaveError {
         }
     }
 
-    fn next_step(&self, saving: bool) -> Option<String> {
+    fn next_step(&self, shown: Shown) -> Option<String> {
+        let resolving = shown == Shown::Resolving;
+        let again = if resolving {
+            "then run opalro resolve again"
+        } else {
+            "then save again"
+        };
         let step = match self {
             SaveError::Repo(e) => return e.hint(),
-            SaveError::InTheWay { path, .. } => {
+            SaveError::InTheWay { path, .. } | SaveError::ConflictInTheWay { path, .. } => {
                 let path = escape(path, false);
-                if saving {
-                    format!("Rename or move {path}, then save again.")
-                } else {
+                if shown == Shown::Reading {
                     format!("Rename or move {path}.")
+                } else {
+                    format!("Rename or move {path}, {again}.")
                 }
             }
             // `git checkout` alone skips files whose stat data the index matches.
+            SaveError::LineEndingsChanged { .. } if resolving => {
+                return Some(
+                    "To keep history as Git stored it, commit or stash your changes in Git, then \
+                     run `git config core.autocrlf false`, `git rm --cached -r -q :/` and `git \
+                     reset --hard`, then run opalro resolve again. Files `.gitattributes` marks \
+                     `eol=crlf` stay CRLF after those steps, and --accept-crlf then records just \
+                     those. To record the files with CRLF anyway, run the same command again \
+                     with --accept-crlf."
+                        .to_owned(),
+                );
+            }
             SaveError::LineEndingsChanged { .. } => {
                 return Some(
                     "To keep history as Git stored it, commit or stash your changes in Git, then \
@@ -382,28 +430,27 @@ impl SaveError {
                         .to_owned(),
                 );
             }
-            SaveError::LfsPointersInFolder { .. } => {
-                "Run `git lfs checkout` to have Git LFS write the files, then save again. If Git \
-                 LFS can't, `opalro discard` with those paths puts back the files the import \
-                 brought in."
-                    .into()
-            }
+            SaveError::LfsPointersInFolder { .. } => format!(
+                "Run `git lfs checkout` to have Git LFS write the files, {again}. If Git LFS \
+                 can't, `opalro discard` with those paths puts back the files the import brought \
+                 in."
+            ),
             SaveError::NeedsMessage => {
                 "Say what you changed: opalro save \"describe your change\"".into()
             }
             SaveError::NeedsLineName => "Name it: opalro save --line <name> \"message\"".into(),
-            SaveError::BadLineName { .. } | SaveError::LineTaken { .. } => {
-                "Choose another name.".into()
-            }
-            SaveError::LineFromLine { line } => {
-                format!("Leave out --line to save on {}.", escape(line, false))
-            }
+            SaveError::Name(e) => e.hint()?,
             SaveError::NoMatch { .. } => {
                 "Name files, folders or patterns from the folder you are in.".into()
             }
             SaveError::LeftOut { .. } => "To save it, change the rule that ignores it.".into(),
             SaveError::NotAFolder { path, .. } => {
                 format!("Name {} itself to save it as it is.", escape(path, false))
+            }
+            SaveError::KeptWhole { .. } if resolving => {
+                "This computer can't hold it, so pick a side instead: opalro resolve <path> \
+                 --keep mine (or theirs)."
+                    .into()
             }
             SaveError::KeptWhole { .. } => {
                 "Leave it out of what you name: it stays as the last save has it.".into()
@@ -425,23 +472,38 @@ impl SaveError {
             // `.opalroignore` that isn't a regular file.
             SaveError::Ignore { .. } => "Fix that ignore file and try again.".into(),
             SaveError::TooLarge { .. } => "List the deep or huge folder in .opalroignore.".into(),
+            SaveError::LargeSave(_) if resolving => "To record them, run opalro resolve again \
+                                                     with --yes; to leave some out, list them in \
+                                                     .opalroignore."
+                .into(),
             SaveError::LargeSave(_) => "To save them, run the save again with --yes; to leave \
                                         some out, list them in .opalroignore."
                 .into(),
             SaveError::AmendAtSave => {
                 "To amend a line's newest save, go to the line first: opalro goto <line>".into()
             }
+            SaveError::AmendNewLine => {
+                "To start a line with these changes: opalro save --line <name> \"message\"".into()
+            }
             SaveError::AmendShared { .. } => {
                 "Save your changes as a new save instead: opalro save \"describe your change\""
                     .into()
             }
         };
-        Some(if saving {
-            format!("Nothing was saved. {step}")
-        } else {
-            step
+        Some(match shown {
+            Shown::Saving => format!("Nothing was saved. {step}"),
+            Shown::Resolving => format!("Nothing was recorded. {step}"),
+            Shown::Reading => step,
         })
     }
+}
+
+/// The command a save's refusal is shown by, which its hint speaks of.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Shown {
+    Saving,
+    Reading,
+    Resolving,
 }
 
 /// Saves the project folder on the current line, or in place of its newest save for an amend.
@@ -454,8 +516,22 @@ pub fn save_folder(
     on_wait: &mut dyn FnMut(&str),
     confirm_large: &mut dyn FnMut(&LargeSave) -> bool,
 ) -> Result<SaveOutcome, SaveError> {
+    save_recording(repo, req, &Recording::default(), on_wait, confirm_large)
+}
+
+/// `save_folder`, settling the places `recording` names as fixed.
+pub(crate) fn save_recording(
+    repo: &mut Repository,
+    req: &SaveRequest,
+    recording: &Recording,
+    on_wait: &mut dyn FnMut(&str),
+    confirm_large: &mut dyn FnMut(&LargeSave) -> bool,
+) -> Result<SaveOutcome, SaveError> {
     if req.message.is_none() && !req.amend {
         return Err(SaveError::NeedsMessage);
+    }
+    if req.amend && req.new_line.is_some() {
+        return Err(SaveError::AmendNewLine);
     }
     let lock = repo.lock_for_change(req.command, on_wait)?;
     // A stopped switch is finished first, so the save is of the folder it left. What came of it
@@ -469,127 +545,35 @@ pub fn save_folder(
     if req.amend && matches!(entry.state.position, Position::AtSave(_)) {
         return Err(SaveError::AmendAtSave);
     }
-    let (line, parent_id) = save_goes_on(&entry.state, req.new_line)?;
+    let (line, parent_id) = save_goes_on(repo, &entry.state, req.new_line)?;
     let parent = repo.store().save(&parent_id, repo.signatures_allowed())?;
-    // An amend needs the change-ID cache before the walk; a save, only once it has its save.
-    let mut early_cache = None;
     if req.amend
         && let Some(line) = &line
     {
-        let mut cache = ChangeIds::load(repo);
-        let by = shown_elsewhere(repo, &mut cache, &entry.state, line, parent_id, &parent);
-        // Kept however the amend ends: reading the other lines is what costs.
-        cache.store(repo, &entry.state);
-        let by = by?;
+        let by = shown_elsewhere(repo, &entry.state, line, parent_id)?;
         if !by.is_empty() {
             return Err(SaveError::AmendShared { by });
         }
-        early_cache = Some(cache);
     }
-    // Before the walk, as for `read_folder`; without it every file is read.
-    let now = filecache::drive_now(repo).ok();
-    let drive = drive::probe(repo.tmp_folder()).map_err(RepoError::from)?;
-    let base = Base::new(repo.store(), parent.root, SaveLimits::default());
-    let walked = || {
-        walk(
-            repo.root(),
-            base,
-            SaveLimits::default(),
-            drive,
-            req.git_excludes,
-        )
-    };
-    let (scan, cache) = match now {
-        Some(_) => FileCache::load_during(repo, walked),
-        None => (walked(), FileCache::default()),
-    };
-    let Scan {
-        mut handles,
-        mut folders,
-        mut old,
-        old_ids,
-        mut rebuilt,
-        noted,
-        mut warnings,
-        ..
-    } = scan?;
-    fsio::fault_point("save:walked").map_err(RepoError::from)?;
-    warnings.extend(repo.rules().warnings());
-    let imported = parent.extra.contains_key(EXTRA_GIT_COMMIT);
-    // In the whole folder, before a partial save narrows it: a pointer left out would be saved as
-    // it is by the next save, which doesn't look. Told after the save's own checks.
-    let pointers = if imported {
-        endings::pointers(repo.store(), drive, &cache, &mut handles, &folders, &old)
-    } else {
-        Ok(())
-    };
-    if let Some(given) = req.only {
-        let scope = Scope::new(given, drive);
-        let store = repo.store();
-        let limits = SaveLimits::default();
-        let narrowed = only::narrow(
-            &scope,
-            given,
-            store,
-            &mut folders,
-            &mut old,
-            &mut rebuilt,
-            limits,
-        )?;
-        only::check_matched(&scope, given, &narrowed, &mut handles)?;
-    }
-    check_names(&folders, &old)?;
-    // Before anything is stored, so that a stop leaves nothing behind (decision 039). Pointers
-    // first: saving line endings as they are can't help while pointers stand in for files.
-    pointers?;
-    if imported && !req.accept_crlf {
-        endings::check(repo.store(), drive, &mut handles, &folders, &old)?;
-    }
-    if let Some(large) = large_save(repo.store(), &repo.rules().rules, drive, &folders, &old)? {
-        // New files mean something to save, so a missing line name is asked for now: the
-        // question comes after it, and what is stored is stored once.
-        if line.is_none() {
-            return Err(SaveError::NeedsLineName);
-        }
-        if !confirm_large(&large) {
-            return Err(SaveError::LargeSave(large));
-        }
-    }
-    let mut packs = repo.new_packs()?;
-    for listing in &rebuilt {
-        store_listing(repo.store(), &mut packs, listing)?;
-    }
-    let mut storing = Storing {
-        store: repo.store(),
-        packs: &mut packs,
-        cache,
-    };
-    let last = Last {
-        listings: &old,
-        ids: &old_ids,
-    };
-    let built = build_reading(
-        &mut storing,
-        Some(repo.store()),
-        &mut handles,
-        &folders,
-        last,
-        &noted,
+    let mut walked = read_and_build(
+        repo,
+        req,
+        &parent,
+        recording,
+        true,
+        line.is_some(),
+        confirm_large,
     )?;
-    let seen = storing.cache;
-    let root = built.root;
-    let kept = built.kept.len() + built.kept_below_gone;
-    if kept > 0 {
-        warnings.push(kept_warning(kept));
-    }
-    if !built.changed.is_empty() {
-        warnings.push(ignored_changes_saved(built.changed));
-    }
-    if !built.taken_back.is_empty() {
-        warnings.push(gitignored_files_saved(built.taken_back));
-    }
+    let root = walked.root;
     let message = req.message.unwrap_or(&parent.message);
     if root == parent.root && (!req.amend || message == parent.message) {
+        let Walked {
+            packs,
+            seen,
+            now,
+            mut warnings,
+            ..
+        } = walked;
         // Anything stored here replaces a damaged copy the last save needs, so it is kept.
         if !packs.is_empty() {
             packs.finish()?;
@@ -604,94 +588,53 @@ pub fn save_folder(
     let Some(line) = &line else {
         return Err(SaveError::NeedsLineName);
     };
-    let save = if req.amend {
-        let mut extra = parent.extra.clone();
-        for field in GIT_FIELDS {
-            extra.remove(field);
-        }
-        Save {
-            root,
-            parents: parent.parents.clone(),
-            author: parent.author.clone(),
-            saver: req.who.clone(),
-            message: message.to_owned(),
-            change_id: parent.change_id,
-            move_notes: parent.move_notes.clone(),
-            signature: vec![],
-            extra,
-        }
-    } else {
-        Save {
-            root,
-            parents: vec![parent_id],
-            author: req.who.clone(),
-            saver: req.who.clone(),
-            message: message.to_owned(),
-            change_id: ChangeId::random()
-                .map_err(io::Error::other)
-                .map_err(RepoError::from)?,
-            move_notes: vec![],
-            signature: vec![],
-            extra: BTreeMap::from([(EXTRA_LINE.to_owned(), line.as_bytes().to_vec())]),
-        }
+    let (move_notes, counted) = walked.moves(repo);
+    let mut cache = ChangeIds::load(repo);
+    let (save_id, save, short_change_id) = compose(
+        repo,
+        line,
+        parent_id,
+        &parent,
+        root,
+        message,
+        req.who,
+        req.amend,
+        move_notes,
+        &mut walked.packs,
+        &mut cache,
+        &mut walked.warnings,
+    )?;
+    let Walked {
+        packs,
+        met_conflicts,
+        mut warnings,
+        seen,
+        now,
+        before,
+        ..
+    } = walked;
+    let made = Made {
+        line,
+        parent_id,
+        save_id,
+        change_id: save.change_id,
+        amend: req.amend,
     };
-    let encoded = save.encode();
-    // Refuse a save that would not read back (an over-long message, say) before storing it.
-    Save::decode(&encoded, false).map_err(StoreError::from)?;
-    let save_id = packs.add_record(ObjectKind::Save, &encoded)?;
-    // Worked out before the commit, so that nothing after it can fail the save. The line's
-    // saves come from the cache, which then learns this one; an amend takes the place of the
-    // save it amends.
-    let mut cache = early_cache.unwrap_or_else(|| ChangeIds::load(repo));
-    let shortened = cache.chain(repo, Some(line), parent_id).map(|saves| {
-        let behind = if req.amend {
-            saves.get(1..).unwrap_or_default()
-        } else {
-            saves
-        };
-        history::short_in(behind, &save_id, &save.change_id)
-    });
-    let short_change_id = shortened.unwrap_or_else(|why| {
-        warnings.push(Warning::new(
-            warning::CHANGE_ID_NOT_SHORTENED,
-            format!(
-                "The save was made, but Opalro couldn't read this line's older saves to \
-                     shorten its ID. {why}"
-            ),
-        ));
-        save.change_id.to_letters()
-    });
-    let mut state = entry.state.clone();
-    state.lines.insert(line.clone(), save_id);
-    state.position = Position::OnLine(line.clone());
-    let diary = DiaryEntry {
-        parent: Some(head),
-        action: Action::Command,
-        command: req.command.to_owned(),
-        who: req.who.clone(),
-        opal_version: env!("CARGO_PKG_VERSION").into(),
-        state,
-        folder_change: None,
-    };
-    repo.commit(&lock, packs, &diary)?;
-    if req.amend {
-        cache.replace(line, parent_id, save_id);
-    } else {
-        cache.add(line, parent_id, save_id, save.change_id);
-    }
-    cache.store(repo, &diary.state);
+    made.commit(
+        repo,
+        &lock,
+        head,
+        &entry.state,
+        req.who,
+        req.command,
+        packs,
+        &mut cache,
+    )?;
     keep_file_cache(repo, seen, now, &mut warnings);
-    // Counted from the save before it, which for an amend is the first parent it took over.
-    let before = match (req.amend, save.parents.first()) {
-        (false, _) => Ok(Some(parent.root)),
-        (true, Some(first)) => repo
-            .store()
-            .save(first, repo.signatures_allowed())
-            .map(|s| Some(s.root)),
-        (true, None) => Ok(None),
-    };
     // The save is committed now; failing to count its files must not make it look failed.
-    let changed_files = match before.and_then(|before| count_changes(repo.store(), before, root)) {
+    let counted = counted
+        .unwrap_or_else(|| before.and_then(|before| count_changes(repo.store(), before, root)));
+    let changed_files = match counted {
         Ok(count) => Some(count),
         Err(why) => {
             warnings.push(Warning::new(
@@ -711,160 +654,524 @@ pub fn save_folder(
         short_change_id,
         warnings,
         replaced: req.amend.then_some(parent_id),
+        conflicts: met_conflicts,
     })
 }
 
-/// Who else shows `id`, the newest save of `line`, as `AmendShared` names them: a line that holds
-/// it or reaches its change ID along first parents, a server line or a tag that names it.
+/// What a walk of the folder built, before it becomes a save.
+pub(crate) struct Walked {
+    pub root: Id,
+    pub packs: PackSet,
+    /// The places in conflict the walk met that are still in conflict in what it built.
+    pub met_conflicts: u64,
+    pub warnings: Vec<Warning>,
+    /// What the walk learned of the files, kept as the file-state cache once the save is made.
+    pub seen: FileCache,
+    pub now: Option<i128>,
+    /// The save before this one, which for an amend is the first parent it takes over: its moves
+    /// are noted against it, and its files counted from it.
+    before: Result<Option<Id>, StoreError>,
+    held: Option<Held>,
+}
+
+impl Walked {
+    /// The moves noted against the save before, and the files changed when they could be
+    /// counted on the way.
+    pub(crate) fn moves(
+        &mut self,
+        repo: &Repository,
+    ) -> (Vec<MoveNote>, Option<Result<usize, StoreError>>) {
+        let held = self.held.take();
+        notes_against(
+            repo,
+            &self.before,
+            held.as_ref().map(|h| &h.listings),
+            self.root,
+        )
+    }
+}
+
+/// The save a new save on `parent` is compared with: `parent`, or for an amend the first parent
+/// it takes over. Its moves are noted against it, and its files counted from it.
+pub(crate) fn save_before(
+    repo: &Repository,
+    amend: bool,
+    parent: &Save,
+) -> Result<Option<Id>, StoreError> {
+    match (amend, parent.parents.first()) {
+        (false, _) => Ok(Some(parent.root)),
+        (true, Some(first)) => repo
+            .store()
+            .save(first, repo.signatures_allowed())
+            .map(|s| Some(s.root)),
+        (true, None) => Ok(None),
+    }
+}
+
+/// The moves a save of `root` notes against `before`, and the files changed when they are
+/// counted on the way; `held` holds the new listings not yet stored, `None` when none were held.
+pub(crate) fn notes_against(
+    repo: &Repository,
+    before: &Result<Option<Id>, StoreError>,
+    held: Option<&HashMap<Id, Listing>>,
+    root: Id,
+) -> (Vec<MoveNote>, Option<Result<usize, StoreError>>) {
+    // The files are counted in the same walk as the moves, while the new listings are at hand;
+    // without them, after the commit, from the store.
+    let (_, most_bytes, most_left) = note_limits();
+    let keeps_conflicts = repo.keeps_conflicts();
+    // A conflict's place is never a file that left or arrived.
+    let place = move |o: Option<&Entry>, n: Option<&Entry>| {
+        keeps_conflicts
+            && [o, n]
+                .into_iter()
+                .flatten()
+                .any(|e| e.kind == EntryKind::Conflict)
+    };
+    // Nothing can have moved from an empty save.
+    let empty = Listing::empty().id();
+    let compared = match (before, held) {
+        (Ok(Some(from)), Some(held)) if *from != empty => Some(moves::count_and_moves(
+            repo.store(),
+            held,
+            *from,
+            root,
+            most_left,
+            &place,
+        )),
+        _ => None,
+    };
+    // Notes say only what is certain and never stop a save: one that can't be compared with the
+    // save before it notes nothing, and is told it couldn't count its files only if it couldn't.
+    let (mut move_notes, counted) = match compared {
+        Some(Ok((count, notes))) => (notes.ok().flatten().unwrap_or_default(), Some(Ok(count))),
+        Some(Err(why)) => (vec![], Some(Err(why))),
+        None => (vec![], None),
+    };
+    let most = usize::try_from(MAX_MOVE_NOTES).unwrap_or(usize::MAX);
+    moves::first_that_fit(&mut move_notes, most, most_bytes);
+    (move_notes, counted)
+}
+
+/// A save made on `line`, in place of its newest save `parent_id` when `amend`, else on top.
+pub(crate) struct Made<'a> {
+    pub line: &'a str,
+    pub parent_id: Id,
+    pub save_id: Id,
+    pub change_id: ChangeId,
+    pub amend: bool,
+}
+
+impl Made<'_> {
+    /// Commits it as one diary step after `head` (whose state is `before`), with no change to the
+    /// folder, has the line's saves in `cache` learn it, and leaves the note of it.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn commit(
+        &self,
+        repo: &mut Repository,
+        lock: &crate::repo::ChangeLock,
+        head: Id,
+        before: &State,
+        who: &Person,
+        command: &str,
+        packs: PackSet,
+        cache: &mut ChangeIds,
+    ) -> Result<(), SaveError> {
+        let diary = DiaryEntry {
+            parent: Some(head),
+            action: Action::Command,
+            command: command.to_owned(),
+            who: who.clone(),
+            opal_version: env!("CARGO_PKG_VERSION").into(),
+            state: self.state(before),
+            folder_change: None,
+        };
+        let made = repo.commit(lock, packs, &diary)?;
+        self.learn(repo, cache, &diary.state);
+        // The note takes the save to be new; only the same save made again in the same
+        // millisecond breaks that, and checking would cost one more read on every save.
+        LastMade::store(repo, &diary.state, self.save_id, made);
+        Ok(())
+    }
+
+    /// `before` with the project on the line, at this save.
+    pub(crate) fn state(&self, before: &State) -> State {
+        let mut state = before.clone();
+        state.lines.insert(self.line.to_owned(), self.save_id);
+        state.position = Position::OnLine(self.line.to_owned());
+        state
+    }
+
+    /// Has the line's saves in `cache` learn this one, once it is committed in `state`.
+    pub(crate) fn learn(&self, repo: &Repository, cache: &mut ChangeIds, state: &State) {
+        if self.amend {
+            cache.replace(self.line, self.parent_id, self.save_id);
+        } else {
+            cache.add(self.line, self.parent_id, self.save_id, self.change_id);
+        }
+        cache.store(repo, state);
+    }
+}
+
+/// Walks the folder on top of `parent` as `save` does, with every check `save` makes, settling
+/// the conflicts it meets with `recording`. `check_named`: whether what `req.only` names must
+/// match something. `has_line`: whether there is a line to save on, asked before a large save is.
+pub(crate) fn read_and_build(
+    repo: &Repository,
+    req: &SaveRequest,
+    parent: &Save,
+    recording: &Recording,
+    check_named: bool,
+    has_line: bool,
+    confirm_large: &mut dyn FnMut(&LargeSave) -> bool,
+) -> Result<Walked, SaveError> {
+    // Before the walk, as for `read_folder`; without it every file is read.
+    let now = filecache::drive_now(repo).ok();
+    let drive = repo.drive()?;
+    let keeps_conflicts = repo.keeps_conflicts();
+    let mut base = Base::new(repo.store(), parent.root, base_limits());
+    base.conflicts = keeps_conflicts;
+    base.settles = keeps_conflicts;
+    base.recording = Some(recording);
+    let walked = || {
+        walk(
+            repo.root(),
+            base,
+            SaveLimits::default(),
+            drive,
+            req.git_excludes,
+        )
+    };
+    let (scan, cache) = match now {
+        Some(_) => FileCache::load_during(repo, walked),
+        None => (walked(), FileCache::default()),
+    };
+    let Scan {
+        mut handles,
+        mut folders,
+        mut old,
+        old_ids,
+        mut rebuilt,
+        mut rebuilt_records,
+        noted,
+        mut warnings,
+        mut records,
+        in_conflict,
+        ..
+    } = scan?;
+    fsio::fault_point("save:walked").map_err(RepoError::from)?;
+    warnings.extend(repo.rules().warnings());
+    let imported = parent.extra.contains_key(EXTRA_GIT_COMMIT);
+    // In the whole folder, before a partial save narrows it: a pointer left out would be saved as
+    // it is by the next save, which doesn't look. Told after the save's own checks.
+    let pointers = if imported {
+        let last = Last {
+            listings: &old,
+            ids: &old_ids,
+            records: &records,
+        };
+        endings::pointers(repo.store(), drive, &cache, &mut handles, &folders, last)
+    } else {
+        Ok(())
+    };
+    if let Some(given) = req.only {
+        let scope = Scope::new(given, drive);
+        let store = repo.store();
+        let limits = SaveLimits::default();
+        let narrowed = only::narrow(
+            &scope,
+            given,
+            store,
+            &mut folders,
+            &mut old,
+            &mut rebuilt,
+            limits,
+            keeps_conflicts.then_some(only::Conflicts {
+                records: &mut records,
+                in_conflict,
+                recording,
+            }),
+        )?;
+        if check_named {
+            only::check_matched(&scope, given, &narrowed, &mut handles)?;
+        }
+        // Only the records the folders that came back still name.
+        let named: HashSet<Id> = rebuilt
+            .iter()
+            .flat_map(Listing::entries)
+            .filter(|e| e.kind == EntryKind::Conflict)
+            .map(|e| e.id)
+            .collect();
+        rebuilt_records.retain(|r| named.contains(&r.id));
+    }
+    check_names(
+        &folders,
+        &old,
+        keeps_conflicts.then_some((repo.store(), &mut records, recording)),
+    )?;
+    // Before anything is stored, so that a stop leaves nothing behind (decision 039). Pointers
+    // first: saving line endings as they are can't help while pointers stand in for files.
+    pointers?;
+    let last = Last {
+        listings: &old,
+        ids: &old_ids,
+        records: &records,
+    };
+    if imported && !req.accept_crlf {
+        endings::check(repo.store(), drive, &mut handles, &folders, last)?;
+    }
+    if let Some(large) = large_save(repo.store(), &repo.rules().rules, drive, &folders, last)? {
+        // New files mean something to save, so a missing line name is asked for now: the
+        // question comes after it, and what is stored is stored once.
+        if !has_line {
+            return Err(SaveError::NeedsLineName);
+        }
+        if !confirm_large(&large) {
+            return Err(SaveError::LargeSave(large));
+        }
+    }
+    let before = save_before(repo, req.amend, parent);
+    // Nothing can have moved from an empty save, so a first save holds nothing to compare.
+    let empty = Listing::empty().id();
+    let compare = matches!(before, Ok(Some(from)) if from != empty);
+    let mut packs = repo.new_packs()?;
+    let mut storing = Storing {
+        store: repo.store(),
+        packs: &mut packs,
+        cache,
+        held: compare.then(Held::default),
+        recording,
+        keeps_conflicts,
+        disk: writeout::Folders::from_top(handles.top()),
+    };
+    for again in &rebuilt_records {
+        let record = conflict::again_at(storing.store, &again.path, &again.from, again.own)?;
+        let stored = store_record(storing.store, storing.packs, &record)?;
+        stored_as_named(stored, again.id, &again.path)?;
+    }
+    for listing in rebuilt {
+        storing.listing(listing)?;
+    }
+    let built = build_reading(
+        &mut storing,
+        Some(repo.store()),
+        &mut handles,
+        &folders,
+        last,
+        &noted,
+    )?;
+    // A place decided on with something there that the walk found nothing at.
+    recording.check_gone()?;
+    let (seen, held) = (storing.cache, storing.held);
+    let root = built.root;
+    let kept = built.kept.len() + built.kept_below_gone;
+    if kept > 0 {
+        warnings.push(kept_warning(kept));
+    }
+    if !built.changed.is_empty() {
+        warnings.push(ignored_changes_saved(built.changed));
+    }
+    if !built.taken_back.is_empty() {
+        warnings.push(gitignored_files_saved(built.taken_back));
+    }
+    Ok(Walked {
+        root,
+        packs,
+        met_conflicts: built.met_conflicts,
+        warnings,
+        seen,
+        now,
+        before,
+        held,
+    })
+}
+
+/// A save of `root` on `line`: in place of `parent_id`, its newest save, when `amend`, else on top
+/// of it. Its extra fields and change ID are worked out as `save` does; the save goes in `packs`.
+/// Gives its ID, the save and its short change ID, from the line's saves in `cache`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn compose(
+    repo: &Repository,
+    line: &str,
+    parent_id: Id,
+    parent: &Save,
+    root: Id,
+    message: &str,
+    who: &Person,
+    amend: bool,
+    move_notes: Vec<MoveNote>,
+    packs: &mut PackSet,
+    cache: &mut ChangeIds,
+    warnings: &mut Vec<Warning>,
+) -> Result<(Id, Save, String), SaveError> {
+    let save = if amend {
+        let mut extra = parent.extra.clone();
+        for field in GIT_FIELDS {
+            extra.remove(field);
+        }
+        Save {
+            root,
+            parents: parent.parents.clone(),
+            author: parent.author.clone(),
+            saver: who.clone(),
+            message: message.to_owned(),
+            change_id: parent.change_id,
+            move_notes,
+            signature: vec![],
+            extra,
+        }
+    } else {
+        Save {
+            root,
+            parents: vec![parent_id],
+            author: who.clone(),
+            saver: who.clone(),
+            message: message.to_owned(),
+            change_id: ChangeId::random()
+                .map_err(io::Error::other)
+                .map_err(RepoError::from)?,
+            move_notes,
+            signature: vec![],
+            extra: BTreeMap::from([(EXTRA_LINE.to_owned(), line.as_bytes().to_vec())]),
+        }
+    };
+    let encoded = save.encode();
+    // Refuse a save that would not read back (an over-long message, say) before storing it.
+    Save::decode(&encoded, false).map_err(StoreError::from)?;
+    let save_id = packs.add_record(ObjectKind::Save, &encoded)?;
+    // Worked out before the commit, so that nothing after it can fail the save. The line's
+    // saves come from the cache, which then learns this one; an amend takes the place of the
+    // save it amends.
+    let shortened = cache.chain(repo, Some(line), parent_id).map(|saves| {
+        let behind = if amend {
+            saves.get(1..).unwrap_or_default()
+        } else {
+            saves
+        };
+        history::short_in(behind, &save_id, &save.change_id)
+    });
+    let short_change_id = shortened.unwrap_or_else(|why| {
+        warnings.push(Warning::new(
+            warning::CHANGE_ID_NOT_SHORTENED,
+            format!(
+                "The save was made, but Opalro couldn't read this line's older saves to \
+                     shorten its ID. {why}"
+            ),
+        ));
+        save.change_id.to_letters()
+    });
+    Ok((save_id, save, short_change_id))
+}
+
+/// Who else holds `id`, the newest save of `line`: each line, tag or server line that names it
+/// or has it in its history through any parent, as `AmendShared` names them.
 pub(crate) fn shown_elsewhere(
     repo: &Repository,
-    cache: &mut ChangeIds,
     state: &State,
     line: &str,
     id: Id,
-    save: &Save,
 ) -> Result<Vec<String>, SaveError> {
-    let mut by: Vec<String> = lines_reaching(repo, cache, state, line, id, &save.change_id)?
-        .into_iter()
-        .map(|name| format!("line {name}"))
-        .collect();
-    for (server, lines) in &repo.server_lines(state)?.servers {
-        for (name, &tip) in lines {
-            if tip == id {
-                by.push(format!("server line {name}@{server}"));
+    let tags = repo.tag_list(state)?;
+    let servers = repo.server_lines(state)?;
+    let others = lines::others(state, line, &tags, &servers);
+    let mut asked: Vec<usize> = match moved_since_made(repo, state, line, id) {
+        Some(moved) => (0..others.len()).filter(|&i| moved(&others[i])).collect(),
+        None => (0..others.len()).collect(),
+    };
+    let mut found = Vec::new();
+    // Each turn walks again, but reads no save an earlier turn read.
+    let mut read = ancestry::Read::default();
+    while !asked.is_empty() {
+        let saves: Vec<Id> = asked.iter().map(|&i| others[i].1).collect();
+        let held = match ancestry::holder_reading(repo, id, &saves, &mut read) {
+            Ok(Some(at)) => saves[at],
+            Ok(None) => break,
+            Err(e) => {
+                let these: Vec<(Holder<'_>, Id)> = asked.iter().map(|&i| others[i]).collect();
+                let named = lines::unreadable_history(repo, line, id, &these);
+                return Err(named.unwrap_or(e).into());
             }
-        }
+        };
+        // Whatever is at the save found holds it too.
+        let (with, without): (Vec<usize>, _) =
+            asked.into_iter().partition(|&i| others[i].1 == held);
+        found.extend(with);
+        asked = without;
     }
-    for (name, tag) in &repo.tag_list(state)?.tags {
-        if tag.save == id {
-            by.push(format!("tag {name}"));
-        }
-    }
-    Ok(by)
+    // Lines by name, then server lines, then tags, each in the order `others` gives them.
+    let kind = |holder: &Holder<'_>| match holder {
+        Holder::Line(_) => 0,
+        Holder::Server(..) => 1,
+        Holder::Tag(_) => 2,
+    };
+    found.sort_by_key(|&i| (kind(&others[i].0), i));
+    Ok(found
+        .into_iter()
+        .map(|i| match others[i].0 {
+            Holder::Line(name) => format!("line {}", escape(name, false)),
+            Holder::Server(name, server) => format!(
+                "server line {}@{}",
+                escape(name, false),
+                escape(server, false)
+            ),
+            Holder::Tag(name) => format!("tag {}", crate::tags::shown_name(name)),
+        })
+        .collect())
 }
 
-/// The lines of `state` other than `line`, in order of name, that hold `id`, the newest save of
-/// `line`, or reach a save with `change_id` along first parents. Only `line` gets a list in
-/// `cache`: each other line is walked until it meets that list or a save an earlier walk passed,
-/// so lines that share a history cost it once. What the walks read is kept in `cache/other-lines`,
-/// and the next amend goes on from where they stopped.
-fn lines_reaching<'s>(
+/// With a usable note of `id`'s making, whether a line, tag or server line has moved since: it
+/// is new, or the step that made `id` had it at another save. `None` when there is no such note:
+/// it is missing, for another save, or its step can't be read or doesn't have `line` at `id`.
+fn moved_since_made(
     repo: &Repository,
-    cache: &mut ChangeIds,
-    state: &'s State,
+    now: &State,
     line: &str,
     id: Id,
-    change_id: &ChangeId,
-) -> Result<Vec<&'s str>, StoreError> {
-    let mut others = state
-        .lines
-        .iter()
-        .filter(|(name, _)| *name != line)
-        .peekable();
-    if others.peek().is_none() {
-        return Ok(vec![]);
+) -> Option<impl Fn(&(Holder<'_>, Id)) -> bool> {
+    let entry = LastMade::load(repo).entry_of(&id)?;
+    let then = repo.entry(&entry).ok()?.state;
+    if then.lines.get(line) != Some(&id) {
+        return None;
     }
-    // Where each save of `line` is on its list, and the last place `change_id` is. A list that
-    // can't be read just isn't used: the walks read what they need and say what fails.
-    let (places, last) = match cache.chain(repo, Some(line), id) {
-        Ok(saves) => (
-            saves
-                .iter()
-                .enumerate()
-                .map(|(at, (save, _))| (*save, at))
-                .collect(),
-            saves.iter().rposition(|(_, c)| c == change_id),
-        ),
-        Err(_) => (HashMap::new(), None),
+    // A list that can't be read leaves the note unusable, as its entry would.
+    let tags = if now.tags == then.tags {
+        None
+    } else {
+        Some(repo.tag_list(&then).ok()?)
     };
-    // From `start` back along first parents: whether the line reaches the change ID, the saves
-    // read, with their change IDs, and the save it stopped at unread, if any.
-    let walk = |start: Option<Id>, known: &HashMap<Id, bool>| {
-        let mut next = start;
-        let mut passed = Vec::new();
-        let reaches = loop {
-            let Some(at) = next else { break false };
-            // From here on this line is `line`'s list, so it reaches the change ID if the list
-            // has it here or further back.
-            if let Some(&p) = places.get(&at) {
-                break last.is_some_and(|last| last >= p);
-            }
-            if let Some(&answer) = known.get(&at) {
-                break answer;
-            }
-            let save = repo.store().save(&at, repo.signatures_allowed())?;
-            passed.push((at, save.change_id));
-            next = save.parents.first().copied();
-            if save.change_id == *change_id {
-                break true;
-            }
-        };
-        Ok::<_, StoreError>((reaches, passed, next))
+    let servers = if now.server_lines == then.server_lines {
+        None
+    } else {
+        Some(repo.server_lines(&then).ok()?)
     };
-    let mut known: HashMap<Id, bool> = HashMap::new();
-    let mut runs: Option<OtherLines> = None;
-    let mut found = Vec::new();
-    for (name, &tip) in others {
-        let listed = cache
-            .get(name)
-            .filter(|saves| saves.first().is_some_and(|(first, _)| *first == tip));
-        let reaches = if tip == id {
-            true
-        } else if let Some(saves) = listed {
-            saves.iter().any(|(_, c)| c == change_id)
-        } else {
-            let runs = runs.get_or_insert_with(|| OtherLines::load(repo));
-            // What an earlier amend read of this line: if it doesn't hold the change ID, the
-            // walk goes on from where it stopped.
-            let (start, from_run) = match runs.run(&tip) {
-                Some(run) if run.saves.iter().any(|(_, c)| c == change_id) => {
-                    found.push(name.as_str());
-                    continue;
-                }
-                Some(run) => (run.next, true),
-                None => (Some(tip), false),
-            };
-            let (reaches, passed, next) = match walk(start, &known) {
-                // A run that goes on to no save is a wrong cache, not a damaged store: the line
-                // is walked again from its newest save, and the run replaced.
-                Err(_) if from_run => {
-                    runs.forget(&tip);
-                    walk(Some(tip), &known)?
-                }
-                walked => walked?,
-            };
-            runs.add(tip, &passed, next);
-            known.extend(passed.into_iter().map(|(at, _)| (at, reaches)));
-            reaches
-        };
-        if reaches {
-            found.push(name.as_str());
-        }
-    }
-    if let Some(runs) = &mut runs {
-        runs.store(repo, state);
-    }
-    Ok(found)
+    Some(move |(holder, save): &(Holder<'_>, Id)| match *holder {
+        Holder::Line(name) => then.lines.get(name) != Some(save),
+        Holder::Tag(name) => tags
+            .as_ref()
+            .is_some_and(|t| t.tags.get(name).map(|t| &t.save) != Some(save)),
+        Holder::Server(name, server) => servers
+            .as_ref()
+            .is_some_and(|s| s.servers.get(server).and_then(|lines| lines.get(name)) != Some(save)),
+    })
 }
 
-/// The base save's file named `name` in a folder it lists as `before`, if it holds a file there.
-fn saved_file<'l>(before: Option<&'l Listing>, name: &str) -> Option<&'l Entry> {
-    before
-        .and_then(|l| l.get(name))
-        .filter(|e| matches!(e.kind, EntryKind::File | EntryKind::Executable))
+/// The base save's entry `e` as the folder holds it, if that is a file.
+fn saved_file<'l>(e: &'l Entry, records: &HashMap<Id, Summary>) -> Option<Cow<'l, Entry>> {
+    as_it_stands(e, records).filter(|e| matches!(e.kind, EntryKind::File | EntryKind::Executable))
 }
 
 /// Hands `each` every file in `folders`, with its folder's path and the base save's file it stands
-/// for, if any: one under a name `drive` takes as its own, in a folder of the base save whose name
-/// `drive` takes as its folder's. `old` is what the base save holds in each folder of `folders`
-/// under its own name. Only listings are read.
+/// for, if any, as the folder holds it: one under a name `drive` takes as its own, in a folder of
+/// the base save whose name `drive` takes as its folder's. `last.listings` is what the base save
+/// holds in each folder of `folders` under its own name. Only listings are read.
 fn each_file_with_saved<'f>(
     store: &Store,
     drive: Drive,
     folders: &'f Folders,
-    old: &HashMap<String, Option<Listing>>,
+    last: Last,
     mut each: impl FnMut(&'f str, &'f Child, Option<&Entry>) -> Result<(), SaveError>,
 ) -> Result<(), SaveError> {
+    let old = last.listings;
     let folds = drive.ignores_case || drive.composes_unicode;
     // Base folders the walk didn't match because their name is spelled otherwise on disk.
     let mut found: HashMap<&str, Listing> = HashMap::new();
@@ -895,8 +1202,8 @@ fn each_file_with_saved<'f>(
                     }
                 }
                 Kind::File => {
-                    let saved = lookup(&c.name).and_then(|e| saved_file(before, &e.name));
-                    each(rel, c, saved)?;
+                    let saved = lookup(&c.name).and_then(|e| saved_file(e, last.records));
+                    each(rel, c, saved.as_deref())?;
                 }
                 _ => {}
             }
@@ -914,11 +1221,11 @@ fn large_save(
     rules: &Rules,
     drive: Drive,
     folders: &Folders,
-    old: &HashMap<String, Option<Listing>>,
+    last: Last,
 ) -> Result<Option<LargeSave>, SaveError> {
     let (mut new_files, mut new_bytes) = (0u64, 0u64);
     let mut by_top: HashMap<&str, u64> = HashMap::new();
-    each_file_with_saved(store, drive, folders, old, |rel, c, saved| {
+    each_file_with_saved(store, drive, folders, last, |rel, c, saved| {
         if saved.is_none() {
             let size = c.meta.as_ref().map_or(0, |m| m.size);
             new_files = new_files.saturating_add(1);
@@ -945,54 +1252,53 @@ fn large_save(
     }))
 }
 
-/// The line a save goes on, and the save it builds on: the current line or, at a save, the new
-/// line `new_line`, which the save's diary entry then makes. `None` at a save without one.
-fn save_goes_on(state: &State, new_line: Option<&str>) -> Result<(Option<String>, Id), SaveError> {
-    match (&state.position, new_line) {
-        (Position::OnLine(line), None) => {
-            let tip = *state.lines.get(line).ok_or_else(|| RepoError::Damaged {
-                detail: format!("the current line {line} has no save"),
-            })?;
-            Ok((Some(line.clone()), tip))
+/// The line a save goes on, and the save it builds on: the current line, or the new line
+/// `new_line`, which the save's diary entry then makes; the line the project was on stays where
+/// it was. `None` at a save without one.
+fn save_goes_on(
+    repo: &Repository,
+    state: &State,
+    new_line: Option<&str>,
+) -> Result<(Option<String>, Id), SaveError> {
+    let parent = match &state.position {
+        Position::OnLine(line) => *state.lines.get(line).ok_or_else(|| RepoError::Damaged {
+            detail: format!("the current line {line} has no save"),
+        })?,
+        Position::AtSave(at) => *at,
+    };
+    let line = match (&state.position, new_line) {
+        (_, Some(name)) => {
+            check_new_name(repo, state, name, None)?;
+            Some(name.to_owned())
         }
-        (Position::OnLine(line), Some(_)) => Err(SaveError::LineFromLine { line: line.clone() }),
-        (Position::AtSave(at), None) => Ok((None, *at)),
-        (Position::AtSave(at), Some(name)) => {
-            validate_line_name(name).map_err(|e| SaveError::BadLineName {
-                name: name.to_owned(),
-                reason: match e {
-                    DecodeError::Invalid(reason) => reason,
-                    _ => "it breaks the rules for line names",
-                },
-            })?;
-            if let Some(taken) = line_named_alike(&state.lines, name) {
-                return Err(SaveError::LineTaken {
-                    taken: taken.to_owned(),
-                });
-            }
-            Ok((Some(name.to_owned()), *at))
-        }
-    }
+        (Position::OnLine(line), None) => Some(line.clone()),
+        (Position::AtSave(_), None) => None,
+    };
+    Ok((line, parent))
 }
 
 /// Writes `seen`, holding what this walk vouched for and learned of the files, as the file-state
-/// cache, if the drive's "now" was found before the walk; failing to is only a warning.
-fn keep_file_cache(
+/// cache, if the drive's "now" was found before the walk; failing to is only a warning. Gives
+/// the body the file holds then, if that is known (`FileCache::store_giving_body`).
+pub(crate) fn keep_file_cache(
     repo: &Repository,
     seen: FileCache,
     now: Option<i128>,
     warnings: &mut Vec<Warning>,
-) {
-    if let Some(now) = now
-        && let Err(why) = seen.store(repo, now)
-    {
-        warnings.push(Warning::new(
+) -> Option<Vec<u8>> {
+    let now = now?;
+    match seen.store_giving_body(repo, now) {
+        Ok(stored) => stored,
+        Err(why) => {
+            warnings.push(Warning::new(
             warning::FILE_CACHE_NOT_STORED,
             format!(
                 "Opalro couldn't keep what it learned about your files, so the next status or save \
                  reads them all again: {why}"
             ),
         ));
+            None
+        }
     }
 }
 
@@ -1090,10 +1396,11 @@ enum Kind {
         size: u64,
     },
     /// A folder gone from disk, back as the listing `id` holding only the `kept` entries kept as
-    /// they were below it and the folders leading to them.
+    /// they were below it, the `met` conflicts a save keeps there, and the folders leading to them.
     Back {
         id: Id,
         kept: usize,
+        met: u64,
     },
     /// An entry of the base save that a partial save leaves as it was.
     Left {
@@ -1116,18 +1423,38 @@ struct Child {
 type Folders = BTreeMap<String, Vec<Child>>;
 
 /// Judges each folder's new names against all of its names (decision 004).
-fn check_names(folders: &Folders, old: &HashMap<String, Option<Listing>>) -> Result<(), SaveError> {
+/// With `conflicts` (the store and the records read), a conflict the save keeps with nothing in the
+/// folder there holds its name too.
+fn check_names(
+    folders: &Folders,
+    old: &HashMap<String, Option<Listing>>,
+    mut conflicts: Option<(&Store, &mut HashMap<Id, Summary>, &Recording)>,
+) -> Result<(), SaveError> {
     let mut problems = Vec::new();
     for (rel, children) in folders {
         let before = old.get(rel).and_then(Option::as_ref);
-        let names: Vec<&str> = children.iter().map(|c| c.name.as_str()).collect();
-        let kept: Vec<&str> = names
+        let mut names: Vec<&str> = children.iter().map(|c| c.name.as_str()).collect();
+        let mut kept: Vec<&str> = names
             .iter()
             .copied()
             .filter(|n| before.is_some_and(|l| l.get(n).is_some()))
             .collect();
         if kept.len() == names.len() {
             continue;
+        }
+        if let (Some(listing), Some((store, records, recording))) = (before, conflicts.as_mut()) {
+            for e in listing.entries() {
+                let met = children.binary_search_by(|c| c.name.as_str().cmp(&e.name));
+                if e.kind != EntryKind::Conflict || met.is_ok() {
+                    continue;
+                }
+                let path = walk::path_in(rel, &e.name);
+                let record = conflict::record_at(store, records, &path, &e.id)?;
+                if recording.settled_gone(&path, &record) != Settled::Fixed {
+                    names.push(&e.name);
+                    kept.push(&e.name);
+                }
+            }
         }
         let known = folder_problems(&kept);
         for p in folder_problems(&names) {
@@ -1163,16 +1490,110 @@ trait Contents {
         read: &mut dyn Iterator<Item = Done>,
         c: &Child,
     ) -> Result<(Id, u64), SaveError>;
+    /// What goes into the listing at `path`, the place of the conflict `stored` (what is kept of
+    /// its record, `conflict`), where the folder holds `built`, or nothing.
+    fn conflict(
+        &mut self,
+        path: &str,
+        stored: &Entry,
+        conflict: &Summary,
+        built: Option<(EntryKind, Id, u64)>,
+    ) -> Result<Option<(EntryKind, Id, u64)>, SaveError>;
     fn listing(&mut self, listing: Listing) -> Result<Id, SaveError>;
+    /// Where a save that keeps conflicts reads a record the walk didn't; `None` where a record
+    /// unread leaves its entry out.
+    fn records(&self) -> Option<&Store> {
+        None
+    }
 }
 
 /// A save's: everything goes into `packs` unless the store holds a good copy. A file `cache`
 /// vouches for is taken from the base save unread, if the base save holds what the cache says it
-/// held. `cache` keeps or learns every file met.
+/// held. `cache` keeps or learns every file met, and `held` the listings stored, while they fit.
+/// A place in conflict is settled as the folder shows it, or as `recording` says; a marked file
+/// there is read again through `disk`.
 struct Storing<'a> {
     store: &'a Store,
     packs: &'a mut PackSet,
     cache: FileCache,
+    held: Option<Held>,
+    recording: &'a Recording,
+    keeps_conflicts: bool,
+    disk: writeout::Folders,
+}
+
+/// Past this many bytes of listings held to compare a save with the one before it, the save
+/// lets them go and notes no moves.
+const MAX_HELD_LISTINGS: usize = 64 << 20;
+
+#[cfg(test)]
+thread_local! {
+    /// The listings a save may hold, the path bytes its notes may have, and the path bytes of the
+    /// files that left it may hold, on this thread.
+    static NOTE_LIMITS: std::cell::Cell<(usize, usize, usize)> = const {
+        std::cell::Cell::new((MAX_HELD_LISTINGS, moves::MAX_NOTED_BYTES, moves::MAX_LEFT_BYTES))
+    };
+    /// The most bytes of listings held on this thread.
+    static HELD_MOST: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(not(test))]
+fn note_limits() -> (usize, usize, usize) {
+    (
+        MAX_HELD_LISTINGS,
+        moves::MAX_NOTED_BYTES,
+        moves::MAX_LEFT_BYTES,
+    )
+}
+
+#[cfg(test)]
+fn note_limits() -> (usize, usize, usize) {
+    NOTE_LIMITS.get()
+}
+
+#[cfg(test)]
+thread_local! {
+    /// The depth and entries a save on this thread reads the base save's listings within.
+    pub(crate) static BASE_LIMITS: std::cell::Cell<Option<(usize, u64)>> = const { std::cell::Cell::new(None) };
+}
+
+/// The limits a save reads the base save's listings within.
+pub(crate) fn base_limits() -> SaveLimits {
+    #[cfg(test)]
+    if let Some((depth, entries)) = BASE_LIMITS.get() {
+        return SaveLimits::new(depth, entries);
+    }
+    SaveLimits::default()
+}
+
+/// The listings a save stored, which can't be read from the store until it is committed.
+#[derive(Default)]
+struct Held {
+    listings: HashMap<Id, Listing>,
+    /// About how much memory they take.
+    bytes: usize,
+}
+
+impl Held {
+    /// Holds `listing`, or gives up all of them past the limit.
+    fn hold(held: &mut Option<Held>, id: Id, listing: Listing) {
+        let Some(h) = held else {
+            return;
+        };
+        let size: usize = listing
+            .entries()
+            .iter()
+            .map(|e| size_of::<Entry>() + e.name.len())
+            .sum();
+        h.bytes = h.bytes.saturating_add(size);
+        if h.bytes > note_limits().0 {
+            *held = None;
+            return;
+        }
+        h.listings.insert(id, listing);
+        #[cfg(test)]
+        HELD_MOST.set(HELD_MOST.get().max(h.bytes));
+    }
 }
 
 /// The ID and size `trusted` gives the file `c`, which the base save holds as `was`, if it vouches
@@ -1224,12 +1645,82 @@ impl Contents for Storing<'_> {
         self.store_read(read, &c.rel)
     }
 
+    fn conflict(
+        &mut self,
+        path: &str,
+        stored: &Entry,
+        conflict: &Summary,
+        built: Option<(EntryKind, Id, u64)>,
+    ) -> Result<Option<(EntryKind, Id, u64)>, SaveError> {
+        let fixed = self.recording.fixes(path);
+        let seen = if fixed {
+            self.recording
+                .check(path, built.map(|(kind, id, _)| (kind, id)))?;
+            conflict::Seen::Fixed
+        } else {
+            self.seen(path, conflict, built)?
+        };
+        Ok(match conflict::settled(conflict, seen, built, fixed) {
+            Settled::Kept => Some((stored.kind, stored.id, stored.size)),
+            Settled::Again(own) => {
+                // Written again with its terms, read whole only here.
+                let record = conflict::again_at(self.store, path, &stored.id, own)?;
+                let id = store_record(self.store, self.packs, &record)?;
+                Some((EntryKind::Conflict, id, 0))
+            }
+            Settled::Fixed => built,
+        })
+    }
+
     fn listing(&mut self, listing: Listing) -> Result<Id, SaveError> {
-        store_listing(self.store, self.packs, &listing)
+        let id = store_listing(self.store, self.packs, &listing)?;
+        Held::hold(&mut self.held, id, listing);
+        Ok(id)
+    }
+
+    fn records(&self) -> Option<&Store> {
+        self.keeps_conflicts.then_some(self.store)
     }
 }
 
 impl Storing<'_> {
+    /// What the folder shows at `path`, the place of `conflict`, where the walk built `built`. A
+    /// marked file is scanned from the bytes the save stores: read again, it must still hold them.
+    fn seen(
+        &mut self,
+        path: &str,
+        conflict: &Summary,
+        built: Option<(EntryKind, Id, u64)>,
+    ) -> Result<conflict::Seen, SaveError> {
+        let now = built.map(|(kind, id, _)| (kind, id));
+        let mut read = None;
+        let seen = conflict::seen(conflict, now, |len| {
+            fsio::fault_point("save:settling")?;
+            let (left, id) = self.scan(path, len)?;
+            read = Some(id);
+            Ok(left)
+        })
+        .map_err(|source| SaveError::Unreadable {
+            path: path.to_owned(),
+            source,
+        })?;
+        if read.is_some_and(|id| Some(id) != now.map(|(_, id)| id)) {
+            return Err(SaveError::ChangedDuringSave {
+                path: path.to_owned(),
+            });
+        }
+        Ok(seen)
+    }
+
+    /// The marker lines of length `len` in the file at `path`, and its content ID, in one read.
+    fn scan(&mut self, path: &str, len: u8) -> io::Result<(markers::Left, Id)> {
+        let (up, name) = path.rsplit_once('/').unwrap_or(("", path));
+        self.disk.enter(up)?;
+        fsio::open_point(path)?;
+        let file = self.disk.here().open_file(OsStr::new(name))?;
+        scan_hashed(file, len)
+    }
+
     /// Stores what the workers made of `rel`, the next file or link in the order. A big file
     /// they leave to this thread.
     fn store_read(
@@ -1449,12 +1940,25 @@ pub(crate) fn ingest_failed(e: IngestError, rel: &str) -> SaveError {
     }
 }
 
-/// The base save's listing of each folder the walk found, if it has that folder, and the stored
-/// ID of each nothing was dropped from.
+/// The base save's listing of each folder the walk found, if it has that folder, the stored ID of
+/// each nothing was dropped from, and the records of the conflicts the walk read.
 #[derive(Clone, Copy)]
 struct Last<'a> {
     listings: &'a HashMap<String, Option<Listing>>,
     ids: &'a HashMap<String, Id>,
+    records: &'a HashMap<Id, Summary>,
+}
+
+impl<'a> Last<'a> {
+    /// The base save's listing of the folder `rel`, if it has that folder.
+    fn before(&self, rel: &str) -> Option<&'a Listing> {
+        self.listings.get(rel)?.as_ref()
+    }
+
+    /// The base save's entry `stored`, as it stands in the folder.
+    fn as_base<'e>(&self, stored: Option<&'e Entry>) -> Option<Cow<'e, Entry>> {
+        as_it_stands(stored?, self.records)
+    }
 }
 
 /// `build_with`, its files and links read on the workers. For a save (`store` given) a small file
@@ -1473,11 +1977,12 @@ fn build_reading(
     // What the cache said of each file, for `build_with`, which meets them in this same order.
     let mut known = Vec::new();
     for (rel, children) in in_build_order(folders) {
-        let before = last.listings.get(rel).and_then(Option::as_ref);
+        let before = last.before(rel);
         for c in children {
             let read = match c.kind {
                 Kind::File => {
-                    let vouched = contents.vouched(c, before.and_then(|l| l.get(&c.name)));
+                    let stored = before.and_then(|l| l.get(&c.name));
+                    let vouched = contents.vouched(c, last.as_base(stored).as_deref());
                     known.push((c.rel.as_str(), vouched));
                     vouched.is_none()
                 }
@@ -1524,6 +2029,8 @@ struct Built {
     changed: Vec<String>,
     /// The files and links noted as kept that Git would leave out that are new or changed.
     taken_back: Vec<String>,
+    /// The places it met that are still in conflict.
+    met_conflicts: u64,
 }
 
 /// Stores every file and listing, deepest folders first, reading every file and link through
@@ -1543,10 +2050,15 @@ fn build(
         store,
         packs,
         cache: FileCache::default(),
+        held: None,
+        recording: &Recording::default(),
+        keeps_conflicts: false,
+        disk: writeout::Folders::from_top(handles.top()),
     };
     let last = Last {
         listings: old,
         ids: &HashMap::new(),
+        records: &HashMap::new(),
     };
     let b = build_reading(&mut storing, Some(store), handles, folders, last, noted)?;
     let kept = b.kept.len() + b.kept_below_gone;
@@ -1599,11 +2111,14 @@ fn build_with<'a>(
     let missing = || RepoError::from(io::Error::other("a folder was built before its subfolders"));
     let (mut kept, mut kept_below_gone) = (Vec::new(), 0);
     let (mut changed, mut taken_back) = (Vec::new(), Vec::new());
+    let mut met_conflicts = 0u64;
     for (rel, children) in in_build_order(folders) {
-        let before = last.listings.get(rel).and_then(Option::as_ref);
+        let before = last.before(rel);
         let mut found = Vec::new();
         for c in children {
-            let was = before.and_then(|l| l.get(&c.name));
+            let stored = before.and_then(|l| l.get(&c.name));
+            let as_base = last.as_base(stored);
+            let was = as_base.as_deref();
             let (kind, id, size) = match c.kind {
                 Kind::Folder => {
                     let id = built.remove(c.rel.as_str()).ok_or_else(missing)?;
@@ -1644,8 +2159,13 @@ fn build_with<'a>(
                     (kind, id, size)
                 }
                 Kind::Left { kind, id, size } => (kind, id, size),
-                Kind::Back { id, kept: below } => {
+                Kind::Back {
+                    id,
+                    kept: below,
+                    met,
+                } => {
                     kept_below_gone += below;
+                    met_conflicts += met;
                     (EntryKind::Folder, id, 0)
                 }
             };
@@ -1656,7 +2176,49 @@ fn build_with<'a>(
                     None => {}
                 }
             }
-            found.push((c, kind, id, size));
+            // What the folder holds at a conflict's place is the conflict's to settle.
+            let walked = matches!(c.kind, Kind::File | Kind::Symlink | Kind::Folder);
+            let record = stored
+                .filter(|e| walked && e.kind == EntryKind::Conflict)
+                .and_then(|e| Some((e, last.records.get(&e.id)?)));
+            let (kind, id, size) = match record {
+                Some((e, record)) => {
+                    match contents.conflict(&c.rel, e, record, Some((kind, id, size)))? {
+                        Some(settled) => settled,
+                        None => continue,
+                    }
+                }
+                None => (kind, id, size),
+            };
+            met_conflicts += u64::from(record.is_some() && kind == EntryKind::Conflict);
+            found.push((c.name.as_str(), kind, id, size));
+        }
+        // A conflict's place with nothing in the folder there is the conflict's to settle too.
+        let mut placed = false;
+        let gone = before.into_iter().flat_map(Listing::entries).filter(|e| {
+            e.kind == EntryKind::Conflict
+                && children
+                    .binary_search_by(|c| c.name.as_str().cmp(&e.name))
+                    .is_err()
+        });
+        let mut unread = HashMap::new();
+        for e in gone {
+            let path = walk::path_in(rel, &e.name);
+            // One the walk didn't read, below a search of gone folders that ended early, is read
+            // here: a save never drops a conflict for want of its record.
+            let record = match (last.records.get(&e.id), contents.records()) {
+                (Some(record), _) => *record,
+                (None, Some(store)) => conflict::record_at(store, &mut unread, &path, &e.id)?,
+                (None, None) => continue,
+            };
+            if let Some((kind, id, size)) = contents.conflict(&path, e, &record, None)? {
+                met_conflicts += u64::from(kind == EntryKind::Conflict);
+                found.push((e.name.as_str(), kind, id, size));
+                placed = true;
+            }
+        }
+        if placed {
+            found.sort_by(|a, b| a.0.cmp(b.0));
         }
         // The store holds that listing: the walk just read it and checked it.
         let unchanged = before.is_some_and(|l| is_listing(l, &found));
@@ -1670,8 +2232,8 @@ fn build_with<'a>(
         ENTRIES_BUILT.set(ENTRIES_BUILT.get() + found.len());
         let entries = found
             .into_iter()
-            .map(|(c, kind, id, size)| Entry {
-                name: c.name.clone(),
+            .map(|(name, kind, id, size)| Entry {
+                name: name.to_owned(),
                 kind,
                 id,
                 size,
@@ -1687,19 +2249,20 @@ fn build_with<'a>(
         kept_below_gone,
         changed,
         taken_back,
+        met_conflicts,
     })
 }
 
-/// Whether `children`, each with the kind, ID and size it was found to have, are `listing`'s
-/// entries, in order.
-fn is_listing(listing: &Listing, children: &[(&Child, EntryKind, Id, u64)]) -> bool {
+/// Whether `children`, each by name with the kind, ID and size it was found to have, are
+/// `listing`'s entries, in order.
+fn is_listing(listing: &Listing, children: &[(&str, EntryKind, Id, u64)]) -> bool {
     let entries = listing.entries();
     entries.len() == children.len()
         && entries
             .iter()
             .zip(children)
-            .all(|(e, &(c, kind, id, size))| {
-                e.name == c.name && e.kind == kind && e.id == id && e.size == size
+            .all(|(e, &(name, kind, id, size))| {
+                e.name == name && e.kind == kind && e.id == id && e.size == size
             })
 }
 
@@ -1716,6 +2279,64 @@ pub(crate) fn store_listing(
         packs.add_record(ObjectKind::FolderListing, &encoded)?;
     }
     Ok(id)
+}
+
+/// A record written again at `path` is stored as `stored`, and its folder's rebuilt listing
+/// names `named`, worked out in the walk: they must be one, or the save would name a record it
+/// never stored.
+fn stored_as_named(stored: Id, named: Id, path: &str) -> Result<(), SaveError> {
+    if stored == named {
+        return Ok(());
+    }
+    let what = format!(
+        "the conflict record written again at {} isn't the one its folder names",
+        escape(path, false)
+    );
+    Err(RepoError::from(io::Error::other(what)).into())
+}
+
+/// Stores the conflict record `record` unless a good copy is held already, and returns its ID.
+pub(crate) fn store_record(
+    store: &Store,
+    packs: &mut PackSet,
+    record: &Record,
+) -> Result<Id, SaveError> {
+    let encoded = record.encode();
+    debug_assert!(
+        Record::decode(&encoded).is_ok(),
+        "a record written that can't be read back"
+    );
+    let id = record.id();
+    let len = encoded.len() as u64;
+    if !packs.contains(&id) && !store.has_good_copy(&id, ObjectKind::Conflict, len)? {
+        packs.add_record(ObjectKind::Conflict, &encoded)?;
+    }
+    Ok(id)
+}
+
+/// The marker lines of length `len` in what `read` gives, and its content ID, from one read: the
+/// markers counted are always those of the bytes whose ID is kept.
+pub(crate) fn scan_hashed(read: impl Read, len: u8) -> io::Result<(markers::Left, Id)> {
+    let mut hashed = Hashed {
+        read,
+        hasher: ContentHasher::new(),
+    };
+    let left = markers::scan(&mut hashed, len)?;
+    Ok((left, hashed.hasher.finish()))
+}
+
+/// What `read` gives, hashed as it goes.
+struct Hashed<R> {
+    read: R,
+    hasher: ContentHasher,
+}
+
+impl<R: Read> Read for Hashed<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.read.read(buf)?;
+        self.hasher.update(buf.get(..n).unwrap_or_default());
+        Ok(n)
+    }
 }
 
 /// The target of the link `name` in `dir`, at the project path `rel`, as a save stores it: with
@@ -1897,6 +2518,13 @@ pub(crate) struct FolderNow {
     /// by path.
     pub(crate) not_written_here: Vec<String>,
     pub(crate) warnings: Vec<Warning>,
+    /// What is kept of the records of the conflicts the walk met, by ID.
+    pub(crate) records: HashMap<Id, Summary>,
+    /// The base save's conflicts kept as they were, in parts of it this computer can't hold, by
+    /// path, with their records' IDs.
+    pub(crate) kept_conflicts: Vec<(String, Id)>,
+    /// The body of the file-state cache this read stored, if that is known.
+    pub(crate) cache_body: Option<Vec<u8>>,
 }
 
 /// Reads the project folder as a save on top of the save whose top listing is `base` would, by
@@ -1915,12 +2543,15 @@ pub(crate) fn read_folder(
     let now = filecache::drive_now(repo).ok();
     let drive = match drive {
         Some(drive) => drive,
-        None => drive::probe(repo.tmp_folder()).map_err(RepoError::from)?,
+        None => repo.drive()?,
     };
+    let keeps_conflicts = repo.keeps_conflicts();
     let walked = || {
+        let mut base = Base::new(repo.store(), base, SaveLimits::default());
+        base.conflicts = keeps_conflicts;
         walk(
             repo.root(),
-            Base::new(repo.store(), base, SaveLimits::default()),
+            base,
             SaveLimits::default(),
             drive,
             git_excludes,
@@ -1939,6 +2570,9 @@ pub(crate) fn read_folder(
         gone_kept,
         noted,
         mut warnings,
+        records,
+        kept_conflicts,
+        ..
     } = scan?;
     let mut reading = Reading {
         cache,
@@ -1950,9 +2584,11 @@ pub(crate) fn read_folder(
     let last = Last {
         listings: &old,
         ids: &old_ids,
+        records: &records,
     };
     let built = build_reading(&mut reading, None, &mut handles, &folders, last, &noted)?;
-    keep_file_cache(repo, reading.cache, now, &mut warnings);
+    let kept_conflicts = kept_places(repo.store(), kept_conflicts)?;
+    let cache_body = keep_file_cache(repo, reading.cache, now, &mut warnings);
     let mut not_written_here = built.kept;
     not_written_here.extend(gone_kept);
     not_written_here.sort_unstable();
@@ -1968,7 +2604,38 @@ pub(crate) fn read_folder(
         listings,
         not_written_here,
         warnings,
+        records,
+        kept_conflicts,
+        cache_body,
     })
+}
+
+/// The places of `kept`, conflicts kept as they were and folders kept as they were that hold one,
+/// each conflict by path with its record's ID. The walk counted those folders against a save's
+/// limits already, so going through them again is held to them too.
+fn kept_places(
+    store: &Store,
+    kept: Vec<(String, EntryKind, Id)>,
+) -> Result<Vec<(String, Id)>, SaveError> {
+    let mut places = Vec::new();
+    let mut folders = Vec::new();
+    for (path, kind, id) in kept {
+        match kind {
+            EntryKind::Folder => folders.push((path, id)),
+            _ => places.push((path, id)),
+        }
+    }
+    while let Some((path, id)) = folders.pop() {
+        for e in store.listing(&id)?.entries() {
+            let below = format!("{path}/{}", e.name);
+            match e.kind {
+                EntryKind::Folder => folders.push((below, e.id)),
+                EntryKind::Conflict => places.push((below, e.id)),
+                _ => {}
+            }
+        }
+    }
+    Ok(places)
 }
 
 /// Reads files and links to know their IDs, opening only those `cache` doesn't vouch for, and
@@ -2010,6 +2677,18 @@ impl Contents for Reading {
         hashed_read(read, &c.rel)
     }
 
+    // The folder's entry as it is: the listing then differs from the stored one, so the
+    // comparison after the walk reaches the place.
+    fn conflict(
+        &mut self,
+        _: &str,
+        _: &Entry,
+        _: &Summary,
+        built: Option<(EntryKind, Id, u64)>,
+    ) -> Result<Option<(EntryKind, Id, u64)>, SaveError> {
+        Ok(built)
+    }
+
     fn listing(&mut self, listing: Listing) -> Result<Id, SaveError> {
         let id = listing.id();
         self.listings.insert(id, listing);
@@ -2021,12 +2700,13 @@ impl Contents for Reading {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
     use super::*;
+    use crate::drive;
     use crate::drive::Drive;
-    use crate::id::hash_content;
+    use crate::id::{Flavor, hash_content, hash_record};
     use crate::listing::EntryKind;
     use crate::names::{name_problems, validate_name};
     use crate::pack::{ENTRY_HEADER_LEN, PackReader};
-    use crate::save::Person;
+    use crate::save::{MoveNote, Person};
     use crate::test_support::{
         Written, commit_records, names, noise, plant_damaged_copies, plant_save, sample_records,
         written,
@@ -2249,6 +2929,7 @@ mod tests {
         let last = Last {
             listings: &old,
             ids: &HashMap::new(),
+            records: &HashMap::new(),
         };
         let built = build_reading(&mut reading, None, &mut handles, &folders, last, &noted);
         let built = built.map_err(shown)?;
@@ -2368,6 +3049,7 @@ mod tests {
             short_change_id,
             warnings,
             replaced,
+            ..
         } = save_now(&mut repo).unwrap()
         else {
             panic!("nothing was saved");
@@ -2923,9 +3605,6 @@ mod tests {
                 paths: vec!["fine".into(), hostile()],
                 count: 2,
             },
-            SaveError::AmendShared {
-                by: vec!["line fine".into(), format!("tag {HOSTILE}")],
-            },
         ] {
             assert_hostile_text_escaped(&e.to_string());
         }
@@ -2991,6 +3670,88 @@ mod tests {
         assert!(!hint.contains("pattern"), "{hint}");
     }
 
+    /// What `save` and `resolve` each say after the refusals `resolve` can meet.
+    #[test]
+    fn resolve_speaks_of_itself_in_a_saves_hints() {
+        let path = || "a.txt".to_owned();
+        let errors = [
+            SaveError::LineEndingsChanged {
+                count: 1,
+                first: vec![path()],
+            },
+            SaveError::InvalidName {
+                path: path(),
+                reason: "why".into(),
+            },
+            SaveError::NotPortable { problems: vec![] },
+            SaveError::LargeSave(LargeSave {
+                new_files: 1,
+                new_bytes: 1,
+                biggest_folders: vec![],
+            }),
+            SaveError::ChangedDuringSave { path: path() },
+            SaveError::InTheWay {
+                path: path(),
+                kept: "b".into(),
+            },
+            SaveError::ConflictInTheWay {
+                path: path(),
+                kept: "b".into(),
+            },
+            SaveError::KeptWhole { path: path() },
+            SaveError::LfsPointersInFolder {
+                paths: vec![path()],
+                count: 1,
+            },
+        ];
+        for e in &errors {
+            let (saving, resolving) = (e.hint().unwrap(), e.hint_when_resolving().unwrap());
+            assert!(!resolving.contains("save again"), "{resolving}");
+            assert!(!resolving.contains("Nothing was saved"), "{resolving}");
+            if saving.starts_with("Nothing was saved. ") {
+                assert!(
+                    resolving.starts_with("Nothing was recorded. "),
+                    "{resolving}"
+                );
+            }
+        }
+        let large = errors[3].hint_when_resolving().unwrap();
+        assert_eq!(
+            large,
+            "Nothing was recorded. To record them, run opalro resolve again with --yes; to leave \
+             some out, list them in .opalroignore."
+        );
+        let in_the_way = errors[5].hint_when_resolving().unwrap();
+        assert_eq!(
+            in_the_way,
+            "Nothing was recorded. Rename or move a.txt, then run opalro resolve again."
+        );
+        // Under resolve the way on is to pick a side.
+        assert_eq!(
+            errors[7].hint_when_resolving().unwrap(),
+            "Nothing was recorded. This computer can't hold it, so pick a side instead: opalro \
+             resolve <path> --keep mine (or theirs)."
+        );
+        assert_eq!(
+            errors[7].hint().unwrap(),
+            "Nothing was saved. Leave it out of what you name: it stays as the last save has it."
+        );
+        // Save's own words don't change.
+        assert_eq!(
+            errors[3].hint().unwrap(),
+            "Nothing was saved. To save them, run the save again with --yes; to leave some out, \
+             list them in .opalroignore."
+        );
+        assert_eq!(
+            errors[5].hint().unwrap(),
+            "Nothing was saved. Rename or move a.txt, then save again."
+        );
+        assert_eq!(
+            errors[5].hint_when_reading().unwrap(),
+            "Rename or move a.txt."
+        );
+    }
+
     #[test]
     fn a_refused_amend_names_the_first_five_that_show_the_save() {
         let shown = |by: Vec<String>| SaveError::AmendShared { by }.to_string();
@@ -3021,29 +3782,6 @@ mod tests {
         save_folder(repo, &req, &mut |_| {}, &mut |_| true)
     }
 
-    /// Commits the line `name` at a new save on `parent` that holds the same files.
-    fn plant_line(repo: &mut Repository, name: &str, parent: Id) {
-        let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
-        let (head, entry) = repo.current().unwrap();
-        let mut save = repo.store().save(&parent, false).unwrap();
-        save.parents = vec![parent];
-        save.change_id = ChangeId::random().unwrap();
-        let mut packs = repo.new_packs().unwrap();
-        let id = packs.add_record(ObjectKind::Save, &save.encode()).unwrap();
-        let mut state = entry.state.clone();
-        state.lines.insert(name.to_owned(), id);
-        let diary = DiaryEntry {
-            parent: Some(head),
-            action: Action::Command,
-            command: "save".into(),
-            who: who(),
-            opal_version: "0.1.0".into(),
-            state,
-            folder_change: None,
-        };
-        repo.commit(&lock, packs, &diary).unwrap();
-    }
-
     #[test]
     fn a_save_without_a_message_is_refused_unless_it_amends() {
         let (dir, mut repo) = project();
@@ -3062,36 +3800,711 @@ mod tests {
     }
 
     #[test]
-    fn an_amend_that_goes_no_further_keeps_its_line_s_list_and_no_other() {
-        const KEY: [u8; 32] = [7; 32];
+    fn an_amend_can_t_start_a_new_line() {
         let (dir, mut repo) = project();
-        repo.set_cache_key(KEY);
-        let first = repo.current().unwrap().1.state.lines["main"];
         write(dir.path(), "a.txt", b"a");
-        let SaveOutcome::Saved { save_id, .. } = save_now(&mut repo).unwrap() else {
+        let head = repo.head().unwrap();
+        let who = who();
+        let req = SaveRequest {
+            message: Some("A"),
+            who: &who,
+            command: "save",
+            accept_crlf: false,
+            git_excludes: None,
+            new_line: Some("x"),
+            only: None,
+            amend: true,
+        };
+        let refused = save_folder(&mut repo, &req, &mut |_| {}, &mut |_| true);
+        assert!(
+            matches!(refused, Err(SaveError::AmendNewLine)),
+            "{refused:?}"
+        );
+        assert_eq!(repo.head().unwrap(), head);
+    }
+
+    /// The save the line `main` is at, as stored, with its fingerprint.
+    fn newest_save(repo: &Repository) -> (Id, Save) {
+        let id = repo.current().unwrap().1.state.lines["main"];
+        (id, repo.store().save(&id, false).unwrap())
+    }
+
+    fn note(from: &str, to: &str) -> MoveNote {
+        MoveNote {
+            from: from.into(),
+            to: to.into(),
+        }
+    }
+
+    #[test]
+    fn a_save_notes_a_file_moved_alone() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"hello");
+        write(dir.path(), "b.txt", b"stay");
+        saved_root(save_now(&mut repo).unwrap());
+        fs::create_dir(dir.path().join("Characters")).unwrap();
+        fs::rename(
+            dir.path().join("a.txt"),
+            dir.path().join("Characters/a.txt"),
+        )
+        .unwrap();
+        saved_root(save_now(&mut repo).unwrap());
+        let (_, save) = newest_save(&repo);
+        assert_eq!(save.move_notes, [note("a.txt", "Characters/a.txt")]);
+    }
+
+    #[test]
+    fn a_save_notes_nothing_when_unsure() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a", b"same");
+        write(dir.path(), "b", b"same");
+        write(dir.path(), "c", b"changed");
+        saved_root(save_now(&mut repo).unwrap());
+        let (parent_id, _) = newest_save(&repo);
+        // Two alike files moved, one moved and changed, and an edit in place.
+        fs::rename(dir.path().join("a"), dir.path().join("x")).unwrap();
+        fs::rename(dir.path().join("b"), dir.path().join("y")).unwrap();
+        fs::remove_file(dir.path().join("c")).unwrap();
+        write(dir.path(), "z", b"changed!");
+        saved_root(save_now(&mut repo).unwrap());
+        let (id, save) = newest_save(&repo);
+        assert!(save.move_notes.is_empty(), "{:?}", save.move_notes);
+        // A save that notes nothing is stored byte for byte as one made before moves were noted.
+        let before = Save {
+            root: save.root,
+            parents: vec![parent_id],
+            author: who(),
+            saver: who(),
+            message: "Change things".into(),
+            change_id: save.change_id,
+            move_notes: vec![],
+            signature: vec![],
+            extra: BTreeMap::from([(EXTRA_LINE.to_owned(), b"main".to_vec())]),
+        };
+        assert_eq!(hash_record(Flavor::Save, &before.encode()), id);
+    }
+
+    #[test]
+    fn amend_works_its_notes_out_afresh() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"hello");
+        write(dir.path(), "other", b"o");
+        saved_root(save_now(&mut repo).unwrap());
+        fs::rename(dir.path().join("a.txt"), dir.path().join("b.txt")).unwrap();
+        saved_root(save_now(&mut repo).unwrap());
+        assert_eq!(newest_save(&repo).1.move_notes, [note("a.txt", "b.txt")]);
+        // Moved back, with another change so the amend has something to save.
+        fs::rename(dir.path().join("b.txt"), dir.path().join("a.txt")).unwrap();
+        write(dir.path(), "other", b"o2");
+        saved_root(save_as(&mut repo, None, true).unwrap());
+        assert!(newest_save(&repo).1.move_notes.is_empty());
+        // And an amend that moves a file notes it, against the save before the amended one.
+        fs::rename(dir.path().join("a.txt"), dir.path().join("c.txt")).unwrap();
+        saved_root(save_as(&mut repo, None, true).unwrap());
+        assert_eq!(newest_save(&repo).1.move_notes, [note("a.txt", "c.txt")]);
+    }
+
+    #[test]
+    fn a_shelf_notes_no_moves() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"hello");
+        saved_root(save_now(&mut repo).unwrap());
+        fs::rename(dir.path().join("a.txt"), dir.path().join("b.txt")).unwrap();
+        let shelved = crate::shelf::shelf(&mut repo, None, &who(), None, &mut |_| {}).unwrap();
+        assert!(matches!(shelved, crate::shelf::Shelved::Made(_)));
+        let shelves = repo.current().unwrap().1.state.shelves;
+        assert_eq!(shelves.len(), 1);
+        for (_, id) in &shelves {
+            let save = repo.store().save(id, false).unwrap();
+            assert!(save.move_notes.is_empty(), "{:?}", save.move_notes);
+        }
+    }
+
+    /// The files a save counted as changed.
+    fn changed(outcome: SaveOutcome) -> Option<usize> {
+        match outcome {
+            SaveOutcome::Saved { changed_files, .. } => changed_files,
+            SaveOutcome::NothingChanged { .. } => panic!("nothing was saved"),
+        }
+    }
+
+    #[test]
+    fn a_save_notes_only_the_first_moves_whose_paths_fit() {
+        let (dir, mut repo) = project();
+        for name in ["a", "b", "c", "d"] {
+            write(dir.path(), &format!("{name}.txt"), name.as_bytes());
+        }
+        saved_root(save_now(&mut repo).unwrap());
+        for name in ["a", "b", "c", "d"] {
+            let (from, to) = (format!("{name}.txt"), format!("{name}2.txt"));
+            fs::rename(dir.path().join(from), dir.path().join(to)).unwrap();
+        }
+        // Each note is 5 + 6 bytes of paths: two fit in 25, not three.
+        NOTE_LIMITS.set((MAX_HELD_LISTINGS, 25, moves::MAX_LEFT_BYTES));
+        assert_eq!(changed(save_now(&mut repo).unwrap()), Some(8));
+        let notes = newest_save(&repo).1.move_notes;
+        assert_eq!(notes, [note("a.txt", "a2.txt"), note("b.txt", "b2.txt")]);
+    }
+
+    #[test]
+    fn a_first_save_holds_nothing_to_note_moves_and_one_that_adds_keeps_no_arrivals() {
+        let (dir, mut repo) = project();
+        for i in 0..20 {
+            write(dir.path(), &format!("f/{i}"), i.to_string().as_bytes());
+        }
+        HELD_MOST.set(0);
+        assert_eq!(changed(save_now(&mut repo).unwrap()), Some(20));
+        assert_eq!(HELD_MOST.get(), 0);
+        // A save after it holds what it stores, but keeps no file that arrived when none left.
+        for i in 20..40 {
+            write(dir.path(), &format!("f/{i}"), i.to_string().as_bytes());
+        }
+        moves::ARRIVALS_KEPT.set(0);
+        assert_eq!(changed(save_now(&mut repo).unwrap()), Some(20));
+        assert!(HELD_MOST.get() > 0);
+        assert_eq!(moves::ARRIVALS_KEPT.get(), 0);
+        assert!(newest_save(&repo).1.move_notes.is_empty());
+    }
+
+    #[test]
+    fn a_save_past_the_listings_it_may_hold_is_written_without_notes() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"hello");
+        saved_root(save_now(&mut repo).unwrap());
+        fs::rename(dir.path().join("a.txt"), dir.path().join("b.txt")).unwrap();
+        NOTE_LIMITS.set((1, moves::MAX_NOTED_BYTES, moves::MAX_LEFT_BYTES));
+        // Its files are still counted, from the store once it is written.
+        assert_eq!(changed(save_now(&mut repo).unwrap()), Some(2));
+        assert!(newest_save(&repo).1.move_notes.is_empty());
+    }
+
+    #[test]
+    fn a_save_that_removes_more_than_it_may_hold_counts_them_and_notes_nothing() {
+        let (dir, mut repo) = project();
+        for name in ["gone1", "gone2", "gone3", "moved"] {
+            write(dir.path(), name, name.as_bytes());
+        }
+        saved_root(save_now(&mut repo).unwrap());
+        for name in ["gone1", "gone2", "gone3"] {
+            fs::remove_file(dir.path().join(name)).unwrap();
+        }
+        fs::rename(dir.path().join("moved"), dir.path().join("there")).unwrap();
+        // Four files left, past the 12 bytes it may hold.
+        NOTE_LIMITS.set((MAX_HELD_LISTINGS, moves::MAX_NOTED_BYTES, 12));
+        let outcome = save_now(&mut repo).unwrap();
+        let SaveOutcome::Saved { warnings, .. } = &outcome else {
             panic!("nothing was saved");
         };
-        let cached = |repo: &Repository, line: &str| ChangeIds::load(repo).get(line).is_some();
-        // A line from the first save, which doesn't hold this one: nothing to amend.
-        plant_line(&mut repo, "b", first);
-        // Gone before each amend, so a list found after it is one the amend kept.
-        let file = dir.path().join(".opalro/cache/change-ids");
-        fs::remove_file(&file).unwrap();
-        let same = save_as(&mut repo, None, true);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        assert_eq!(changed(outcome), Some(5));
+        assert!(newest_save(&repo).1.move_notes.is_empty());
+    }
+
+    #[test]
+    fn a_save_whose_parent_can_t_be_compared_is_written_without_notes() {
+        let (dir, mut repo) = project();
+        // A save past the limits, as an imported one can be: a folder nested past the longest
+        // path, beside a file that then moves.
+        crate::test_support::plant_root(&mut repo, |packs| {
+            let mut id = packs.add_content(b"deep").unwrap();
+            let mut kind = EntryKind::File;
+            for _ in 0..2_100 {
+                let entry = Entry {
+                    name: "d".into(),
+                    kind,
+                    id,
+                    size: if kind == EntryKind::File { 4 } else { 0 },
+                };
+                id = crate::test_support::add_listing(packs, vec![entry]).0;
+                kind = EntryKind::Folder;
+            }
+            let deep = Entry {
+                name: "d".into(),
+                kind,
+                id,
+                size: 0,
+            };
+            let moved = Entry {
+                name: "a.txt".into(),
+                kind: EntryKind::File,
+                id: packs.add_content(b"hello").unwrap(),
+                size: 5,
+            };
+            crate::test_support::add_listing(packs, vec![moved, deep]).0
+        });
+        write(dir.path(), "b.txt", b"hello");
+        let outcome = save_now(&mut repo).unwrap();
+        let SaveOutcome::Saved { warnings, .. } = &outcome else {
+            panic!("nothing was saved");
+        };
         assert!(
-            matches!(same, Ok(SaveOutcome::NothingChanged { .. })),
-            "{same:?}"
+            warnings
+                .iter()
+                .any(|w| w.kind == warning::CHANGED_FILES_NOT_COUNTED),
+            "{warnings:?}"
         );
-        assert!(cached(&repo, "main"));
-        assert!(!cached(&repo, "b"));
-        // A line from this save: refused.
-        plant_line(&mut repo, "c", save_id);
-        fs::remove_file(&file).unwrap();
-        let refused = save_as(&mut repo, None, true);
-        let by_c = matches!(&refused, Err(SaveError::AmendShared { by }) if by == &["line c"]);
-        assert!(by_c, "{refused:?}");
-        assert!(cached(&repo, "main"));
-        assert!(!cached(&repo, "c"));
+        assert_eq!(changed(outcome), None);
+        assert!(newest_save(&repo).1.move_notes.is_empty());
+    }
+
+    #[test]
+    #[ignore = "nightly: 100,001 files"]
+    fn a_save_moving_more_than_100000_files_notes_the_first_100000() {
+        let (dir, mut repo) = project();
+        let count = MAX_MOVE_NOTES + 1;
+        fs::create_dir(dir.path().join("a")).unwrap();
+        for i in 0..count {
+            fs::write(dir.path().join(format!("a/f{i:06}")), i.to_string()).unwrap();
+        }
+        saved_root(save_now(&mut repo).unwrap());
+        fs::rename(dir.path().join("a"), dir.path().join("b")).unwrap();
+        saved_root(save_now(&mut repo).unwrap());
+        let notes = newest_save(&repo).1.move_notes;
+        assert_eq!(notes.len() as u64, MAX_MOVE_NOTES);
+        assert_eq!(notes.first(), Some(&note("a/f000000", "b/f000000")));
+        assert_eq!(notes.last(), Some(&note("a/f099999", "b/f099999")));
+    }
+
+    #[test]
+    fn a_new_line_from_a_save_can_t_start_with_a_dash() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"a");
+        let head = repo.head().unwrap();
+        let who = who();
+        let req = SaveRequest {
+            message: Some("A"),
+            who: &who,
+            command: "save",
+            accept_crlf: false,
+            git_excludes: None,
+            new_line: Some("-x"),
+            only: None,
+            amend: false,
+        };
+        let refused = save_folder(&mut repo, &req, &mut |_| {}, &mut |_| true);
+        assert!(
+            matches!(&refused, Err(SaveError::Name(NameError::Bad { reason, .. }))
+                if reason == "a line name cannot start with -"),
+            "{refused:?}"
+        );
+        assert_eq!(repo.head().unwrap(), head);
+    }
+
+    /// Points each of `lines` at its save, in one step, without touching the folder.
+    fn set_lines(repo: &mut Repository, lines: &[(String, Id)]) {
+        let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
+        let (head, entry) = repo.current().unwrap();
+        let mut state = entry.state.clone();
+        for (name, id) in lines {
+            state.lines.insert(name.clone(), *id);
+        }
+        let diary = DiaryEntry {
+            parent: Some(head),
+            action: Action::Command,
+            command: "save".into(),
+            who: who(),
+            opal_version: "0.1.0".into(),
+            state,
+            folder_change: None,
+        };
+        repo.commit(&lock, repo.new_packs().unwrap(), &diary)
+            .unwrap();
+    }
+
+    /// Plants, for each `(name, on, n)`, `n` saves of their own on `on` holding its files, the
+    /// last as the line `name`, all in one step. Gives each line's saves, oldest first.
+    fn plant_lines(repo: &mut Repository, lines: &[(String, Id, usize)]) -> Vec<Vec<Id>> {
+        let lock = repo.lock_for_change("save", &mut |_| {}).unwrap();
+        let (head, entry) = repo.current().unwrap();
+        let mut packs = repo.new_packs().unwrap();
+        let mut state = entry.state.clone();
+        let mut planted = Vec::new();
+        for (name, on, n) in lines {
+            let mut save = repo.store().save(on, false).unwrap();
+            let mut saves = Vec::new();
+            let mut top = *on;
+            for _ in 0..*n {
+                save.parents = vec![top];
+                save.change_id = ChangeId::random().unwrap();
+                top = packs.add_record(ObjectKind::Save, &save.encode()).unwrap();
+                saves.push(top);
+            }
+            state.lines.insert(name.clone(), top);
+            planted.push(saves);
+        }
+        let diary = DiaryEntry {
+            parent: Some(head),
+            action: Action::Command,
+            command: "save".into(),
+            who: who(),
+            opal_version: "0.1.0".into(),
+            state,
+            folder_change: None,
+        };
+        repo.commit(&lock, packs, &diary).unwrap();
+        planted
+    }
+
+    /// `n` lines of 20 saves of their own on `on`.
+    fn old_lines(n: usize, on: Id) -> Vec<(String, Id, usize)> {
+        (0..n).map(|k| (format!("line-{k:03}"), on, 20)).collect()
+    }
+
+    /// Amends `main` with `a.txt` changed, and gives what came of it and how many saves it read.
+    fn amend_counted(dir: &Path, repo: &mut Repository) -> (Result<SaveOutcome, SaveError>, usize) {
+        let n = repo.store().saves_read();
+        write(dir, "a.txt", format!("amended {n}").as_bytes());
+        let done = save_as(repo, None, true);
+        (done, repo.store().saves_read() - n)
+    }
+
+    /// The saves an amend reads right after a save, in a project with `old` lines of 20 saves
+    /// that parted from main before it.
+    fn amend_reads_after_a_save(old: usize) -> usize {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"a");
+        let first = saved_id(save_now(&mut repo));
+        plant_lines(&mut repo, &old_lines(old, first));
+        write(dir.path(), "a.txt", b"b");
+        saved_id(save_now(&mut repo));
+        let (done, read) = amend_counted(dir.path(), &mut repo);
+        assert!(matches!(done, Ok(SaveOutcome::Saved { .. })), "{done:?}");
+        read
+    }
+
+    fn saved_id(done: Result<SaveOutcome, SaveError>) -> Id {
+        match done {
+            Ok(SaveOutcome::Saved { save_id, .. }) => save_id,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn an_amend_right_after_a_save_reads_no_save_of_another_line() {
+        // As many saves read as in the same project without the other lines.
+        assert_eq!(amend_reads_after_a_save(300), amend_reads_after_a_save(0));
+    }
+
+    /// The saves an amend of main reads when `side` (five saves of its own off main) gained
+    /// `moved` saves by a step that made none, since main's newest save was made, in a project
+    /// with `old` more lines; and main's saves, all of which the walk may meet.
+    fn amend_reads_after_another_line_moved(old: usize, moved: usize) -> (usize, usize) {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"a");
+        let first = saved_id(save_now(&mut repo));
+        let mut lines = old_lines(old, first);
+        lines.push(("side".into(), first, 5));
+        let side = plant_lines(&mut repo, &lines).pop().unwrap();
+        write(dir.path(), "a.txt", b"b");
+        let tip = saved_id(save_now(&mut repo));
+        if moved > 0 {
+            plant_lines(&mut repo, &[("side".into(), side[4], moved)]);
+        }
+        let main_saves = std::iter::successors(Some(tip), |id| {
+            repo.store()
+                .save(id, false)
+                .unwrap()
+                .parents
+                .first()
+                .copied()
+        })
+        .count();
+        let (done, read) = amend_counted(dir.path(), &mut repo);
+        assert!(matches!(done, Ok(SaveOutcome::Saved { .. })), "{done:?}");
+        (read, main_saves)
+    }
+
+    #[test]
+    fn after_another_line_moved_without_a_save_only_that_line_is_asked_about() {
+        let (moved, main_saves) = amend_reads_after_another_line_moved(0, 3);
+        let (still, _) = amend_reads_after_another_line_moved(0, 0);
+        // No save of a third line is read.
+        assert_eq!(amend_reads_after_another_line_moved(300, 3).0, moved);
+        // The side line was asked about: its own eight saves, and main's back to where it parted.
+        assert!(moved > still, "{moved} {still}");
+        assert!(moved - still <= 8 + main_saves, "{moved} {still}");
+    }
+
+    fn goto_line(repo: &mut Repository, line: &str) {
+        let target = crate::lines::Target::Line(line.into());
+        crate::switch::goto(repo, &target, &who(), "goto", None, &mut |_| {}).unwrap();
+    }
+
+    /// The saves an amend of main reads after, with real steps, a save on main, `goto` to
+    /// `line-000` (one of `old` lines of `depth` saves that parted from main before), a save
+    /// there when `save_there`, and `goto main`.
+    fn amend_reads_after_work_on_another_line(old: usize, depth: usize, save_there: bool) -> usize {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"a");
+        let first = saved_id(save_now(&mut repo));
+        let lines: Vec<(String, Id, usize)> = (0..old)
+            .map(|k| (format!("line-{k:03}"), first, depth))
+            .collect();
+        plant_lines(&mut repo, &lines);
+        write(dir.path(), "a.txt", b"b");
+        let tip = saved_id(save_now(&mut repo));
+        goto_line(&mut repo, "line-000");
+        if save_there {
+            write(dir.path(), "there.txt", b"there");
+            saved_id(save_now(&mut repo));
+            // Main's note stays beside the other line's.
+            assert!(LastMade::load(&repo).entry_of(&tip).is_some());
+        }
+        goto_line(&mut repo, "main");
+        let (done, read) = amend_counted(dir.path(), &mut repo);
+        assert!(matches!(done, Ok(SaveOutcome::Saved { .. })), "{done:?}");
+        read
+    }
+
+    #[test]
+    fn after_a_save_on_one_other_line_only_that_line_is_asked_about() {
+        let worked = amend_reads_after_work_on_another_line(1, 20, true);
+        // No save of a third line is read.
+        assert_eq!(
+            amend_reads_after_work_on_another_line(300, 20, true),
+            worked
+        );
+        // The line worked on is asked about: its 21 saves, and main's three at most.
+        let only_goto = amend_reads_after_work_on_another_line(1, 20, false);
+        assert!(worked > only_goto, "{worked} {only_goto}");
+        assert!(worked - only_goto <= 21 + 3, "{worked} {only_goto}");
+    }
+
+    #[test]
+    fn the_red_team_s_shape_in_small_reads_only_the_line_worked_on() {
+        // Dozens of old release lines, as an import brings; work on one, back, amend.
+        let among = amend_reads_after_work_on_another_line(40, 50, true);
+        // As many saves read as with that one line alone: none of the other 39 lines'.
+        assert_eq!(amend_reads_after_work_on_another_line(1, 50, true), among);
+    }
+
+    /// The saves an amend reads with the cache folder emptied before it, in a project with `old`
+    /// lines of 20 saves that parted from main before its newest save.
+    fn amend_reads_without_a_note(old: usize) -> (usize, Result<SaveOutcome, SaveError>) {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"a");
+        let first = saved_id(save_now(&mut repo));
+        plant_lines(&mut repo, &old_lines(old, first));
+        write(dir.path(), "a.txt", b"b");
+        saved_id(save_now(&mut repo));
+        let cache = dir.path().join(".opalro/cache");
+        for file in fs::read_dir(&cache).unwrap() {
+            fs::remove_file(file.unwrap().path()).unwrap();
+        }
+        let (done, read) = amend_counted(dir.path(), &mut repo);
+        (read, done)
+    }
+
+    #[test]
+    fn without_a_note_every_other_line_is_asked_about_once() {
+        let (alone, done) = amend_reads_without_a_note(0);
+        assert!(matches!(done, Ok(SaveOutcome::Saved { .. })), "{done:?}");
+        let (among, done) = amend_reads_without_a_note(300);
+        assert!(matches!(done, Ok(SaveOutcome::Saved { .. })), "{done:?}");
+        // Every save of every other line, each once, and main's three at most.
+        let others = 300 * 20;
+        assert!(among - alone >= others, "{among} {alone}");
+        assert!(among - alone <= others + 3, "{among} {alone}");
+    }
+
+    /// The saves a refused amend of main reads when `k` lines each hold main's newest save
+    /// through 30 saves of their own, and the holders it names.
+    fn refused_amend_reads(k: usize) -> (usize, Vec<String>) {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"a");
+        let tip = saved_id(save_now(&mut repo));
+        let lines: Vec<(String, Id, usize)> =
+            (0..k).map(|i| (format!("line-{i:03}"), tip, 30)).collect();
+        plant_lines(&mut repo, &lines);
+        let (done, read) = amend_counted(dir.path(), &mut repo);
+        match done {
+            Err(SaveError::AmendShared { by }) => (read, by),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn naming_the_holders_reads_each_save_once() {
+        let (one, by) = refused_amend_reads(1);
+        assert_eq!(by, ["line line-000"]);
+        let (eight, by) = refused_amend_reads(8);
+        let named: Vec<String> = (0..8).map(|i| format!("line line-{i:03}")).collect();
+        assert_eq!(by, named);
+        eprintln!("saves read naming 1 holder: {one}, naming 8: {eight}");
+        // Each other line's 30 saves once, not once for every holder still to be found.
+        assert!(eight - one <= 7 * 30 + 3, "{one} {eight}");
+    }
+
+    /// Points the server line `line@server` at `id`, as a fetch would, in a step of its own.
+    fn set_server_line(repo: &mut Repository, server: &str, line: &str, id: Id) {
+        let lock = repo.lock_for_change("fetch", &mut |_| {}).unwrap();
+        let (head, entry) = repo.current().unwrap();
+        let servers = crate::diary::ServerLines {
+            servers: [(server.to_owned(), [(line.to_owned(), id)].into())].into(),
+        };
+        let mut packs = repo.new_packs().unwrap();
+        let mut state = entry.state.clone();
+        state.server_lines = Some(
+            packs
+                .add_record(ObjectKind::ServerLines, &servers.encode())
+                .unwrap(),
+        );
+        let diary = DiaryEntry {
+            parent: Some(head),
+            action: Action::Command,
+            command: "fetch".into(),
+            who: who(),
+            opal_version: "0.1.0".into(),
+            state,
+            folder_change: None,
+        };
+        repo.commit(&lock, packs, &diary).unwrap();
+    }
+
+    #[test]
+    fn with_a_note_a_server_line_moved_onto_the_save_is_asked_about() {
+        let (dir, mut repo) = project();
+        let start = repo.current().unwrap().1.state.lines["main"];
+        write(dir.path(), "a.txt", b"a");
+        let tip = saved_id(save_now(&mut repo));
+        set_server_line(&mut repo, "origin", "main", tip);
+        assert!(LastMade::load(&repo).entry_of(&tip).is_some());
+        let (done, _) = amend_counted(dir.path(), &mut repo);
+        let by_server = matches!(&done, Err(SaveError::AmendShared { by })
+            if by == &["server line main@origin"]);
+        assert!(by_server, "{done:?}");
+        // On an older save, it holds nothing the amend replaces.
+        set_server_line(&mut repo, "origin", "main", start);
+        let (done, _) = amend_counted(dir.path(), &mut repo);
+        assert!(matches!(done, Ok(SaveOutcome::Saved { .. })), "{done:?}");
+    }
+
+    #[test]
+    fn a_note_that_can_t_be_trusted_is_not_used() {
+        let (dir, mut repo) = project();
+        let start = repo.current().unwrap().1.state.lines["main"];
+        write(dir.path(), "a.txt", b"a");
+        let tip = saved_id(save_now(&mut repo));
+        let made = repo.head().unwrap();
+        // A line on the save, the step after the one that made it.
+        plant_lines(&mut repo, &[("held".into(), tip, 1)]);
+        let with_held = repo.head().unwrap();
+        // Main away from its save and back, so a step has `held` but main elsewhere.
+        set_lines(&mut repo, &[("main".into(), start)]);
+        let main_away = repo.head().unwrap();
+        set_lines(&mut repo, &[("main".into(), tip)]);
+        let file = dir.path().join(".opalro/cache/last-made");
+        let refused = |dir: &Path, repo: &mut Repository| {
+            let (done, _) = amend_counted(dir, repo);
+            let by_held =
+                matches!(&done, Err(SaveError::AmendShared { by }) if by == &["line held"]);
+            assert!(by_held, "{done:?}");
+        };
+        // The file holding only the note of `save` by `entry`, sealed with `key`.
+        let plant = |save: Id, entry: Id, key: [u8; 32]| {
+            let mut notes = LastMade::default();
+            notes.insert(save, entry);
+            fs::write(&file, crate::keyed::seal(&key, &notes.encode())).unwrap();
+        };
+        // Each lie, if believed, would leave `held` unasked.
+        plant(start, with_held, [7; 32]);
+        refused(dir.path(), &mut repo);
+        plant(tip, Id([0x5a; 32]), [7; 32]);
+        refused(dir.path(), &mut repo);
+        plant(tip, with_held, [9; 32]);
+        refused(dir.path(), &mut repo);
+        plant(tip, main_away, [7; 32]);
+        refused(dir.path(), &mut repo);
+        // The note this computer left when it made the save is used, and `held` is new since.
+        plant(tip, made, [7; 32]);
+        refused(dir.path(), &mut repo);
+        // A lie under the right seal is believed: the seal is what it is trusted for.
+        plant(tip, with_held, [7; 32]);
+        let (done, _) = amend_counted(dir.path(), &mut repo);
+        assert!(matches!(done, Ok(SaveOutcome::Saved { .. })), "{done:?}");
+    }
+
+    /// One undo or redo step.
+    fn step(repo: &mut Repository, back: bool) {
+        let who = who();
+        let req = crate::undo::StepRequest {
+            n: 1,
+            shelve: false,
+            who: &who,
+            git_excludes: None,
+        };
+        if back {
+            crate::undo::undo(repo, &req, &mut |_| {}).unwrap();
+        } else {
+            crate::undo::redo(repo, &req, &mut |_| {}).unwrap();
+        }
+    }
+
+    #[test]
+    fn after_undo_of_an_amend_a_line_started_on_the_save_holds_it() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"a");
+        let tip = saved_id(save_now(&mut repo));
+        let (done, _) = amend_counted(dir.path(), &mut repo);
+        assert!(matches!(done, Ok(SaveOutcome::Saved { .. })), "{done:?}");
+        step(&mut repo, true);
+        assert_eq!(repo.current().unwrap().1.state.lines["main"], tip);
+        set_lines(&mut repo, &[("side".into(), tip)]);
+        let (done, _) = amend_counted(dir.path(), &mut repo);
+        let by_side = matches!(&done, Err(SaveError::AmendShared { by }) if by == &["line side"]);
+        assert!(by_side, "{done:?}");
+    }
+
+    #[test]
+    fn after_redo_a_line_started_on_the_amended_save_holds_it() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"a");
+        saved_id(save_now(&mut repo));
+        let (done, _) = amend_counted(dir.path(), &mut repo);
+        let amended = saved_id(done);
+        set_lines(&mut repo, &[("side".into(), amended)]);
+        step(&mut repo, true);
+        assert!(!repo.current().unwrap().1.state.lines.contains_key("side"));
+        step(&mut repo, false);
+        let (done, _) = amend_counted(dir.path(), &mut repo);
+        let by_side = matches!(&done, Err(SaveError::AmendShared { by }) if by == &["line side"]);
+        assert!(by_side, "{done:?}");
+    }
+
+    #[test]
+    fn an_amend_goes_through_beside_an_older_copy_of_the_same_change() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"a");
+        let older = saved_id(save_now(&mut repo));
+        let (done, _) = amend_counted(dir.path(), &mut repo);
+        let amended = saved_id(done);
+        // A line started on the replaced save, which has the same change ID.
+        let old = plant_lines(&mut repo, &[("old".into(), older, 1)]).remove(0)[0];
+        let (done, _) = amend_counted(dir.path(), &mut repo);
+        let newest = saved_id(done);
+        // Both saves of the change are still there to see.
+        let lines = repo.current().unwrap().1.state.lines;
+        assert_eq!((lines["old"], lines["main"]), (old, newest));
+        let change = |id: &Id| repo.store().save(id, false).unwrap().change_id;
+        assert_eq!(change(&older), change(&amended));
+        assert_eq!(change(&newest), change(&amended));
+    }
+
+    #[test]
+    fn a_save_and_an_amend_each_leave_the_note_of_what_they_made() {
+        let (dir, mut repo) = project();
+        write(dir.path(), "a.txt", b"a");
+        let tip = saved_id(save_now(&mut repo));
+        assert_eq!(
+            LastMade::load(&repo).entry_of(&tip),
+            Some(repo.head().unwrap())
+        );
+        let (done, _) = amend_counted(dir.path(), &mut repo);
+        let amended = saved_id(done);
+        let notes = LastMade::load(&repo);
+        assert_eq!(notes.entry_of(&amended), Some(repo.head().unwrap()));
+        // The amended save is no line's newest any more, so its note is gone.
+        assert_eq!((notes.entry_of(&tip), notes.len()), (None, 1));
     }
 
     #[test]
@@ -4410,5 +5823,1145 @@ mod tests {
         assert_eq!(changed, ["a/b/two.txt"]);
         // The walk read the last save's listings; the comparison finds them in memory.
         assert_eq!(crate::pack::open_files::reads() - before, 0);
+    }
+
+    use crate::conflict::tests::{file_of, plant_conflicted};
+    use crate::conflict::{Own, Term};
+    use crate::status::tests::{HALF, MARKED, keep, marked, versions};
+    use crate::status::{Standing, status};
+    use crate::test_support::without_conflicts_feature;
+
+    const FIXED: &[u8] = b"a\nmine\nb\nmine 2\n";
+    const PICTURE: &[u8] = b"picture";
+
+    /// A project whose store holds every version the conflicts in these tests name.
+    fn with_versions() -> (tempfile::TempDir, Repository) {
+        let (dir, mut repo) = project();
+        keep(&mut repo, &[b"mine\n", b"base", b"theirs", MARKED, PICTURE]);
+        (dir, repo)
+    }
+
+    /// Yours a picture, theirs and where the lines parted text: it stands as your version.
+    fn picture() -> Record {
+        versions(Some(file_of(PICTURE)))
+    }
+
+    /// `record`, with `version` as its own version, marked with `marker`.
+    fn owning(record: Record, version: Option<Term>, marker: u8) -> Record {
+        Record {
+            own: Some(Own { version, marker }),
+            ..record
+        }
+    }
+
+    /// A folder term for the folder `name` of `top`, a planted save's top listing.
+    fn folder_term(top: &Listing, name: &str) -> Term {
+        Term {
+            kind: EntryKind::Folder,
+            id: top.get(name).unwrap().id,
+            size: 0,
+        }
+    }
+
+    /// The entry at `path` in the save whose top listing is `root`.
+    fn entry_at(store: &Store, root: Id, path: &str) -> Option<Entry> {
+        let mut at = root;
+        let mut names = path.split('/').peekable();
+        while let Some(name) = names.next() {
+            let e = store.listing(&at).unwrap().get(name)?.clone();
+            if names.peek().is_none() {
+                return Some(e);
+            }
+            at = e.id;
+        }
+        None
+    }
+
+    /// The record of the conflict at `path` in the save whose top listing is `root`.
+    fn record_at(store: &Store, root: Id, path: &str) -> Record {
+        let e = entry_at(store, root, path).unwrap();
+        assert_eq!(e.kind, EntryKind::Conflict, "{path}");
+        store.conflict(&e.id).unwrap()
+    }
+
+    /// A save that must have been made: its top listing, and how many places it says are still
+    /// in conflict.
+    fn saved_with(outcome: Result<SaveOutcome, SaveError>) -> (Id, u64) {
+        match outcome.unwrap() {
+            SaveOutcome::Saved {
+                save, conflicts, ..
+            } => (save.root, conflicts),
+            SaveOutcome::NothingChanged { .. } => panic!("nothing was saved"),
+        }
+    }
+
+    fn nothing_saved(outcome: Result<SaveOutcome, SaveError>) {
+        let outcome = outcome.unwrap();
+        assert!(
+            matches!(outcome, SaveOutcome::NothingChanged { .. }),
+            "{outcome:?}"
+        );
+    }
+
+    /// How `status` shows each place in conflict.
+    fn rows(repo: &Repository) -> Vec<(String, Standing)> {
+        let s = status(repo, false, None).unwrap();
+        assert!(s.changes.is_empty(), "{:?}", s.changes);
+        s.conflicts
+            .into_iter()
+            .map(|c| (c.path, c.standing))
+            .collect()
+    }
+
+    fn amend_now(repo: &mut Repository) -> Result<SaveOutcome, SaveError> {
+        let who = who();
+        let req = SaveRequest {
+            message: None,
+            who: &who,
+            command: "save",
+            accept_crlf: false,
+            git_excludes: None,
+            new_line: None,
+            only: None,
+            amend: true,
+        };
+        save_folder(repo, &req, &mut |_| {}, &mut |_| true)
+    }
+
+    #[test]
+    fn saving_an_untouched_conflicted_folder_saves_nothing_new() {
+        let (dir, mut repo) = with_versions();
+        let root = dir.path();
+        let held = plant_save(&mut repo, &[("ui/a.txt", EntryKind::File, b"a")]);
+        let files: &[(&str, EntryKind, &[u8])] = &[("art/plain.txt", EntryKind::File, b"one")];
+        let conflicts = [
+            ("art/marked.txt", marked()),
+            ("art/yours.png", picture()),
+            ("gone.png", versions(None)),
+            ("ui", versions(Some(folder_term(&held, "ui")))),
+        ];
+        plant_conflicted(&mut repo, files, &conflicts);
+        write(root, "art/plain.txt", b"one");
+        write(root, "art/marked.txt", MARKED);
+        write(root, "art/yours.png", PICTURE);
+        write(root, "ui/a.txt", b"a");
+        build_count_from_here();
+        nothing_saved(save_now(&mut repo));
+        assert_eq!(built(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_half_fixed_file_is_saved_as_the_conflicts_own_version() {
+        let (dir, mut repo) = with_versions();
+        plant_conflicted(&mut repo, &[], &[("half.txt", marked())]);
+        write(dir.path(), "half.txt", HALF);
+        let (root, conflicts) = saved_with(save_now(&mut repo));
+        assert_eq!(conflicts, 1);
+        let want = owning(marked(), Some(file_of(HALF)), 7);
+        assert_eq!(record_at(repo.store(), root, "half.txt"), want);
+        assert_eq!(
+            rows(&repo),
+            [("half.txt".to_owned(), Standing::Marked { left: 1 })]
+        );
+        nothing_saved(save_now(&mut repo));
+    }
+
+    #[test]
+    fn a_file_with_no_markers_left_is_saved_as_fixed() {
+        let (dir, mut repo) = with_versions();
+        plant_conflicted(&mut repo, &[], &[("fixed.txt", marked())]);
+        write(dir.path(), "fixed.txt", FIXED);
+        let (root, conflicts) = saved_with(save_now(&mut repo));
+        assert_eq!(conflicts, 0);
+        let e = entry_at(repo.store(), root, "fixed.txt").unwrap();
+        assert_eq!((e.kind, e.id), (EntryKind::File, hash_content(FIXED)));
+        assert_eq!(rows(&repo), []);
+    }
+
+    #[test]
+    fn a_removed_marked_file_is_saved_as_fixed() {
+        let (dir, mut repo) = with_versions();
+        let files: &[(&str, EntryKind, &[u8])] = &[("plain.txt", EntryKind::File, b"one")];
+        plant_conflicted(&mut repo, files, &[("gone.txt", marked())]);
+        write(dir.path(), "plain.txt", b"one");
+        let (root, conflicts) = saved_with(save_now(&mut repo));
+        assert_eq!(conflicts, 0);
+        assert_eq!(entry_at(repo.store(), root, "gone.txt"), None);
+        assert!(entry_at(repo.store(), root, "plain.txt").is_some());
+        assert_eq!(rows(&repo), []);
+    }
+
+    #[test]
+    fn a_changed_picture_stays_a_conflict_with_the_changed_file_as_its_own() {
+        let (dir, mut repo) = with_versions();
+        plant_conflicted(&mut repo, &[], &[("hero.png", picture())]);
+        write(dir.path(), "hero.png", b"painted over");
+        let (root, conflicts) = saved_with(save_now(&mut repo));
+        assert_eq!(conflicts, 1);
+        let want = owning(picture(), Some(file_of(b"painted over")), 0);
+        assert_eq!(record_at(repo.store(), root, "hero.png"), want);
+        assert_eq!(
+            rows(&repo),
+            [("hero.png".to_owned(), Standing::ChangedInPlace)]
+        );
+        nothing_saved(save_now(&mut repo));
+    }
+
+    #[test]
+    fn a_removed_picture_stays_a_conflict_with_nothing_as_its_own() {
+        let (dir, mut repo) = with_versions();
+        let files: &[(&str, EntryKind, &[u8])] = &[("plain.txt", EntryKind::File, b"one")];
+        plant_conflicted(&mut repo, files, &[("hero.png", picture())]);
+        write(dir.path(), "plain.txt", b"one");
+        let (root, conflicts) = saved_with(save_now(&mut repo));
+        assert_eq!(conflicts, 1);
+        let want = owning(picture(), None, 0);
+        assert_eq!(record_at(repo.store(), root, "hero.png"), want);
+        nothing_saved(save_now(&mut repo));
+    }
+
+    #[test]
+    fn a_picture_in_a_deleted_folder_stays_a_conflict_and_the_folder_stays() {
+        let (dir, mut repo) = with_versions();
+        let files: &[(&str, EntryKind, &[u8])] = &[
+            ("art/plain.txt", EntryKind::File, b"one"),
+            ("keep.txt", EntryKind::File, b"kept"),
+        ];
+        let conflicts = [
+            ("art/deep/none.png", versions(None)),
+            ("art/hero.png", picture()),
+            ("art/notes.txt", marked()),
+        ];
+        let planted = plant_conflicted(&mut repo, files, &conflicts);
+        write(dir.path(), "keep.txt", b"kept");
+        let (root, conflicts) = saved_with(save_now(&mut repo));
+        assert_eq!(conflicts, 2);
+        let store = repo.store();
+        assert_eq!(
+            record_at(store, root, "art/hero.png"),
+            owning(picture(), None, 0)
+        );
+        // Standing as nothing already, it is kept as it is.
+        let none = entry_at(store, root, "art/deep/none.png");
+        assert_eq!(none, entry_at(store, planted, "art/deep/none.png"));
+        // A marked text gone is fixed, and what isn't in conflict goes as it always did.
+        assert_eq!(entry_at(store, root, "art/notes.txt"), None);
+        assert_eq!(entry_at(store, root, "art/plain.txt"), None);
+        assert_eq!(
+            rows(&repo),
+            [
+                ("art/deep/none.png".to_owned(), Standing::NotInFolder),
+                ("art/hero.png".to_owned(), Standing::ChangedInPlace),
+            ]
+        );
+        nothing_saved(save_now(&mut repo));
+    }
+
+    #[test]
+    fn a_changed_file_inside_a_conflict_standing_as_a_folder_makes_it_changed_in_place() {
+        let (dir, mut repo) = with_versions();
+        let held = plant_save(
+            &mut repo,
+            &[
+                ("ui/a.txt", EntryKind::File, b"a"),
+                ("ui/b.txt", EntryKind::File, b"b"),
+            ],
+        );
+        let ui = versions(Some(folder_term(&held, "ui")));
+        plant_conflicted(&mut repo, &[], &[("ui", ui.clone())]);
+        write(dir.path(), "ui/a.txt", b"a, changed");
+        write(dir.path(), "ui/b.txt", b"b");
+        let (root, conflicts) = saved_with(save_now(&mut repo));
+        assert_eq!(conflicts, 1);
+        let record = record_at(repo.store(), root, "ui");
+        let own = record.own.unwrap().version.unwrap();
+        assert_eq!(record, owning(ui, Some(own), 0));
+        assert_eq!(own.kind, EntryKind::Folder);
+        let held = saved_tree(repo.store(), own.id);
+        let want = Tree::from([
+            ("a.txt".into(), (EntryKind::File, b"a, changed".to_vec())),
+            ("b.txt".into(), (EntryKind::File, b"b".to_vec())),
+        ]);
+        assert_eq!(held, want);
+        assert_eq!(rows(&repo), [("ui".to_owned(), Standing::ChangedInPlace)]);
+    }
+
+    #[test]
+    fn save_counts_the_conflicts_it_met() {
+        let (dir, mut repo) = with_versions();
+        let root = dir.path();
+        let files: &[(&str, EntryKind, &[u8])] = &[("a.txt", EntryKind::File, b"1")];
+        plant_conflicted(
+            &mut repo,
+            files,
+            &[("b/c.png", picture()), ("m.txt", marked())],
+        );
+        write(root, "a.txt", b"2");
+        write(root, "b/c.png", PICTURE);
+        write(root, "m.txt", HALF);
+        // One kept as it is, one with the half-fixed file as its own.
+        assert_eq!(saved_with(save_now(&mut repo)).1, 2);
+        write(root, "a.txt", b"3");
+        assert_eq!(saved_with(amend_now(&mut repo)).1, 2);
+        // A save of one path says nothing of the rest, which it carries as they are.
+        write(root, "a.txt", b"4");
+        let (top, conflicts) = saved_with(save_only(&mut repo, &[path("a.txt")]));
+        assert_eq!(conflicts, 0);
+        assert_eq!(record_at(repo.store(), top, "b/c.png"), picture());
+        let want = owning(marked(), Some(file_of(HALF)), 7);
+        assert_eq!(record_at(repo.store(), top, "m.txt"), want);
+    }
+
+    #[test]
+    fn a_conflict_this_computer_cant_hold_is_carried() {
+        if !this_drive().ignores_case {
+            println!("Skipped: this drive holds names alike but for letter case as two files.");
+            return;
+        }
+        let (dir, mut repo) = with_versions();
+        let mut places = vec![("Pic.png", picture()), ("Dir/c.png", picture())];
+        if cfg!(windows) {
+            places.push(("aux.txt", picture()));
+        }
+        let files: &[(&str, EntryKind, &[u8])] = &[
+            ("dir/x.txt", EntryKind::File, b"x"),
+            ("pic.png", EntryKind::File, PICTURE),
+            ("plain.txt", EntryKind::File, b"one"),
+        ];
+        let planted = plant_conflicted(&mut repo, files, &places);
+        write(dir.path(), "pic.png", PICTURE);
+        write(dir.path(), "plain.txt", b"two");
+        let (root, conflicts) = saved_with(save_now(&mut repo));
+        assert_eq!(conflicts, 0);
+        for (place, _) in &places {
+            let kept = entry_at(repo.store(), root, place);
+            assert_eq!(kept, entry_at(repo.store(), planted, place), "{place}");
+        }
+    }
+
+    #[test]
+    fn a_place_recorded_as_fixed_is_an_ordinary_entry() {
+        let (dir, mut repo) = with_versions();
+        plant_conflicted(
+            &mut repo,
+            &[],
+            &[("hero.png", picture()), ("m.txt", marked())],
+        );
+        write(dir.path(), "hero.png", b"painted over");
+        write(dir.path(), "m.txt", HALF);
+        let who = who();
+        let req = SaveRequest {
+            message: Some("Fixed"),
+            who: &who,
+            command: "resolve",
+            accept_crlf: false,
+            git_excludes: None,
+            new_line: None,
+            only: None,
+            amend: false,
+        };
+        let recording = Recording {
+            fixed: std::collections::BTreeSet::from(["hero.png".to_owned()]),
+            ..Recording::default()
+        };
+        let saved = save_recording(&mut repo, &req, &recording, &mut |_| {}, &mut |_| true);
+        let (root, conflicts) = saved_with(saved);
+        assert_eq!(conflicts, 1);
+        let hero = entry_at(repo.store(), root, "hero.png").unwrap();
+        assert_eq!(
+            (hero.kind, hero.id),
+            (EntryKind::File, hash_content(b"painted over"))
+        );
+        let want = owning(marked(), Some(file_of(HALF)), 7);
+        assert_eq!(record_at(repo.store(), root, "m.txt"), want);
+    }
+
+    #[test]
+    fn a_spent_search_of_gone_folders_goes_ahead_as_today() {
+        // The top holds 2 entries, `a` 1 and `a/b` 1: past 3, the search ends before `a/b`.
+        for (most, kept) in [(4, true), (3, false)] {
+            let (dir, mut repo) = with_versions();
+            let files: &[(&str, EntryKind, &[u8])] = &[("keep.txt", EntryKind::File, b"k")];
+            let planted = plant_conflicted(&mut repo, files, &[("a/b/c.png", picture())]);
+            write(dir.path(), "keep.txt", b"k");
+            BASE_LIMITS.set(Some((crate::listing::MAX_SAVE_DEPTH, most)));
+            let saved = save_now(&mut repo);
+            BASE_LIMITS.set(None);
+            let (root, conflicts) = saved_with(saved);
+            assert_eq!(conflicts, u64::from(kept), "{most}");
+            assert_eq!(entry_at(repo.store(), root, "a").is_some(), kept, "{most}");
+            // The save before holds it still.
+            assert_eq!(record_at(repo.store(), planted, "a/b/c.png"), picture());
+        }
+    }
+
+    #[test]
+    fn saving_a_path_inside_a_conflict_standing_as_a_folder_goes_as_a_full_save_does() {
+        let (dir, mut repo) = with_versions();
+        let held = plant_save(
+            &mut repo,
+            &[
+                ("ui/a.txt", EntryKind::File, b"a"),
+                ("ui/b.txt", EntryKind::File, b"b"),
+            ],
+        );
+        plant_conflicted(
+            &mut repo,
+            &[],
+            &[("ui", versions(Some(folder_term(&held, "ui"))))],
+        );
+        write(dir.path(), "ui/a.txt", b"a, changed");
+        write(dir.path(), "ui/b.txt", b"b");
+        nothing_saved(save_only(&mut repo, &[path("ui/b.txt")]));
+        let own_folder = |repo: &Repository, root| {
+            let record = record_at(repo.store(), root, "ui");
+            let own = record.own.unwrap().version.unwrap();
+            let terms = versions(Some(folder_term(&held, "ui"))).terms;
+            assert_eq!(record.terms, terms);
+            saved_tree(repo.store(), own.id)
+        };
+        let (root, conflicts) = saved_with(save_only(&mut repo, &[path("ui/a.txt")]));
+        assert_eq!(conflicts, 1);
+        let want = Tree::from([
+            ("a.txt".into(), (EntryKind::File, b"a, changed".to_vec())),
+            ("b.txt".into(), (EntryKind::File, b"b".to_vec())),
+        ]);
+        assert_eq!(own_folder(&repo, root), want);
+        // Gone from disk, a path below it is taken from the folder it stands as.
+        fs::remove_dir_all(dir.path().join("ui")).unwrap();
+        let (root, conflicts) = saved_with(save_only(&mut repo, &[path("ui/a.txt")]));
+        assert_eq!(conflicts, 1);
+        let want = Tree::from([("b.txt".into(), (EntryKind::File, b"b".to_vec()))]);
+        assert_eq!(own_folder(&repo, root), want);
+    }
+
+    #[test]
+    fn an_ignored_folder_a_conflict_stands_as_is_saved_as_an_ignored_saved_folder() {
+        let rules: &[u8] = b"build/\n";
+        let (dir, mut repo) = with_versions();
+        let root = dir.path();
+        let held = plant_save(&mut repo, &[("build/x.txt", EntryKind::File, b"x")]);
+        let files: &[(&str, EntryKind, &[u8])] = &[(".opalroignore", EntryKind::File, rules)];
+        let build = versions(Some(folder_term(&held, "build")));
+        plant_conflicted(&mut repo, files, &[("build", build)]);
+        write(root, ".opalroignore", rules);
+        write(root, "build/x.txt", b"x");
+        write(root, "build/new.txt", b"new, and ignored");
+        nothing_saved(save_now(&mut repo));
+        write(root, "build/x.txt", b"x, changed");
+        let (top, conflicts) = saved_with(save_now(&mut repo));
+        assert_eq!(conflicts, 1);
+        let own = record_at(repo.store(), top, "build").own.unwrap();
+        let want = Tree::from([("x.txt".into(), (EntryKind::File, b"x, changed".to_vec()))]);
+        assert_eq!(saved_tree(repo.store(), own.version.unwrap().id), want);
+    }
+
+    #[test]
+    fn a_conflict_in_a_gone_folder_below_a_conflict_is_damage() {
+        let (dir, mut repo) = with_versions();
+        // `ui` stands as a folder whose `sub` holds a conflict: never written by Opalro.
+        let inner = crate::test_support::plant_with(
+            &mut repo,
+            &[("ui/x.txt", EntryKind::File, b"x")],
+            &[("ui/sub/c.png", picture())],
+        );
+        let ui = versions(Some(folder_term(&inner, "ui")));
+        plant_conflicted(&mut repo, &[], &[("ui", ui)]);
+        // `ui/sub` is gone from disk, so only the search of gone folders reads it.
+        write(dir.path(), "ui/x.txt", b"x");
+        let head = repo.head().unwrap();
+        let e = save_now(&mut repo).unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            "ui/sub/c.png is a conflict inside a conflict, which Opalro never writes, so this \
+             project may be damaged."
+        );
+        assert_eq!(repo.head().unwrap(), head);
+    }
+
+    #[test]
+    fn a_conflict_kept_in_a_gone_folder_a_file_now_names_is_refused_in_its_own_words() {
+        let (dir, mut repo) = with_versions();
+        plant_conflicted(&mut repo, &[], &[("art/hero.png", picture())]);
+        write(dir.path(), "art", b"a file where the folder was");
+        let head = repo.head().unwrap();
+        let e = save_now(&mut repo).unwrap_err();
+        assert_eq!(
+            e.to_string(),
+            "Opalro can't save art: the last save has a folder there holding art/hero.png, which \
+             is still in conflict, and a save can't hold both under one name."
+        );
+        assert_eq!(
+            e.hint().as_deref(),
+            Some("Nothing was saved. Rename or move art, then save again.")
+        );
+        assert_eq!(repo.head().unwrap(), head);
+    }
+
+    /// What the save whose top listing is `root` holds at `path`: the record, or an entry that
+    /// isn't a conflict, or nothing.
+    #[derive(Debug, PartialEq)]
+    enum Held {
+        Conflict(Record),
+        Entry(EntryKind, Vec<u8>),
+        Nothing,
+    }
+
+    fn held_at(store: &Store, root: Id, path: &str) -> Held {
+        match entry_at(store, root, path) {
+            None => Held::Nothing,
+            Some(e) if e.kind == EntryKind::Conflict => {
+                Held::Conflict(store.conflict(&e.id).unwrap())
+            }
+            Some(e) => {
+                let mut bytes = Vec::new();
+                if e.kind != EntryKind::Folder {
+                    store.copy_content(&e.id, &mut bytes).unwrap();
+                }
+                Held::Entry(e.kind, bytes)
+            }
+        }
+    }
+
+    fn file(bytes: &[u8]) -> Held {
+        Held::Entry(EntryKind::File, bytes.to_vec())
+    }
+
+    /// A project with a conflict at each place a row of the table needs: `half.txt` and
+    /// `fixed.txt` shown with markers, `hero.png` and `gone.png` standing as your version,
+    /// `gone.txt` shown with markers, and in `art/` (gone from disk) `art/x.png` standing as your
+    /// version and `art/notes.txt` shown with markers. The folder: half fixed, fixed, painted
+    /// over, the rest removed.
+    fn every_row() -> (tempfile::TempDir, Repository) {
+        let (dir, mut repo) = with_versions();
+        let files: &[(&str, EntryKind, &[u8])] = &[("plain.txt", EntryKind::File, b"one")];
+        let conflicts = [
+            ("art/notes.txt", marked()),
+            ("art/x.png", picture()),
+            ("fixed.txt", marked()),
+            ("gone.png", picture()),
+            ("gone.txt", marked()),
+            ("half.txt", marked()),
+            ("hero.png", picture()),
+        ];
+        plant_conflicted(&mut repo, files, &conflicts);
+        let root = dir.path();
+        write(root, "plain.txt", b"one");
+        write(root, "fixed.txt", FIXED);
+        write(root, "half.txt", HALF);
+        write(root, "hero.png", b"painted over");
+        (dir, repo)
+    }
+
+    /// What each row of the table puts in a save made of `every_row`.
+    fn assert_every_row(store: &Store, root: Id) {
+        let half = owning(marked(), Some(file_of(HALF)), 7);
+        let painted = owning(picture(), Some(file_of(b"painted over")), 0);
+        let absent = owning(picture(), None, 0);
+        let want = [
+            ("art/notes.txt", Held::Nothing),
+            ("art/x.png", Held::Conflict(absent.clone())),
+            ("fixed.txt", file(FIXED)),
+            ("gone.png", Held::Conflict(absent)),
+            ("gone.txt", Held::Nothing),
+            ("half.txt", Held::Conflict(half)),
+            ("hero.png", Held::Conflict(painted)),
+        ];
+        for (path, want) in want {
+            assert_eq!(held_at(store, root, path), want, "{path}");
+        }
+    }
+
+    #[test]
+    fn a_save_of_the_places_named_settles_each_by_the_table() {
+        let (_dir, mut repo) = every_row();
+        let named = [
+            "art/notes.txt",
+            "art/x.png",
+            "fixed.txt",
+            "gone.png",
+            "gone.txt",
+            "half.txt",
+            "hero.png",
+        ]
+        .map(path);
+        let (root, conflicts) = saved_with(save_only(&mut repo, &named));
+        assert_eq!(conflicts, 4);
+        assert_every_row(repo.store(), root);
+        // `plain.txt` wasn't named: as it was.
+        assert_eq!(held_at(repo.store(), root, "plain.txt"), file(b"one"));
+    }
+
+    #[test]
+    fn an_amend_settles_each_place_by_the_table() {
+        let (_dir, mut repo) = every_row();
+        let (root, conflicts) = saved_with(amend_now(&mut repo));
+        assert_eq!(conflicts, 4);
+        assert_every_row(repo.store(), root);
+    }
+
+    #[test]
+    fn a_save_of_a_place_this_computer_cant_hold_carries_it() {
+        if !this_drive().ignores_case {
+            println!("Skipped: this drive holds names alike but for letter case as two files.");
+            return;
+        }
+        let (dir, mut repo) = with_versions();
+        let files: &[(&str, EntryKind, &[u8])] = &[
+            ("pic.png", EntryKind::File, PICTURE),
+            ("plain.txt", EntryKind::File, b"one"),
+        ];
+        let planted = plant_conflicted(&mut repo, files, &[("Pic.png", picture())]);
+        write(dir.path(), "pic.png", PICTURE);
+        write(dir.path(), "plain.txt", b"two");
+        let named = [path("Pic.png"), path("plain.txt")];
+        let (root, conflicts) = saved_with(save_only(&mut repo, &named));
+        assert_eq!(conflicts, 0);
+        let kept = entry_at(repo.store(), root, "Pic.png");
+        assert_eq!(kept, entry_at(repo.store(), planted, "Pic.png"));
+        assert_eq!(held_at(repo.store(), root, "plain.txt"), file(b"two"));
+    }
+
+    #[test]
+    fn a_conflict_standing_as_a_folder_gone_from_disk_stays_with_nothing_as_its_own() {
+        let (dir, mut repo) = with_versions();
+        let held = plant_save(&mut repo, &[("ui/a.txt", EntryKind::File, b"a")]);
+        let ui = versions(Some(folder_term(&held, "ui")));
+        let files: &[(&str, EntryKind, &[u8])] = &[("plain.txt", EntryKind::File, b"one")];
+        plant_conflicted(&mut repo, files, &[("ui", ui.clone())]);
+        write(dir.path(), "plain.txt", b"one");
+        let (root, conflicts) = saved_with(save_now(&mut repo));
+        assert_eq!(conflicts, 1);
+        assert_eq!(
+            held_at(repo.store(), root, "ui"),
+            Held::Conflict(owning(ui, None, 0))
+        );
+    }
+
+    /// Every place `every_row` holds, and conflicts standing as a folder holding one file
+    /// (`a.txt`): on disk untouched (`ui1`), on disk with the file changed (`uic`), gone from disk
+    /// (`uig`), and in folders gone from disk, alone (`art2/ui`) and beside a file
+    /// (`art3/ui`). The folder laid out as `every_row` lays it out. Gives the planted top listing.
+    fn every_place() -> (tempfile::TempDir, Repository, Id) {
+        let (dir, mut repo) = every_row();
+        let held = plant_save(&mut repo, &[("f/a.txt", EntryKind::File, b"a")]);
+        let stood = versions(Some(folder_term(&held, "f")));
+        let files: &[(&str, EntryKind, &[u8])] = &[
+            ("art3/other.txt", EntryKind::File, b"other"),
+            ("plain.txt", EntryKind::File, b"one"),
+        ];
+        let conflicts = [
+            ("art/notes.txt", marked()),
+            ("art/x.png", picture()),
+            ("art2/ui", stood.clone()),
+            ("art3/ui", stood.clone()),
+            ("fixed.txt", marked()),
+            ("gone.png", picture()),
+            ("gone.txt", marked()),
+            ("half.txt", marked()),
+            ("hero.png", picture()),
+            ("ui1", stood.clone()),
+            ("uic", stood.clone()),
+            ("uig", stood),
+        ];
+        let planted = plant_conflicted(&mut repo, files, &conflicts);
+        write(dir.path(), "ui1/a.txt", b"a");
+        write(dir.path(), "uic/a.txt", b"a, changed");
+        (dir, repo, planted)
+    }
+
+    const PLACES: [&str; 12] = [
+        "art/notes.txt",
+        "art/x.png",
+        "art2/ui",
+        "art3/ui",
+        "fixed.txt",
+        "gone.png",
+        "gone.txt",
+        "half.txt",
+        "hero.png",
+        "ui1",
+        "uic",
+        "uig",
+    ];
+
+    #[test]
+    fn a_save_of_some_paths_agrees_with_a_full_save_at_every_place_it_names() {
+        let (_dir, mut repo, _) = every_place();
+        let (full, _) = saved_with(save_now(&mut repo));
+        let whole: Vec<(&str, Held)> = PLACES
+            .iter()
+            .map(|p| (*p, held_at(repo.store(), full, p)))
+            .collect();
+        let mut cases: Vec<Vec<&str>> = PLACES.iter().map(|p| vec![*p]).collect();
+        // Below a place standing as a folder, its one file; the folder a place sits in; pairs,
+        // one of which empties a gone folder.
+        for below in [
+            "ui1/a.txt",
+            "uic/a.txt",
+            "uig/a.txt",
+            "art2/ui/a.txt",
+            "art3/ui/a.txt",
+        ] {
+            cases.push(vec![below]);
+        }
+        for folder in ["art", "art2", "art3"] {
+            cases.push(vec![folder]);
+        }
+        cases.push(vec!["art2/ui", "art3/ui"]);
+        cases.push(vec!["art3/ui", "art3/other.txt"]);
+        cases.push(vec!["art/notes.txt", "art/x.png"]);
+        cases.push(vec!["half.txt", "uig"]);
+        cases.push(vec!["art2/ui/a.txt", "hero.png"]);
+        for names in cases {
+            let (_dir, mut repo, planted) = every_place();
+            let given: Vec<Given> = names.iter().map(|n| path(n)).collect();
+            // Nothing to save leaves the save as it was.
+            let root = match save_only(&mut repo, &given).unwrap() {
+                SaveOutcome::Saved { save, .. } => save.root,
+                SaveOutcome::NothingChanged { .. } => planted,
+            };
+            let covers = |place: &str| {
+                names.iter().any(|n| {
+                    place == *n
+                        || place.starts_with(&format!("{n}/"))
+                        || n.starts_with(&format!("{place}/"))
+                })
+            };
+            for (place, full) in &whole {
+                let got = held_at(repo.store(), root, place);
+                if covers(place) {
+                    assert_eq!(&got, full, "{names:?}: {place}, as a full save");
+                } else {
+                    let was = held_at(repo.store(), planted, place);
+                    assert_eq!(got, was, "{names:?}: {place}, as it was");
+                }
+            }
+        }
+    }
+
+    /// A save recording `fixed` as fixed, of `only` when given.
+    fn saved_recording(
+        repo: &mut Repository,
+        fixed: &[&str],
+        only: Option<&[Given]>,
+    ) -> Result<SaveOutcome, SaveError> {
+        let who = who();
+        let req = SaveRequest {
+            message: Some("Fixed"),
+            who: &who,
+            command: "resolve",
+            accept_crlf: false,
+            git_excludes: None,
+            new_line: None,
+            only,
+            amend: false,
+        };
+        let recording = Recording {
+            fixed: fixed.iter().map(|p| (*p).to_owned()).collect(),
+            ..Recording::default()
+        };
+        save_recording(repo, &req, &recording, &mut |_| {}, &mut |_| true)
+    }
+
+    #[test]
+    fn a_place_recorded_as_fixed_with_nothing_there_holds_no_name_and_no_folder() {
+        // A new name clashing only with a place being recorded as fixed is saved.
+        let (dir, mut repo, _) = hero_in_conflict(picture());
+        write(dir.path(), "hero.png", b"another picture");
+        let (root, conflicts) = saved_with(saved_recording(&mut repo, &["Hero.png"], None));
+        assert_eq!(conflicts, 0);
+        assert_eq!(held_at(repo.store(), root, "Hero.png"), Held::Nothing);
+        assert_eq!(
+            held_at(repo.store(), root, "hero.png"),
+            file(b"another picture")
+        );
+        // A gone folder emptied by the fix isn't saved as an empty folder, whole or named.
+        for only in [None, Some(&[path("art/x.png")][..])] {
+            let (dir, mut repo) = with_versions();
+            let files: &[(&str, EntryKind, &[u8])] = &[("plain.txt", EntryKind::File, b"one")];
+            plant_conflicted(&mut repo, files, &[("art/x.png", picture())]);
+            write(dir.path(), "plain.txt", b"one");
+            let (root, conflicts) = saved_with(saved_recording(&mut repo, &["art/x.png"], only));
+            assert_eq!(conflicts, 0, "{only:?}");
+            assert_eq!(
+                held_at(repo.store(), root, "art"),
+                Held::Nothing,
+                "{only:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_named_place_below_a_spent_search_keeps_its_conflict() {
+        let (dir, mut repo) = with_versions();
+        let files: &[(&str, EntryKind, &[u8])] = &[("keep.txt", EntryKind::File, b"k")];
+        plant_conflicted(&mut repo, files, &[("a/b/c.png", picture())]);
+        write(dir.path(), "keep.txt", b"k");
+        // As in the spent search above: the walk never reads `a/b`, so never its record.
+        BASE_LIMITS.set(Some((crate::listing::MAX_SAVE_DEPTH, 3)));
+        let saved = save_only(&mut repo, &[path("a/b/c.png")]);
+        BASE_LIMITS.set(None);
+        let (root, conflicts) = saved_with(saved);
+        assert_eq!(conflicts, 1);
+        assert_eq!(
+            held_at(repo.store(), root, "a/b/c.png"),
+            Held::Conflict(owning(picture(), None, 0))
+        );
+    }
+
+    #[test]
+    fn a_renamed_marked_text_is_fixed_and_its_new_name_is_an_ordinary_file() {
+        let (dir, mut repo) = with_versions();
+        plant_conflicted(&mut repo, &[], &[("m.txt", marked())]);
+        write(dir.path(), "n.txt", MARKED);
+        let (root, conflicts) = saved_with(save_now(&mut repo));
+        assert_eq!(conflicts, 0);
+        assert_eq!(held_at(repo.store(), root, "m.txt"), Held::Nothing);
+        assert_eq!(held_at(repo.store(), root, "n.txt"), file(MARKED));
+    }
+
+    #[test]
+    fn a_renamed_picture_stays_in_conflict_with_nothing_as_its_own() {
+        let (dir, mut repo) = with_versions();
+        plant_conflicted(&mut repo, &[], &[("hero.png", picture())]);
+        write(dir.path(), "hero-2.png", PICTURE);
+        let (root, conflicts) = saved_with(save_now(&mut repo));
+        assert_eq!(conflicts, 1);
+        assert_eq!(
+            held_at(repo.store(), root, "hero.png"),
+            Held::Conflict(owning(picture(), None, 0))
+        );
+        assert_eq!(held_at(repo.store(), root, "hero-2.png"), file(PICTURE));
+    }
+
+    #[test]
+    fn a_marked_text_respelled_in_letter_case_is_fixed_as_a_rename_is() {
+        if !this_drive().ignores_case {
+            println!("Skipped: only a drive that ignores letter case respells a name in place.");
+            return;
+        }
+        let (dir, mut repo) = with_versions();
+        plant_conflicted(&mut repo, &[], &[("m.txt", marked())]);
+        write(dir.path(), "M.txt", MARKED);
+        let (root, conflicts) = saved_with(save_now(&mut repo));
+        assert_eq!(conflicts, 0);
+        assert_eq!(held_at(repo.store(), root, "m.txt"), Held::Nothing);
+        assert_eq!(held_at(repo.store(), root, "M.txt"), file(MARKED));
+    }
+
+    /// Saves, which must be refused for `hero.png` clashing with the conflict at `Hero.png`,
+    /// storing nothing.
+    fn refused_beside_hero(repo: &mut Repository) {
+        let head = repo.head().unwrap();
+        let e = save_now(repo).unwrap_err();
+        assert!(matches!(e, SaveError::NotPortable { .. }), "{e:?}");
+        let said = e.to_string();
+        assert!(
+            said.contains("\"hero.png\" and \"Hero.png\" differ only in upper/lower case"),
+            "{said}"
+        );
+        assert_eq!(
+            e.hint().as_deref(),
+            Some("Nothing was saved. Rename them, or list them in .opalroignore.")
+        );
+        assert_eq!(repo.head().unwrap(), head);
+    }
+
+    /// A project holding `plain.txt` and the conflict `record` at `Hero.png`, laid out on disk
+    /// without it.
+    fn hero_in_conflict(record: Record) -> (tempfile::TempDir, Repository, Id) {
+        let (dir, mut repo) = with_versions();
+        let files: &[(&str, EntryKind, &[u8])] = &[("plain.txt", EntryKind::File, b"one")];
+        let planted = plant_conflicted(&mut repo, files, &[("Hero.png", record)]);
+        write(dir.path(), "plain.txt", b"one");
+        (dir, repo, planted)
+    }
+
+    #[test]
+    fn a_picture_respelled_in_letter_case_is_refused_beside_its_conflict() {
+        if !this_drive().ignores_case {
+            println!("Skipped: only a drive that ignores letter case respells a name in place.");
+            return;
+        }
+        let (dir, mut repo, _) = hero_in_conflict(picture());
+        write(dir.path(), "hero.png", PICTURE);
+        refused_beside_hero(&mut repo);
+        // Spelled back, the save goes as before: untouched, nothing to save.
+        fs::rename(dir.path().join("hero.png"), dir.path().join("Hero.png")).unwrap();
+        nothing_saved(save_now(&mut repo));
+    }
+
+    #[test]
+    fn a_new_name_differing_from_a_conflict_kept_with_nothing_there_only_in_case_is_refused() {
+        // Removed, with another file at a name differing only in case: on a drive that ignores
+        // case this is a respelling, elsewhere two names.
+        let (dir, mut repo, _) = hero_in_conflict(picture());
+        write(dir.path(), "hero.png", b"another picture");
+        refused_beside_hero(&mut repo);
+        // Standing as nothing already, it holds its name all the same.
+        let (dir, mut repo, _) = hero_in_conflict(owning(picture(), None, 0));
+        write(dir.path(), "hero.png", b"another picture");
+        refused_beside_hero(&mut repo);
+    }
+
+    #[test]
+    fn a_new_name_that_doesnt_clash_is_saved_beside_a_conflict_kept_with_nothing_there() {
+        let (dir, mut repo, planted) = hero_in_conflict(owning(picture(), None, 0));
+        write(dir.path(), "villain.png", b"another picture");
+        let (root, conflicts) = saved_with(save_now(&mut repo));
+        assert_eq!(conflicts, 1);
+        let kept = entry_at(repo.store(), root, "Hero.png");
+        assert_eq!(kept, entry_at(repo.store(), planted, "Hero.png"));
+        assert_eq!(
+            held_at(repo.store(), root, "villain.png"),
+            file(b"another picture")
+        );
+    }
+
+    #[test]
+    fn a_conflicts_place_is_never_noted_as_a_move() {
+        let (dir, mut repo) = with_versions();
+        let root = dir.path();
+        let files: &[(&str, EntryKind, &[u8])] = &[
+            ("one.txt", EntryKind::File, b"first contents"),
+            ("p.txt", EntryKind::File, b"moved as a file"),
+            ("two.txt", EntryKind::File, b"second contents"),
+        ];
+        plant_conflicted(
+            &mut repo,
+            files,
+            &[("m.txt", marked()), ("n.txt", marked())],
+        );
+        // `one.txt` is fixed into `m.txt`, and `two.txt` into a folder at `n.txt`.
+        write(root, "m.txt", b"first contents");
+        write(root, "n.txt/inner.txt", b"second contents");
+        write(root, "q.txt", b"moved as a file");
+        let SaveOutcome::Saved { save, .. } = save_now(&mut repo).unwrap() else {
+            panic!("nothing was saved");
+        };
+        let moved = MoveNote {
+            from: "p.txt".into(),
+            to: "q.txt".into(),
+        };
+        assert_eq!(save.move_notes, [moved]);
+    }
+
+    /// The listings and records a save of the project at `root`, planted with `plant`, reads.
+    fn save_reads(plant: impl FnOnce(&mut Repository, &Path), without: bool) -> (usize, usize) {
+        let (dir, mut repo) = project();
+        plant(&mut repo, dir.path());
+        let mut repo = if without {
+            without_conflicts_feature(dir.path())
+        } else {
+            Repository::open(dir.path()).unwrap()
+        };
+        let before = (repo.store().listings_read(), repo.store().conflicts_read());
+        saved_root(save_now(&mut repo).unwrap());
+        (
+            repo.store().listings_read() - before.0,
+            repo.store().conflicts_read() - before.1,
+        )
+    }
+
+    #[test]
+    fn save_in_a_project_without_conflicts_reads_nothing_more() {
+        let paths: Vec<String> = (0..4)
+            .flat_map(|a| (0..3).map(move |b| format!("f{a}/g{b}/h/file{a}{b}.txt")))
+            .collect();
+        let paths = &paths;
+        let deep = "f1/g2/h/deep.png";
+        let lay_out = move |root: &Path, files: &[(&str, EntryKind, &[u8])]| {
+            for (p, _, b) in files {
+                write(root, p, b);
+            }
+            write(root, &paths[0], b"changed");
+        };
+        let same = || -> Vec<(&str, EntryKind, &[u8])> {
+            paths
+                .iter()
+                .map(|p| (p.as_str(), EntryKind::File, &b"same"[..]))
+                .collect()
+        };
+        let plain = |repo: &mut Repository, root: &Path| {
+            let mut files = same();
+            files.push((deep, EntryKind::File, PICTURE));
+            plant_save(repo, &files);
+            lay_out(root, &files);
+        };
+        let with = save_reads(plain, false);
+        let without = save_reads(plain, true);
+        assert_eq!(with, without);
+        assert_eq!(with.1, 0);
+        // New names are judged against the old ones without reading a record.
+        let new_names = |repo: &mut Repository, root: &Path| {
+            plain(repo, root);
+            write(root, "f1/g2/h/New.txt", b"new");
+            write(root, "fresh.txt", b"new");
+        };
+        let with_new = save_reads(new_names, false);
+        assert_eq!(with_new, save_reads(new_names, true));
+        assert_eq!(with_new.1, 0);
+        // One conflict, standing as a file: no more listings, and its record once.
+        let conflicted = |repo: &mut Repository, root: &Path| {
+            keep(repo, &[PICTURE, b"base", b"theirs"]);
+            let files = same();
+            plant_conflicted(repo, &files, &[(deep, picture())]);
+            let mut on_disk = files;
+            on_disk.push((deep, EntryKind::File, PICTURE));
+            lay_out(root, &on_disk);
+        };
+        assert_eq!(save_reads(conflicted, false), (with.0, 1));
+    }
+
+    /// How many records `status`, then `save`, keep a summary of, of the 300 a planted save names,
+    /// each of `width` versions; a record the save writes again is checked to keep every version.
+    fn kept_for(width: usize) -> Vec<usize> {
+        let (dir, mut repo) = with_versions();
+        let root = dir.path();
+        // Each its own record: a middle version no other names, never read.
+        let record = |i: usize| {
+            let mut terms = vec![None; width];
+            let mut id = [1u8; 32];
+            id[..8].copy_from_slice(&(i as u64).to_le_bytes());
+            terms[0] = Some(file_of(PICTURE));
+            terms[width / 2] = Some(Term {
+                kind: EntryKind::File,
+                id: Id(id),
+                size: 1,
+            });
+            terms[width - 1] = Some(file_of(b"theirs"));
+            Record { terms, own: None }
+        };
+        let names: Vec<String> = (0..300)
+            .map(|i| format!("d{}/c{i:03}.png", i % 3))
+            .collect();
+        let conflicts: Vec<(&str, Record)> = (names.iter().enumerate())
+            .map(|(i, n)| (n.as_str(), record(i)))
+            .collect();
+        let files: &[(&str, EntryKind, &[u8])] = &[("keep.txt", EntryKind::File, b"k")];
+        plant_conflicted(&mut repo, files, &conflicts);
+        // `d0` as the combine left it, `d1` gone from the folder, `d2` there with nothing in it.
+        write(root, "keep.txt", b"k");
+        for n in names.iter().filter(|n| n.starts_with("d0/")) {
+            write(root, n, PICTURE);
+        }
+        fs::create_dir_all(root.join("d2")).unwrap();
+        let before = repo.store().kept();
+        status(&repo, false, None).unwrap();
+        let after = repo.store().kept();
+        let (top, _) = saved_with(save_now(&mut repo));
+        let last = repo.store().kept();
+        // Written again with nothing in the folder there, read whole for it: every version kept.
+        for gone in ["d1/c001.png", "d2/c002.png"] {
+            let again = record_at(repo.store(), top, gone);
+            assert_eq!(again.terms, record(gone[4..7].parse().unwrap()).terms);
+            let own = Own {
+                version: None,
+                marker: 0,
+            };
+            assert_eq!(again.own, Some(own), "{gone}");
+        }
+        vec![after - before, last - after]
+    }
+
+    /// What a command keeps of a record is of a fixed size by its type (`conflict::Summary`);
+    /// this pins that each command keeps one per record, once, whatever the record's width, and
+    /// that writing one again keeps all of it.
+    #[test]
+    fn status_and_save_keep_one_summary_of_each_record_wide_or_narrow() {
+        assert_eq!(kept_for(3), [300, 300]);
+        assert_eq!(kept_for(255), [300, 300]);
+    }
+
+    #[test]
+    fn a_record_stored_under_another_id_than_its_folder_names_stops_the_save() {
+        assert!(stored_as_named(Id([1; 32]), Id([1; 32]), "a.png").is_ok());
+        let e = stored_as_named(Id([1; 32]), Id([2; 32]), "d/\u{1b}.png").unwrap_err();
+        assert!(
+            e.to_string()
+                .contains("written again at d/\\x1b.png isn't the one its folder names"),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn without_the_feature_save_replaces_a_planted_conflict_as_v01_does() {
+        let (dir, mut repo) = with_versions();
+        let root = dir.path();
+        let files: &[(&str, EntryKind, &[u8])] = &[("plain.txt", EntryKind::File, b"one")];
+        let conflicts = [
+            ("changed.png", picture()),
+            ("gone.png", versions(None)),
+            ("half.txt", marked()),
+            ("yours.png", picture()),
+        ];
+        plant_conflicted(&mut repo, files, &conflicts);
+        let mut repo = without_conflicts_feature(root);
+        write(root, "plain.txt", b"one");
+        write(root, "changed.png", b"painted over");
+        write(root, "half.txt", HALF);
+        write(root, "yours.png", PICTURE);
+        let (top, conflicts) = saved_with(save_now(&mut repo));
+        assert_eq!(conflicts, 0);
+        let tree = saved_tree(repo.store(), top);
+        let want = Tree::from([
+            (
+                "changed.png".into(),
+                (EntryKind::File, b"painted over".to_vec()),
+            ),
+            ("half.txt".into(), (EntryKind::File, HALF.to_vec())),
+            ("plain.txt".into(), (EntryKind::File, b"one".to_vec())),
+            ("yours.png".into(), (EntryKind::File, PICTURE.to_vec())),
+        ]);
+        assert_eq!(tree, want);
+    }
+
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn a_file_changed_between_the_walk_and_the_marker_check_stops_the_save() {
+        let (dir, mut repo) = with_versions();
+        plant_conflicted(&mut repo, &[], &[("m.txt", marked())]);
+        let m = dir.path().join("m.txt");
+        fs::write(&m, FIXED).unwrap();
+        let (head, packs) = (repo.head().unwrap(), pack_names(&repo));
+        crate::fsio::fault::act_at("save:settling", move || fs::write(&m, HALF).unwrap());
+        match save_now(&mut repo) {
+            Err(SaveError::ChangedDuringSave { path }) => assert_eq!(path, "m.txt"),
+            other => panic!("{:?}", other.map(|_| ())),
+        }
+        assert_eq!(repo.head().unwrap(), head);
+        assert_eq!(pack_names(&repo), packs);
+    }
+
+    #[cfg(feature = "fault-injection")]
+    #[test]
+    fn a_save_stopped_at_every_step_stores_nothing_named() {
+        use crate::fsio::fault;
+        for (stopped, n) in (1..).enumerate() {
+            assert!(n < 100, "the save never finished");
+            let (dir, mut repo) = with_versions();
+            let conflicts = [("half.txt", marked()), ("hero.png", picture())];
+            plant_conflicted(&mut repo, &[], &conflicts);
+            write(dir.path(), "half.txt", HALF);
+            write(dir.path(), "hero.png", b"painted over");
+            let head = repo.head().unwrap();
+            fault::arm(n);
+            let result = save_now(&mut repo);
+            fault::disarm();
+            if result.is_ok() {
+                assert!(stopped >= 3, "only {stopped} stops");
+                break;
+            }
+            // Nothing the project names changed, and the next save makes what this one would.
+            let mut repo = Repository::open(dir.path()).unwrap();
+            assert_eq!(repo.head().unwrap(), head, "fault {n}");
+            let (root, conflicts) = saved_with(save_now(&mut repo));
+            assert_eq!(conflicts, 2, "fault {n}");
+            let half = owning(marked(), Some(file_of(HALF)), 7);
+            assert_eq!(record_at(repo.store(), root, "half.txt"), half);
+            let hero = owning(picture(), Some(file_of(b"painted over")), 0);
+            assert_eq!(record_at(repo.store(), root, "hero.png"), hero);
+        }
     }
 }

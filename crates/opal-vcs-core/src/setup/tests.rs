@@ -108,7 +108,8 @@ fn head_entry(repo: &Repository) -> (Id, DiaryEntry) {
 fn held(repo: &Repository, save: Id, path: &str) -> Option<Id> {
     let root = repo.store().save(&save, false).unwrap().root;
     let unstored = HashMap::new();
-    let mut tree = Tree::new(repo.store(), &unstored, root, EXACT);
+    let stored = crate::conflict::Listings::stored(repo.store(), &unstored);
+    let mut tree = Tree::new(&stored, root, EXACT);
     tree.entry(path).unwrap().map(|e| e.id)
 }
 

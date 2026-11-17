@@ -1,0 +1,459 @@
+//! RT19 exploration: random two-line histories with moves, combined, checked by invariants.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+use std::collections::BTreeSet;
+
+mod support;
+use support::{Env, Files, files, saved_files, text};
+
+struct Rng(u64);
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+    fn below(&mut self, n: usize) -> usize {
+        (self.next() % n as u64) as usize
+    }
+}
+
+fn run(env: &Env, args: &[&str]) -> (i32, String) {
+    let out = env.opalro().args(args).output().unwrap();
+    (
+        out.status.code().unwrap_or(-1),
+        format!("{}{}", text(&out.stdout), text(&out.stderr)),
+    )
+}
+
+fn ok(env: &Env, args: &[&str]) {
+    let (code, said) = run(env, args);
+    assert_eq!(code, 0, "{args:?}: {said}");
+}
+
+struct Ctx {
+    next_id: usize,
+    next_tok: usize,
+    next_path: usize,
+}
+
+fn lines(b: &[u8]) -> Vec<String> {
+    String::from_utf8_lossy(b)
+        .lines()
+        .map(str::to_owned)
+        .collect()
+}
+
+/// One save of random operations on the working folder. `ever` holds every path that held a
+/// file on this line (start included).
+fn one_save(
+    env: &Env,
+    rng: &mut Rng,
+    ctx: &mut Ctx,
+    ever: &mut BTreeSet<String>,
+    label: &str,
+    starts: &BTreeSet<String>,
+) {
+    let now = files(env.root());
+    let mut touched: BTreeSet<String> = BTreeSet::new();
+    let mut freed: BTreeSet<String> = BTreeSet::new();
+    let ops = 1 + rng.below(3);
+    let mut did = 0;
+    for _ in 0..ops {
+        let paths: Vec<String> = now
+            .keys()
+            .filter(|p| !touched.contains(*p))
+            .cloned()
+            .collect();
+        let kind = rng.below(20);
+        if paths.is_empty() || kind >= 18 {
+            // create
+            let id = ctx.next_id;
+            ctx.next_id += 1;
+            let p = fresh(rng, ctx);
+            if ever.contains(&p)
+                || touched.contains(&p)
+                || !room(&now, &p)
+                || !fs_room(env, &p)
+            {
+                continue;
+            }
+            let mut body = format!("ID{id}\n");
+            for k in 0..20 {
+                body += &format!("ID{id}:L{k}\n");
+            }
+            support::write(env, &p, body);
+            ever.insert(p.clone());
+            touched.insert(p);
+            did += 1;
+            continue;
+        }
+        let p = paths[rng.below(paths.len())].clone();
+        let full = env.root().join(&p);
+        match kind {
+            0..=9 => {
+                let mut ls = lines(&now[&p]);
+                let id = ls[0].clone();
+                let tok = ctx.next_tok;
+                ctx.next_tok += 1;
+                let new = format!("{id}:{label}{tok}");
+                // Each line edits its own half of a file, so that fewer combines conflict.
+                let half = ls.len() / 2;
+                let at = if label == "T" {
+                    1 + rng.below(half.max(1))
+                } else {
+                    half + 2 + rng.below((ls.len() - half).max(1))
+                }
+                .min(ls.len());
+                match rng.below(3) {
+                    0 if at < ls.len() => ls[at] = new,
+                    1 if at < ls.len() && ls.len() > 2 => {
+                        ls.remove(at);
+                    }
+                    _ => ls.insert(at, new),
+                }
+                let body: String = ls.iter().map(|l| format!("{l}\n")).collect();
+                std::fs::write(&full, body).unwrap();
+            }
+            10..=16 => {
+                // move: to a fresh path, or onto a path that held a file earlier on this line
+                // and is empty now (freed in an earlier save).
+                let candidates: Vec<String> = ever
+                    .iter()
+                    .filter(|q| {
+                        !now.contains_key(*q)
+                            && !starts.contains(*q)
+                            && !freed.contains(*q)
+                            && !touched.contains(*q)
+                            && room(&now, q)
+                    })
+                    .cloned()
+                    .collect();
+                let to = if !candidates.is_empty() && rng.below(2) == 0 {
+                    candidates[rng.below(candidates.len())].clone()
+                } else {
+                    let q = fresh(rng, ctx);
+                    if ever.contains(&q) || !room(&now, &q) || touched.contains(&q) {
+                        continue;
+                    }
+                    q
+                };
+                let dest = env.root().join(&to);
+                if !fs_room(env, &to) {
+                    continue;
+                }
+                std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+                std::fs::rename(&full, &dest).unwrap();
+                ever.insert(to.clone());
+                touched.insert(to);
+                freed.insert(p.clone());
+            }
+            _ => {
+                std::fs::remove_file(&full).unwrap();
+                freed.insert(p.clone());
+            }
+        }
+        touched.insert(p);
+        did += 1;
+    }
+    if did == 0 {
+        return;
+    }
+    let (code, said) = run(env, &["save", "s"]);
+    assert!(
+        code == 0 || said.contains("othing to save") || said.contains("o changes"),
+        "{said}"
+    );
+}
+
+/// No file at any folder above `q`, and nothing at `q`, in the folder now and as saved.
+fn room(now: &Files, q: &str) -> bool {
+    let mut up = q;
+    while let Some((a, _)) = up.rsplit_once('/') {
+        if now.contains_key(a) {
+            return false;
+        }
+        up = a;
+    }
+    !now.keys().any(|k| k.starts_with(&format!("{q}/")))
+}
+
+fn fs_room(env: &Env, q: &str) -> bool {
+    let mut up = q;
+    while let Some((a, _)) = up.rsplit_once('/') {
+        if env.root().join(a).is_file() {
+            return false;
+        }
+        up = a;
+    }
+    !env.root().join(q).exists()
+}
+
+fn fresh(rng: &mut Rng, ctx: &mut Ctx) -> String {
+    ctx.next_path += 1;
+    let n = ctx.next_path % 9;
+    match rng.below(4) {
+        0 => format!("p{n}"),
+        1 => format!("d{}/p{n}", rng.below(2)),
+        2 => format!("d{}/e/p{n}", rng.below(2)),
+        _ => format!("q{}", rng.below(6)),
+    }
+}
+
+fn all_lines(f: &Files) -> BTreeSet<String> {
+    f.values().flat_map(|b| lines(b)).collect()
+}
+
+fn check(seed: u64, s: &Files, o: &Files, t: &Files, r: &Files) -> Vec<String> {
+    let mut bad = Vec::new();
+    let id_at = |f: &Files, p: &str| f.get(p).map(|b| lines(b)[0].clone());
+    for (p, b) in r {
+        let ls = lines(b);
+        let id = &ls[0];
+        for l in &ls[1..] {
+            if !l.starts_with(&format!("{id}:")) {
+                bad.push(format!("seed {seed}: {p} ({id}) holds line {l} of another file"));
+            }
+        }
+        if id_at(o, p).as_ref() != Some(id) && id_at(t, p).as_ref() != Some(id) {
+            bad.push(format!(
+                "seed {seed}: {p} holds {id}, ours has {:?}, theirs {:?}",
+                id_at(o, p),
+                id_at(t, p)
+            ));
+        }
+    }
+    let (sl, ol, tl, rl) = (all_lines(s), all_lines(o), all_lines(t), all_lines(r));
+    for l in ol.union(&tl) {
+        if !sl.contains(l) && !rl.contains(l) {
+            bad.push(format!("seed {seed}: added line {l} lost"));
+        }
+    }
+    for l in &sl {
+        if (!ol.contains(l) || !tl.contains(l)) && rl.contains(l) {
+            bad.push(format!("seed {seed}: removed line {l} came back"));
+        }
+    }
+    bad
+}
+
+fn dirs(dir: &std::path::Path) -> BTreeSet<String> {
+    let mut found = BTreeSet::new();
+    let mut todo = vec![(dir.to_path_buf(), String::new())];
+    while let Some((at, rel)) = todo.pop() {
+        for e in std::fs::read_dir(&at).unwrap() {
+            let e = e.unwrap();
+            let name = e.file_name().to_string_lossy().into_owned();
+            if rel.is_empty() && name == ".opalro" {
+                continue;
+            }
+            let path = if rel.is_empty() {
+                name
+            } else {
+                format!("{rel}/{name}")
+            };
+            if e.file_type().unwrap().is_dir() {
+                found.insert(path.clone());
+                todo.push((e.path(), path));
+            }
+        }
+    }
+    found
+}
+
+fn saved_dirs(env: &Env, save: opal_core::id::Id) -> BTreeSet<String> {
+    use opal_core::listing::EntryKind;
+    let repo = opal_core::repo::Repository::open(env.root()).unwrap();
+    let store = repo.store();
+    let mut found = BTreeSet::new();
+    let mut todo = vec![(store.save(&save, false).unwrap().root, String::new())];
+    while let Some((id, rel)) = todo.pop() {
+        for e in store.listing(&id).unwrap().entries() {
+            let path = if rel.is_empty() {
+                e.name.clone()
+            } else {
+                format!("{rel}/{}", e.name)
+            };
+            if e.kind == EntryKind::Folder {
+                found.insert(path.clone());
+                todo.push((e.id, path));
+            }
+        }
+    }
+    found
+}
+
+fn show(f: &Files) -> Vec<String> {
+    f.iter()
+        .map(|(p, b)| format!("{p}={}", lines(b).join("|")))
+        .collect()
+}
+
+/// Combines `target` into the line the project is on and checks what came of it.
+#[allow(clippy::too_many_arguments)]
+fn combine_and_check(
+    env: &Env,
+    seed: u64,
+    phase: &str,
+    s: &Files,
+    t: &Files,
+    target: &str,
+    line: &str,
+    problems: &mut Vec<String>,
+) -> Option<Files> {
+    let o = files(env.root());
+    let o_dirs = dirs(env.root());
+    let before = env.state().1.lines[line];
+    let standing = env.standing().1;
+    let (code, said) = run(env, &["combine", target]);
+    let r = files(env.root());
+    if code != 0 {
+        for l in said.lines().filter(|l| l.starts_with("  ")) {
+            eprintln!("REFUSED {phase} {seed}:{l}");
+        }
+        if r != o || env.state().1.lines[line] != before || dirs(env.root()) != o_dirs {
+            problems.push(format!("{phase} seed {seed}: refused combine changed things: {said}"));
+        }
+        if env.standing().1 != standing {
+            problems.push(format!("{phase} seed {seed}: refused combine stored a pack"));
+        }
+        let tmp = env.root().join(".opalro/tmp");
+        if tmp.exists() && std::fs::read_dir(&tmp).unwrap().count() > 0 {
+            problems.push(format!("{phase} seed {seed}: refused combine left .opalro/tmp"));
+        }
+        if !said.contains("conflict") && !said.contains("clash") {
+            problems.push(format!("{phase} seed {seed}: refused oddly: {said}"));
+        }
+        return None;
+    }
+    let tip = env.state().1.lines[line];
+    if saved_files(env, tip) != r {
+        problems.push(format!("{phase} seed {seed}: folder differs from the save"));
+    }
+    let (d, sd) = (dirs(env.root()), saved_dirs(env, tip));
+    if d != sd {
+        problems.push(format!(
+            "{phase} seed {seed}: folders differ from the save: on disk {d:?}, saved {sd:?}"
+        ));
+    }
+    let found = check(seed, s, &o, t, &r);
+    if !found.is_empty() {
+        eprintln!(
+            "{phase} seed {seed}\n S {:?}\n O {:?}\n T {:?}\n R {:?}\n{said}",
+            show(s),
+            show(&o),
+            show(t),
+            show(&r)
+        );
+    }
+    problems.extend(found.into_iter().map(|f| format!("{phase} {f}")));
+    // Undo takes it back, folders included, and redo brings it again.
+    let (code, said) = run(env, &["undo"]);
+    if code != 0 || files(env.root()) != o || env.state().1.lines[line] != before {
+        problems.push(format!("{phase} seed {seed}: undo didn't take it back: {said}"));
+    }
+    if dirs(env.root()) != o_dirs {
+        problems.push(format!(
+            "{phase} seed {seed}: undo left folders {:?}, before {:?}",
+            dirs(env.root()),
+            o_dirs
+        ));
+    }
+    let (code, said) = run(env, &["redo"]);
+    if code != 0 || files(env.root()) != r || env.state().1.lines[line] != tip {
+        problems.push(format!("{phase} seed {seed}: redo didn't bring it back: {said}"));
+    }
+    Some(r)
+}
+
+fn new_file(env: &Env, ctx: &mut Ctx, p: &str) {
+    let id = ctx.next_id;
+    ctx.next_id += 1;
+    let mut body = format!("ID{id}\n");
+    for k in 0..20 {
+        body += &format!("ID{id}:L{k}\n");
+    }
+    support::write(env, p, body);
+}
+
+#[test]
+fn rt19_random_combines() {
+    let var = |name: &str, or: u64| {
+        std::env::var(name)
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(or)
+    };
+    let (from, count) = (var("RT19_FROM", 1), var("RT19_COUNT", 20));
+    let mut problems = Vec::new();
+    let (mut made, mut second) = (0, 0);
+    for seed in from..from + count {
+        let mut rng = Rng(seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) | 1);
+        let env = Env::empty();
+        ok(&env, &["start", "--preset", "custom"]);
+        let mut ctx = Ctx {
+            next_id: 0,
+            next_tok: 0,
+            next_path: 0,
+        };
+        let mut start_paths = BTreeSet::new();
+        for p in ["a", "b", "c/x", "c/y", "f/g/h"] {
+            new_file(&env, &mut ctx, p);
+            start_paths.insert(p.to_owned());
+        }
+        ok(&env, &["save", "start"]);
+        let s = files(env.root());
+        ctx.next_id = 100;
+        ok(&env, &["line", "new", "side"]);
+        let mut ever_t = start_paths.clone();
+        for _ in 0..1 + rng.below(4) {
+            one_save(&env, &mut rng, &mut ctx, &mut ever_t, "T", &start_paths);
+        }
+        let t = files(env.root());
+        let t_tip = env.state().1.lines["side"];
+        ok(&env, &["goto", "main"]);
+        ctx.next_id = 200;
+        let mut ever_o = start_paths.clone();
+        for _ in 0..1 + rng.below(4) {
+            one_save(&env, &mut rng, &mut ctx, &mut ever_o, "O", &start_paths);
+        }
+        let o_tip = env.state().1.lines["main"];
+        let o_files = files(env.root());
+        let Some(r) = combine_and_check(&env, seed, "one", &s, &t, "side", "main", &mut problems)
+        else {
+            continue;
+        };
+        made += 1;
+        // The criss-cross: side combines main's old save too, then both go on.
+        ok(&env, &["goto", "side"]);
+        let o_hex = o_tip.to_hex();
+        let Some(r2) = combine_and_check(&env, seed, "cross", &s, &o_files, &o_hex, "side", &mut problems) else {
+            continue;
+        };
+        if r2 != r {
+            problems.push(format!("cross seed {seed}: the two combines of the same saves differ"));
+        }
+        let _ = t_tip;
+        ctx.next_id = 300;
+        // `ever` keeps both lines' paths, so that the starting point's paths aren't moved onto.
+        let mut starts2: BTreeSet<String> = r.keys().cloned().collect();
+        starts2.extend(start_paths.iter().cloned());
+        let mut ever = ever_t.union(&ever_o).cloned().collect();
+        for _ in 0..1 + rng.below(3) {
+            one_save(&env, &mut rng, &mut ctx, &mut ever, "T", &starts2);
+        }
+        let t2 = files(env.root());
+        ok(&env, &["goto", "main"]);
+        ctx.next_id = 400;
+        let mut ever = ever_t.union(&ever_o).cloned().collect();
+        for _ in 0..1 + rng.below(3) {
+            one_save(&env, &mut rng, &mut ctx, &mut ever, "O", &starts2);
+        }
+        if combine_and_check(&env, seed, "two", &r, &t2, "side", "main", &mut problems).is_some() {
+            second += 1;
+        }
+    }
+    eprintln!("made {made}, second {second}");
+    assert!(problems.is_empty(), "{problems:#?}");
+}

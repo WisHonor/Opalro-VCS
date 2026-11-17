@@ -46,11 +46,11 @@ fn warning_kinds(doc: &serde_json::Value) -> Vec<&str> {
 }
 
 #[test]
-fn version_is_0_1_0() {
+fn the_version_printed_is_the_package_version() {
     let env = Env::new();
     let out = env.opalro().arg("--version").output().unwrap();
     assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
-    assert_eq!(text(&out.stdout), "opalro 0.1.0\n");
+    assert_eq!(text(&out.stdout), "opalro 0.2.0\n");
 }
 
 #[test]
@@ -629,6 +629,9 @@ fn start_json_output() {
     let save = &mut json["save"];
     for key in ["id", "change_id", "change_id_short"] {
         redact(&mut save[key]);
+    }
+    for parent in save["parents"].as_array_mut().unwrap() {
+        redact(parent);
     }
     for person in ["author", "saver"] {
         for key in ["time_ms", "tz_offset_min"] {
@@ -1260,6 +1263,9 @@ fn save_json_output() {
     for key in ["id", "change_id", "change_id_short"] {
         redact(&mut save[key]);
     }
+    for parent in save["parents"].as_array_mut().unwrap() {
+        redact(parent);
+    }
     for person in ["author", "saver"] {
         for key in ["time_ms", "tz_offset_min"] {
             redact(&mut save[person][key]);
@@ -1321,6 +1327,9 @@ fn interrupted_save_changes_nothing_until_its_head_moves() {
 fn redact_save(save: &mut serde_json::Value) {
     for key in ["id", "change_id", "change_id_short"] {
         save[key] = "[redacted]".into();
+    }
+    for parent in save["parents"].as_array_mut().unwrap() {
+        *parent = "[redacted]".into();
     }
     for person in ["author", "saver"] {
         for key in ["time_ms", "tz_offset_min"] {
@@ -1471,21 +1480,24 @@ fn show_with_no_file_changes() {
     assert!(stdout_of(&env, &["show"]).ends_with("\n\nNo files changed.\n"));
 }
 
-/// The 12 hex digits `opalro show` names after `After`, the first parent's first.
+/// The 12 hex digits `opalro show` names after `After` and on the `Combined` rows under it, the
+/// first parent's first.
 fn after(env: &Env, what: &[&str]) -> Vec<String> {
     let out = stdout_of(env, &[&["show"], what].concat());
-    let line = out.lines().find(|l| l.starts_with("    After ")).unwrap();
-    line.split_whitespace()
-        .map(|w| w.trim_end_matches(','))
-        .filter(|w| w.len() == 12 && w.bytes().all(|b| b.is_ascii_hexdigit()))
+    (out.lines())
+        .skip_while(|l| !l.starts_with("    After "))
+        .take_while(|l| !l.starts_with("    Fingerprint "))
+        .filter_map(|l| l.split_whitespace().find(|w| w.len() == 12))
+        .filter(|w| w.bytes().all(|b| b.is_ascii_hexdigit()))
         .map(str::to_owned)
         .collect()
 }
 
-/// `opalro show` takes back the fingerprints it names after `After` where a line's history reaches
-/// that save, and only then: a merge's other parent, or the parent of a save past every line.
+/// `opalro show` takes back the fingerprints it names after `After` and on its `Combined` rows,
+/// wherever a line's history or the save the project is at reaches that save through any parent:
+/// a merge's other parent whose branch is gone, or the parent of a save past every line.
 #[test]
-fn show_takes_back_the_fingerprints_it_names_where_a_lines_history_reaches_them() {
+fn show_takes_back_the_fingerprints_it_names_through_every_parent_and_from_a_detached_save() {
     for keep_the_branch in [true, false] {
         let env = Env(support::Env::new());
         env.commit("a.txt", "a\n", "First");
@@ -1502,11 +1514,16 @@ fn show_takes_back_the_fingerprints_it_names_where_a_lines_history_reaches_them(
         assert_eq!(parents.len(), 2, "{parents:?}");
         assert_eq!(after(&env, &[&parents[0]]).len(), 1);
         let out = env.opalro().args(["show", &parents[1]]).output().unwrap();
-        let taken_back = out.status.code() == Some(0);
-        assert_eq!(taken_back, keep_the_branch, "{}", text(&out.stderr));
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        let heading = text(&out.stdout)
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .to_owned();
+        assert!(heading.ends_with(" \"Side\""), "{heading}");
     }
-    // A detached Git HEAD two commits past main: Opalro is at its save, whose parent no line's
-    // history reaches, so the digits `show` names for it aren't taken back.
+    // A detached Git HEAD two commits past main: Opalro is at its save, whose parent only that
+    // save reaches, and the digits `show` names for it are taken back from there.
     let env = Env(support::Env::new());
     env.commit("a.txt", "a\n", "A");
     env.git(&["checkout", "-q", "--detach"]);
@@ -1516,7 +1533,13 @@ fn show_takes_back_the_fingerprints_it_names_where_a_lines_history_reaches_them(
     let b = &after(&env, &[])[0];
     assert!(stdout_of(&env, &["show"]).contains("\"B\""));
     let out = env.opalro().args(["show", b]).output().unwrap();
-    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let heading = text(&out.stdout)
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .to_owned();
+    assert!(heading.ends_with(" \"B\""), "{heading}");
     // A save made on a new line from an older one: its parent is on main's history.
     let env = project_with_two_saves();
     let history: serde_json::Value =
@@ -2577,6 +2600,31 @@ fn paths_are_relative_to_the_current_folder() {
     assert_eq!(saved(&["save", "F"]), serde_json::json!([]));
 }
 
+#[test]
+fn a_save_of_the_last_place_in_a_deleted_folder_takes_the_folder_with_it() {
+    let env = Env::new();
+    env.opalro()
+        .args(["start", "--preset", "custom"])
+        .assert()
+        .success();
+    support::write(&env, "d/e/b", "b");
+    env.opalro().args(["save", "First"]).assert().success();
+    std::fs::remove_dir_all(env.root().join("d")).unwrap();
+    env.opalro()
+        .args(["save", "Only", "d/e"])
+        .assert()
+        .success();
+    // No empty `d` that the person never had: nothing of it is in the save, nothing shows as
+    // changed, a later save has nothing to save, and the folder is what a goto there gives.
+    let paths = support::saved_paths(&env, main_tip(&env));
+    let in_d = |p: &&String| *p == "d" || p.starts_with("d/");
+    assert_eq!(paths.keys().find(in_d), None, "{paths:?}");
+    assert_eq!(support::changed(&env), Vec::<String>::new());
+    let out = stdout_of(&env, &["save", "Again"]);
+    assert!(out.starts_with("Nothing to save: "), "{out}");
+    support::assert_folder_is_goto_of(&env, main_tip(&env));
+}
+
 /// `opalro <args>` in `env`'s folder with its stdout a pipe whose reader has gone before the command
 /// starts: how it ended, and what it said on stderr.
 fn with_reader_gone(env: &support::Env, args: &[&str]) -> (Option<i32>, String) {
@@ -2867,7 +2915,7 @@ fn a_command_that_did_its_work_but_couldnt_print_says_so() {
 }
 
 /// Every command, and the options each takes besides `--json` and `--help`.
-const COMMANDS: [(&str, &[&str]); 17] = [
+const COMMANDS: [(&str, &[&str]); 21] = [
     ("status", &["--full"]),
     ("save", &["--accept-crlf", "--line", "--yes", "--amend"]),
     ("changes", &["--save"]),
@@ -2876,12 +2924,19 @@ const COMMANDS: [(&str, &[&str]); 17] = [
     ("undo", &["--shelve", "--list", "--all", "--to"]),
     ("redo", &["--shelve"]),
     ("line", &[]),
+    ("tag", &["--save", "--delete", "--yes"]),
+    ("combine", &["--only-if-clean"]),
+    (
+        "resolve",
+        &["--keep", "--copy", "--to", "--yes", "--accept-crlf"],
+    ),
     ("shelf", &["--list"]),
     ("unshelf", &[]),
     ("discard", &[]),
     ("show", &[]),
+    ("who", &["--save"]),
     ("start", &["--preset"]),
-    ("setup", &["--preset", "--yes"]),
+    ("setup", &["--preset", "--upgrade", "--yes"]),
     ("import", &[]),
     ("tidy", &[]),
     ("verify", &[]),
@@ -2989,6 +3044,7 @@ fn the_overview_lists_every_command_once_and_no_git_word() {
         "rebase",
         "cherry-pick",
         "blame",
+        "annotate",
         "clone",
         "fetch",
         "pull",
@@ -3020,10 +3076,11 @@ fn each_commands_help_leads_with_examples_then_usage_then_options() {
         let titles: Vec<&str> = lines
             .iter()
             .copied()
-            .filter(|l| ["Examples", "Usage", "Arguments", "Options"].contains(l))
+            .filter(|l| ["Examples", "Usage", "Forms", "Arguments", "Options"].contains(l))
             .collect();
         assert!(
             titles == ["Examples", "Usage", "Options"]
+                || titles == ["Examples", "Usage", "Forms", "Options"]
                 || titles == ["Examples", "Usage", "Arguments", "Options"],
             "{help}"
         );
@@ -3070,6 +3127,17 @@ fn help_lists_only_options_the_command_takes() {
             assert!(!help.contains(invented), "{invented} in {command}:\n{help}");
         }
     }
+}
+
+#[test]
+fn combine_help_says_what_only_if_clean_does() {
+    let help = help_of("combine");
+    let options = section(&help, "Options");
+    assert!(
+        options.iter().any(|l| l.trim_start()
+            == "--only-if-clean  Stop and change nothing if the combine would leave a conflict"),
+        "{help}"
+    );
 }
 
 /// `help` is no command of Opalro's to have a page: asking for its help shows the overview.

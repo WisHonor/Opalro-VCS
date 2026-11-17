@@ -1,0 +1,43 @@
+   Compiling opal-vcs v0.1.0 (/work/crates/opal-vcs)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 7.21s
+     Running tests/rt22_paths.rs (target/debug/deps/rt22_paths-fa5fe3522fd7d2ec)
+
+running 1 test
+in "" ["resolve", "art/"]: exit 0, pic recorded: false
+  Recorded 1 fix in save qlxl "Combine side into main" on main.
+in "" ["resolve", "./art"]: exit 0, pic recorded: false
+  Recorded 1 fix in save qlxl "Combine side into main" on main.
+in "" ["resolve", "art/."]: exit 0, pic recorded: false
+  Recorded 1 fix in save qlxl "Combine side into main" on main.
+in "" ["resolve", "art/../art"]: exit 0, pic recorded: false
+  Recorded 1 fix in save qlxl "Combine side into main" on main.
+in "" ["resolve", "art//"]: exit 0, pic recorded: false
+  Recorded 1 fix in save qlxl "Combine side into main" on main.
+in "" ["resolve", "art", "--yes"]: exit 0, pic recorded: false
+  Recorded 1 fix in save qlxl "Combine side into main" on main.
+in "" ["resolve", "art", "--json"]: exit 0, pic recorded: false
+  {"conflict_count":2,"conflicts":[{"path":"a.txt","places_left":null,"standing":"fixed","terms":3},{"path":"art/pic.png","places_left":null,"standing":"changed","terms":3}],"more_conflicts":0,"opalro_json":1,"recorded":["art/b.txt"],"removed":0,"replaced":"bd8151b0b4922366b646300cf085224cecfc15c56488de63489335f2c2b2977d","result":"recorded","safety_copies":0,"save":{"author":{"email":"test@example.com","name":"Test","time_ms":1794778210007,"tz_offset_min":0},"change_id":"qlxlmlltrqqqrsyzyowrlzypztwywoxr","change_id_short":"qlxl","id":"6b9bdf456246a5e33b87e0f857a0fdf89057b155058b57ee7ffcbaa1ee6268b0","line":"main","message":"Combine side into main","parents":["ec3081ccaa71a21798f698a2edb6cd340b96c802537803673f5821bef1a43421","6ef542ada2813cf358defe0c14a82831808f1acbd26bf8f24076846e79f4cbba"],"saver":{"email":"test@example.com","name":"Test","time_ms":1794778212129,"tz_offset_min":0}},"warnings":[],"written":0}
+in "" ["resolve", "art", "a.txt"]: exit 0, pic recorded: false
+  Recorded 2 fixes in save qlxl "Combine side into main" on main.
+in "" ["resolve", "art/*"]: exit 0, pic recorded: false
+  Recorded 1 fix in save qlxl "Combine side into main" on main.
+in "" ["resolve", "*"]: exit 0, pic recorded: false
+  Recorded 2 fixes in save qlxl "Combine side into main" on main.
+in "" ["resolve", "**"]: exit 0, pic recorded: false
+  Recorded 2 fixes in save qlxl "Combine side into main" on main.
+in "" ["resolve", "art/p*"]: exit 0, pic recorded: false
+  Nothing to record: no place in conflict is fixed in your folder.
+in "" ["resolve", "art/pic.png/.."]: exit 0, pic recorded: false
+  Recorded 1 fix in save qlxl "Combine side into main" on main.
+in "art" ["resolve", "."]: exit 0, pic recorded: false
+  Recorded 1 fix in save qlxl "Combine side into main" on main.
+in "art" ["resolve", ".."]: exit 0, pic recorded: false
+  Recorded 2 fixes in save qlxl "Combine side into main" on main.
+in "art" ["resolve", "../art"]: exit 0, pic recorded: false
+  Recorded 1 fix in save qlxl "Combine side into main" on main.
+in "art" ["resolve", "*"]: exit 0, pic recorded: false
+  Recorded 1 fix in save qlxl "Combine side into main" on main.
+test rt22_folder_paths_in_every_spelling ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 6.57s
+

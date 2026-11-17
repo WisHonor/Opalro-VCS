@@ -9,6 +9,7 @@ use std::sync::Arc;
 
 use opal_platform::dir::Dir;
 
+use crate::conflict::{Record, Term};
 use crate::diary::{DiaryEntry, ServerLines, TagList};
 use crate::encoding::DecodeError;
 use crate::id::Id;
@@ -19,7 +20,7 @@ use crate::repo::{RepoError, Repository, head_entry};
 use crate::save::Save;
 use crate::store::{Store, is_damage};
 use crate::text::{escape, thousands};
-use crate::tidy::{self, Noted, Source, Unread};
+use crate::tidy::{self, Noted, Shape, Source, Unread};
 use crate::warning::{self, Warning};
 use crate::writeout;
 
@@ -32,6 +33,7 @@ pub enum ProblemKind {
     ObjectMissing,
     HeadLost,
     SaveTooBig,
+    NestedConflict,
 }
 
 impl ProblemKind {
@@ -45,6 +47,7 @@ impl ProblemKind {
             ProblemKind::ObjectMissing => "object_missing",
             ProblemKind::HeadLost => "head_lost",
             ProblemKind::SaveTooBig => "save_too_big",
+            ProblemKind::NestedConflict => "nested_conflict",
         }
     }
 }
@@ -88,6 +91,7 @@ pub struct Verified {
     pub object_missing: u64,
     pub head_lost: u64,
     pub save_too_big: u64,
+    pub nested_conflict: u64,
     pub problems: Vec<Problem>,
     /// Objects that failed when the packs were read back, their own check.
     pub objects_failed: u64,
@@ -119,6 +123,7 @@ impl Verified {
             ProblemKind::ObjectMissing => &mut self.object_missing,
             ProblemKind::HeadLost => &mut self.head_lost,
             ProblemKind::SaveTooBig => &mut self.save_too_big,
+            ProblemKind::NestedConflict => &mut self.nested_conflict,
         };
         *count = count.saturating_add(n);
     }
@@ -133,6 +138,7 @@ impl Verified {
             ProblemKind::ObjectMissing => self.object_missing,
             ProblemKind::HeadLost => self.head_lost,
             ProblemKind::SaveTooBig => self.save_too_big,
+            ProblemKind::NestedConflict => self.nested_conflict,
         }
     }
 }
@@ -151,14 +157,11 @@ pub fn verify(
     let mut v = Verified::default();
     v.warnings.extend(writeout::unfinished_warning(repo));
     let (folder, packs_dir) = (repo.packs_folder(), repo.packs_dir());
-    let told = check_packs(
-        folder,
-        packs_dir,
-        repo.signatures_allowed(),
-        true,
-        &mut v,
-        progress,
-    );
+    let how = Decode {
+        signed: repo.signatures_allowed(),
+        conflicts: repo.keeps_conflicts(),
+    };
+    let told = check_packs(folder, packs_dir, how, true, &mut v, progress);
     // A problem with what the project needs is told only when two looks agree on it: a merge or
     // a tidy beside this one writes its new packs before it removes an old one, and a save its
     // packs before it moves `head`.
@@ -211,10 +214,14 @@ pub fn verify_store(packs_dir: &Path) -> VerifyReport {
     let mut v = Verified::default();
     match Dir::open_top(packs_dir) {
         Ok(folder) => {
+            let how = Decode {
+                signed: true,
+                conflicts: true,
+            };
             check_packs(
                 &Arc::new(folder),
                 packs_dir,
-                true,
+                how,
                 false,
                 &mut v,
                 &mut |_, _| {},
@@ -248,7 +255,7 @@ pub fn verify_store(packs_dir: &Path) -> VerifyReport {
 fn check_packs(
     folder: &Arc<Dir>,
     packs_dir: &Path,
-    signed: bool,
+    how: Decode,
     skip_missing_chunks: bool,
     v: &mut Verified,
     progress: &mut dyn FnMut(u64, u64),
@@ -290,7 +297,7 @@ fn check_packs(
             let size = meta.as_ref().map_or(0, |m| m.size);
             let start = done;
             let mut at = |read: u64| progress(start.saturating_add(read.min(size)), total);
-            if check_pack(folder, packs_dir, &name, signed, v, &mut found, &mut at) {
+            if check_pack(folder, packs_dir, &name, how, v, &mut found, &mut at) {
                 v.packs = v.packs.saturating_add(1);
                 v.bytes = v.bytes.saturating_add(size);
             }
@@ -351,7 +358,7 @@ fn check_pack(
     folder: &Dir,
     packs_dir: &Path,
     name: &OsString,
-    signed: bool,
+    how: Decode,
     v: &mut Verified,
     found: &mut Found,
     at: &mut dyn FnMut(u64),
@@ -382,7 +389,7 @@ fn check_pack(
             }
         };
         v.objects = v.objects.saturating_add(1);
-        match check_object(&pack, &entry, signed) {
+        match check_object(&pack, &entry, how) {
             Ok(()) if entry.kind == ObjectKind::ChunkList => {
                 found.lists.push((name.clone(), entry))
             }
@@ -409,19 +416,19 @@ fn check_pack(
 }
 
 /// Reads the object `entry` names in `pack` back: content against its fingerprint, a record
-/// against its fingerprint and as its kind, a chunk list by its structure. A conflict record,
-/// which nothing writes yet, by its fingerprint only.
+/// against its fingerprint and as its kind, a chunk list by its structure. A conflict record in a
+/// project that doesn't keep conflicts, by its fingerprint only.
 fn check_object(
     pack: &PackReader,
     entry: &IndexEntry,
-    signed: bool,
+    how: Decode,
 ) -> Result<(), (ProblemKind, String)> {
     match entry.kind {
         ObjectKind::Content => pack.copy_content(entry, &mut io::sink()),
         ObjectKind::ChunkList => pack.read_chunk_list(entry).map(drop),
         kind => {
             let bytes = pack.read_record(entry).map_err(|e| object_problem(&e))?;
-            return decodes(kind, &bytes, signed).map_err(|e| {
+            return decodes(kind, &bytes, how).map_err(|e| {
                 let said = format!(
                     "It doesn't read as {}: {}.",
                     what(kind),
@@ -434,15 +441,24 @@ fn check_object(
     .map_err(|e| object_problem(&e))
 }
 
+/// What decoding a record depends on: whether saves may be signed, and whether the project keeps
+/// conflicts.
+#[derive(Clone, Copy)]
+struct Decode {
+    signed: bool,
+    conflicts: bool,
+}
+
 /// Decodes `bytes` as a record of `kind`, with the decoder that kind has.
-fn decodes(kind: ObjectKind, bytes: &[u8], signed: bool) -> Result<(), DecodeError> {
+fn decodes(kind: ObjectKind, bytes: &[u8], how: Decode) -> Result<(), DecodeError> {
     match kind {
         ObjectKind::FolderListing => Listing::decode(bytes).map(drop),
-        ObjectKind::Save => Save::decode(bytes, signed).map(drop),
+        ObjectKind::Save => Save::decode(bytes, how.signed).map(drop),
         ObjectKind::DiaryEntry => DiaryEntry::decode(bytes).map(drop),
         ObjectKind::ProjectLink => ProjectLink::decode(bytes).map(drop),
         ObjectKind::TagList => TagList::decode(bytes).map(drop),
         ObjectKind::ServerLines => ServerLines::decode(bytes).map(drop),
+        ObjectKind::Conflict if how.conflicts => Record::decode(bytes).map(drop),
         ObjectKind::Content | ObjectKind::ChunkList | ObjectKind::Conflict => Ok(()),
     }
 }
@@ -456,7 +472,8 @@ fn what(kind: ObjectKind) -> &'static str {
         ObjectKind::ProjectLink => "a project link",
         ObjectKind::TagList => "a tag list",
         ObjectKind::ServerLines => "server lines",
-        ObjectKind::Content | ObjectKind::ChunkList | ObjectKind::Conflict => "a record",
+        ObjectKind::Conflict => "a conflict record",
+        ObjectKind::Content | ObjectKind::ChunkList => "a record",
     }
 }
 
@@ -570,8 +587,8 @@ fn object_problem(e: &PackError) -> (ProblemKind, String) {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 struct Findings {
     kept: BTreeSet<Finding>,
-    /// How many were found: missing, of a wrong size, too big, damaged, unreadable.
-    counts: [u64; 5],
+    /// How many were found: missing, of a wrong size, too big, damaged, unreadable, nested.
+    counts: [u64; FINDING_KINDS],
     /// Whether the diary met an entry that is missing or can't be read.
     diary_gap: bool,
 }
@@ -585,7 +602,7 @@ impl Findings {
     /// found, how many both found; else the smaller of their counts.
     fn with(&self, later: &Findings) -> Findings {
         let kept: BTreeSet<Finding> = &self.kept & &later.kept;
-        let mut counts = [0u64; 5];
+        let mut counts = [0u64; FINDING_KINDS];
         for (kind, n) in counts.iter_mut().enumerate() {
             let (a, b) = (self.counts[kind], later.counts[kind]);
             *n = if a.max(b) <= PROBLEMS_KEPT as u64 {
@@ -601,7 +618,7 @@ impl Findings {
         }
     }
 
-    /// Keeps the first that can be told of `found`, all of one `kind` (0 to 4), and counts
+    /// Keeps the first that can be told of `found`, all of one `kind` (0 to 5), and counts
     /// them all.
     fn add(&mut self, kind: usize, found: u64, first: impl IntoIterator<Item = Finding>) {
         self.counts[kind] = found;
@@ -740,7 +757,8 @@ enum Finding {
     Unreadable(Id),
     /// Needed, and in no pack as what needs it.
     Missing(Id),
-    /// The listing gives the file `name` another size than what is stored for it.
+    /// The listing, or conflict record, gives the file `name` another size than what is stored
+    /// for it.
     Size {
         listing: Id,
         name: String,
@@ -749,7 +767,13 @@ enum Finding {
     },
     /// The save passes a limit every reader keeps: which, in the readers' words.
     TooBig { save: Id, why: String },
+    /// A conflict that stands as a folder holding a conflict below it. Only what it stands as is
+    /// looked at (its own version, else its first term): the others never stand in the folder.
+    NestedConflict { record: Id },
 }
+
+/// How many kinds of [`Finding`] are counted.
+const FINDING_KINDS: usize = 6;
 
 impl Finding {
     /// Which count of [`Findings`] it is in.
@@ -760,6 +784,7 @@ impl Finding {
             Finding::TooBig { .. } => 2,
             Finding::Damaged(_) => 3,
             Finding::Unreadable(_) => 4,
+            Finding::NestedConflict { .. } => 5,
         }
     }
 }
@@ -793,6 +818,7 @@ fn look_at(
     let src = Source {
         store: &store,
         signed: repo.signatures_allowed(),
+        conflicts: repo.keeps_conflicts(),
         folder: repo.packs_folder(),
         packs_dir: repo.packs_dir(),
     };
@@ -841,6 +867,8 @@ fn look_at(
     found.add(1, noted.sizes_found, sizes);
     let big: BTreeSet<Finding> = too_big(&noted).into_iter().collect();
     found.add(2, big.len() as u64, big);
+    let nested: BTreeSet<Finding> = nested(&noted).into_iter().collect();
+    found.add(5, nested.len() as u64, nested);
     // Measured; not needed once done.
     noted.shapes = HashMap::new();
     let look = Look {
@@ -853,9 +881,65 @@ fn look_at(
     Ok(Ok((found, Box::new(look))))
 }
 
+/// The folders below the listing `shape` as a save counts them: its own, and those its conflicts
+/// stand as, each with how many entries name it and the longest of their names.
+fn below<'a>(noted: &'a Noted, shape: &'a Shape) -> impl Iterator<Item = (Id, u64, usize)> + 'a {
+    let standing = shape.conflicts.iter().filter_map(|&(record, times, name)| {
+        match noted.stands.get(&record) {
+            Some(Some(Term {
+                kind: EntryKind::Folder,
+                id,
+                ..
+            })) => Some((*id, times, name)),
+            _ => None,
+        }
+    });
+    shape.folders.iter().copied().chain(standing)
+}
+
+/// Each conflict record `noted` read that stands as a folder holding a conflict in it or in any
+/// folder below. Each listing is looked through once, without a call per level.
+fn nested(noted: &Noted) -> Vec<Finding> {
+    let mut holds: HashMap<Id, bool> = HashMap::new();
+    let mut found = Vec::new();
+    for (&record, stands) in &noted.stands {
+        let Some(Term {
+            kind: EntryKind::Folder,
+            id: top,
+            ..
+        }) = *stands
+        else {
+            continue;
+        };
+        let mut todo = vec![(top, false)];
+        while let Some((id, ready)) = todo.pop() {
+            if holds.contains_key(&id) {
+                continue;
+            }
+            let Some(shape) = noted.shapes.get(&id) else {
+                holds.insert(id, false);
+                continue;
+            };
+            let mut folders = shape.folders.iter().map(|&(f, ..)| f);
+            if !ready {
+                todo.push((id, true));
+                let unseen = folders.filter(|f| !holds.contains_key(f));
+                todo.extend(unseen.map(|f| (f, false)));
+                continue;
+            }
+            let below = folders.any(|f| holds.get(&f) == Some(&true));
+            holds.insert(id, below || !shape.conflicts.is_empty());
+        }
+        if holds.get(&top) == Some(&true) {
+            found.push(Finding::NestedConflict { record });
+        }
+    }
+    found
+}
+
 /// Each save `noted` read that passes a limit every reader keeps, with which, in the readers'
 /// words. Each listing is measured once, however many paths reach it, and a listing that
-/// couldn't be read counts as empty.
+/// couldn't be read counts as empty. A conflict that stands as a folder counts as that folder.
 fn too_big(noted: &Noted) -> Vec<Finding> {
     let mut measured: HashMap<Id, Measure> = HashMap::new();
     let mut found = Vec::new();
@@ -872,20 +956,18 @@ fn too_big(noted: &Noted) -> Vec<Finding> {
             };
             if !ready {
                 todo.push((id, true));
-                let unmeasured = shape
-                    .folders
-                    .iter()
-                    .filter(|(f, ..)| !measured.contains_key(f));
-                todo.extend(unmeasured.map(|&(folder, ..)| (folder, false)));
+                let unmeasured = below(noted, shape).filter(|(f, ..)| !measured.contains_key(f));
+                todo.extend(unmeasured.map(|(folder, ..)| (folder, false)));
                 continue;
             }
             let mut m = Measure {
                 entries: shape.entries,
                 depth: 0,
                 longest: shape.longest,
+                conflicts: 0,
             };
             // A folder named by several entries counts once for each of them.
-            for &(folder, times, name) in &shape.folders {
+            for (folder, times, name) in below(noted, shape) {
                 let below = measured.get(&folder).copied().unwrap_or_default();
                 m.add_folder(below, times, name);
             }
@@ -932,7 +1014,7 @@ fn told_needs(v: &mut Verified, look: &Look, found: &Findings) -> HashMap<usize,
         }
     }
     let mut names = HashMap::new();
-    let mut told_of = [0u64; 5];
+    let mut told_of = [0u64; FINDING_KINDS];
     for finding in &found.kept {
         told_of[finding.kind()] += 1;
         let (kind, object, message) = match finding {
@@ -954,7 +1036,11 @@ fn told_needs(v: &mut Verified, look: &Look, found: &Findings) -> HashMap<usize,
                 } else {
                     "It isn't in any pack Opalro could read."
                 };
-                (ProblemKind::ObjectMissing, *id, message.to_owned())
+                let message = match look.noted.versions.get(id) {
+                    Some(version) => format!("{message} A conflict names it as {version}."),
+                    None => message.to_owned(),
+                };
+                (ProblemKind::ObjectMissing, *id, message)
             }
             Finding::Size {
                 listing,
@@ -977,6 +1063,14 @@ fn told_needs(v: &mut Verified, look: &Look, found: &Findings) -> HashMap<usize,
                 let message = format!("No reader takes it: {why}.");
                 (ProblemKind::SaveTooBig, *save, message)
             }
+            Finding::NestedConflict { record } => {
+                let message = format!(
+                    "Conflict record {} stands as a folder that holds another conflict, which \
+                     Opalro never writes.",
+                    record.short_hex()
+                );
+                (ProblemKind::NestedConflict, *record, message)
+            }
         };
         v.found(Problem {
             kind,
@@ -993,6 +1087,7 @@ fn told_needs(v: &mut Verified, look: &Look, found: &Findings) -> HashMap<usize,
         ProblemKind::SaveTooBig,
         ProblemKind::ObjectDamaged,
         ProblemKind::PackUnreadable,
+        ProblemKind::NestedConflict,
     ];
     for ((kind, &count), told) in kinds.into_iter().zip(&found.counts).zip(told_of) {
         v.more(kind, count.saturating_sub(told));
@@ -1014,8 +1109,10 @@ fn name_needers(v: &mut Verified, look: &Look, signed: bool, names: &HashMap<usi
             && needs
             && look.kept.contains(&object)
         {
-            // A chunk is needed where its file is.
-            let at = look.noted.via.get(&object).copied().unwrap_or(object);
+            // A chunk is needed where its file is, and a conflict's version at the conflict's
+            // place, so a chunk of such a version goes two steps.
+            let via = |id: Id| look.noted.via.get(&id).copied().unwrap_or(id);
+            let at = via(via(object));
             wanted.entry(at).or_default().push(i);
         }
     }

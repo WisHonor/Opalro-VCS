@@ -1,0 +1,54 @@
+# Red-team report: milestone 8, combine, second session (RT20, decision 024, 2026-11-14)
+
+Code attacked: a copy of `milestone-8` at 987a2e9 (the fixes fd233b3, dac8d42, 096d142 and ef6c7da). Built with `--all-features` in the no-network sandbox (4 GB, 4 CPUs), debug build throughout. `v0.1-src/` (the source of the 0.1 release) was built offline in the same sandbox without trouble.
+
+Proof tests: `crates/opal-vcs/tests/redteam20.rs`, 1 test, marked `#[ignore = "RT20-1: …"]` and asserting what should be true. `bash redteam/sandbox.sh run cargo test -p opal-vcs --all-features --test redteam20 -- --ignored` gives `0 passed; 1 failed`; without `--ignored` the file passes. It passes `cargo fmt --check` and `cargo clippy -p opal-vcs --all-targets --all-features -- -D warnings` in the container, and uses nothing gated on a platform.
+
+Platform tests: none. No `redteam20_platforms.rs` was written.
+
+Attack code: `redteam/attacks19/`. The `.rs.txt` files are uncompiled tests: copy one into `crates/opal-vcs/tests/` as `rt20_<name>.rs` to run it, and remove it after.
+- `rt20_starts.rs.txt`: `common_starts`, called in-process, against brute force on random planted histories (`RT20_CASES` sets how many; 1,500 histories, 6,000 queries were run).
+- `rt20_crash.rs.txt`: `combine` stopped at every fault point (`OPALRO_FAULT_AT=n`), for a combined save and a move forward, with unsaved work and an ignored file, and for three ways unsaved or ignored work is in the way.
+- `rt20_tidy.rs.txt`: `tidy` after a combine, with the other line deleted, past and inside the undo window, after an undo, and after a refused combine.
+- `rt20_wide.rs.txt`: a save with 1,024 parents as the line's newest save, as the target, and as one of two sides that share 1,023 starting points.
+- `rt20_rules.rs.txt`: the exploration behind RT20-1.
+- `v01.sh`: v0.1 on a project this build made, then this build on what v0.1 left. Run with `bash redteam/sandbox.sh run sh redteam/attacks19/v01.sh` (needs both builds).
+
+## Summary
+
+The fixes held. The one-pass drop of extra candidates agreed with brute force on every query I gave it, and the move-note budget is spent and reported as decision 171 says. The new read of a save's place in history uses the same parser as a full read, so it can't disagree with it. A combine stopped at any write, `tidy`, a save with 1,024 parents and v0.1 on this build's projects all held too.
+
+One finding, from what the first session left untried: a rules file that can't be used switches off `conflict-markers = false` without a word during a combine. Another line can bring that file in through a combine that goes through cleanly.
+
+| | High | Medium | Low |
+|---|---|---|---|
+| Findings | 0 | 1 | 0 |
+
+## Findings
+
+- **RT20-1 Medium (a combine merges a file its rule protects, without a word, when `opalro.toml` can't be used; T33 and T51; `combine.rs` `make_save`, `rules.rs` `read`).**
+  - **What happens.** A combine takes its rules from the folder's `opalro.toml`. If that file can't be used (it isn't TOML, or it's over 1 MiB, a link, or unreadable), `rules::read` skips it and Opalro's own values apply. In milestone 8 that also means "every file may be merged line by line". `combine` doesn't show `rules_file_skipped`. Only `save`, `setup` and `start` do (T33 says so). So:
+    1. Line `side` changes nothing but `opalro.toml`, into a file that isn't TOML. Combining `side` into `main` goes through cleanly, since only one line changed the file, and gives `"warnings":[]`.
+    2. Next, combining `art` (which changed line 1 of `Main.unity`) into `main` (which changed line 8) merges `Main.unity` line by line. The original rule said `files = ["*.unity"]`, `conflict-markers = false`. The result has `"merged_files":["Main.unity"]` and `"warnings":[]`.
+    Nothing between the two steps tells the person the rules are gone, unless they happen to save. Even then, the `save` warning lists what Opalro's own values do (chunking, the size question) and not that files the rules protected may now be merged. T33's claim that "the most a hostile one can do is change which files are cut into chunks … and raise the numbers a save asks at, or keep files out of saves" stopped being true when `conflict-markers` arrived.
+  - **How to see it.** `a_combine_with_an_unusable_rules_file_says_so_before_merging_a_protected_file` (run with `--ignored`; it is deterministic).
+  - **What I would do.** When a combine's folder has an `opalro.toml` it can't use, either refuse to merge any file line by line (leaving each file both lines changed as a conflict) until the file is fixed, or at least give `rules_file_skipped` in the combine's own warnings before anything is merged, worded to say that rules like `conflict-markers` aren't applied. Refusing is the safer of the two, since the merged result is stored and a warning comes after the fact. Then correct T33's sentence.
+  - **How likely.** A person who mistypes `opalro.toml` on one line and then combines it in, or a shared project where someone else breaks it. Both are ordinary. A Unity scene merged line by line can load broken or not load at all. Undo takes the combine back, but only if someone notices.
+
+## Suspicions without proof
+
+None counted. Two things I would look at with more time:
+- **Rules follow the merged path after a move.** `combine/tree.rs` `contents` asks `conflict_markers` for the path in the merged tree. If a scene is renamed on one line to a name no rule covers (`Main.unity` to `Main.txt`, noted or found by contents) and edited on both, the scene's contents are merged line by line under the new name. Git looks up attributes by the path in the result as well, so this may be intended. I did not run it.
+- **Notes along first parents only.** `noted` follows a side's first parents. A true note on a second parent's path (one line combined into the side before) is never used and gives no warning. The combine falls back to contents, which can turn a move-and-edit into a removal and an addition. This predates the fixes, and I did not look for a case where the fallback goes through wrongly.
+
+## What was tried and held
+
+- **Starting points, one-pass drop (`ancestry.rs`).** `rt20_starts.rs.txt` planted 1,500 random histories (5 to 124 saves; 1 to 40 roots; up to 20 parents a save, near and far back) with five clocks: rising, all alike, backwards, only `i64::MIN`/`i64::MAX`/`0`/`±1`, and random 64-bit. It called `common_starts` with sets of up to 40 tips on each side and compared the answer with brute force (common ancestors not under another common one, `TooMany(n)` past 16). All 6,000 queries agreed: 177 had more than 4 starts, and one went past 16 with the right `TooMany` count. Reading `drop_held_at_once`: it walks from all the candidates' parents once and stops early only when a single candidate is left, which in a history without cycles must be a start. A planted 1,024-parent history gave `TooMany(1024)`, the true count, in 27 ms, and one start in 26 ms.
+- **Move-note budget (`moves.rs`, `combine.rs`).** By reading the code: a save's notes are charged before anything about the save is read, and a save that doesn't fit spends the whole budget and drops that side's notes entirely, so no chain is half-followed. A budget spent exactly to 0 is not spent, and the next save with any note spends it. `Followed::notes_unbelieved` is set after `noted` runs, so the side that spends the budget, every later side and every later merge (the outer one after an inner one) report it. `make_save` ORs it into the one `too_many_move_notes` warning, which the switch carries into `--json`. One line's planted notes can make the other line's notes go unused (the order is ours, then theirs, and inner combines first), but never without the warning.
+- **A save's place in history read without its notes (`save.rs`, `store.rs`).** `Save::links` and `Save::decode` share one `parse`, and every check (version, doubled parent, counts, path limits, note order, signature, extra-field order, bytes left over) is made on both paths. Only the building of each note is skipped. `save_links` reads the record through the same `read_record` with its fingerprint check. There is no way for the two to disagree, so I didn't plant damaged saves for it.
+- **Letter-case probe (096d142).** Not attacked, as the brief says. Nothing about it failed to compile in the container.
+- **A combine stopped at every write.** `rt20_crash.rs.txt` stopped a combined-save combine at each of its 16 fault points and a move-forward combine at each of its 14. Both had unsaved work in another file and an ignored file. After each stop, the unsaved file was untouched. Running `combine` again finished with exactly the folder an unstopped combine gives. `undo` then brought back exactly the folder from before, unsaved work and ignored file included. `verify` passed, and `.opalro/tmp` was empty. Three in-the-way cases (an unsaved edit to a file the combine changes, an unsaved edit to a file the other line removes, an unsaved file where the other line adds one) were refused before anything was written, at every stop.
+- **`tidy` after a combine.** With `side` deleted and `tidy` run three days later with a one-day window, `side`'s saves were still reached through the combined save's second parent: `goto` to its ID, `history <id>` and `verify` all worked. Combine, undo, delete `side`, then `tidy` inside the window: `undo` and `redo` still worked. A combine refused for a conflict left no new pack and nothing in `.opalro/tmp`.
+- **A save with 1,024 parents.** `show` took 160 ms and printed 1,032 lines, none over 81 characters. `show --json` gave 69 KB, and `history` and `status` took about 140 ms. `combine` into the line and with the wide save as target took 260 ms each, and `verify` passed. All times are for the debug build, end to end.
+- **v0.1 on this build's project, and back.** v0.1's `history`, `show` (it lists the second parent beside the first), `status`, `verify`, `goto` to both lines, `undo --list`, `undo`, `redo`, `tidy` and `save` all worked on a project with a combined save. The side line's save renamed a file (`m.txt` to `n.txt`), which should give that save a move note. v0.1 read it, but I did not check that the note was there. This build then read and verified what v0.1 left, redid v0.1's undone step, and combined again. v0.1's `tidy` source follows every parent (`tidy.rs` line 991), so it keeps what a combined save reaches. v0.1 has no `line delete`, so a past-window `tidy` by v0.1 after a deleted line wasn't tried.
+- **Not tried for lack of time:** two commands at once (`combine` racing `save`, `goto`, `undo`, `tidy` and another `combine`), a reshuffle past the 64 MiB bound, a comparison that runs out of its two seconds, text files at the size and line limits, a rules file changed on both lines, and true notes moving 100,000 files back and forth over many saves.

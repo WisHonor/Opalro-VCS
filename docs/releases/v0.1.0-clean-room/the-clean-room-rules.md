@@ -1,3 +1,5 @@
+> v0.1 was prepared and never published: v0.2 is the first published version ([decision 190](../../decisions/190-v0.2-is-the-first-published-version.md)). This page is kept as the record.
+
 # Clean-room rules (every rewriter and clean test writer)
 
 Your work is a clean rewrite: code written from documentation and observed behaviour only, so that Bolt can ship as a closed product. Whether your work can be used depends on these rules.
