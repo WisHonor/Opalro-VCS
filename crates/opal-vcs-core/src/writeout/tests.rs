@@ -644,7 +644,8 @@ fn a_folder_becomes_a_file_and_back_and_a_journal_carried_out_twice_changes_noth
     assert!(done.changed_since_plan.is_empty(), "{done:?}");
     assert_eq!(fs::read(dir.path().join("a")).unwrap(), b"a file");
     assert_eq!(fs::read(dir.path().join("f/inside")).unwrap(), b"a folder");
-    assert_eq!((done.written, done.removed), (2, 3));
+    // Removed: `a/x`, `a/y/z` and `a/y`, then the folder `a` and the file `f`, which gave way.
+    assert_eq!((done.written, done.removed), (2, 5));
     let again = applied(&mut repo, &journal(b.1, &plan));
     assert_eq!((again.written, again.removed), (0, 0));
     assert!(again.changed_since_plan.is_empty() && again.in_use.is_empty());
@@ -2172,6 +2173,66 @@ fn a_folder_only_conflicts_standing_as_nothing_fill_is_not_made() {
     // Your line removed `d/x.txt`, which the other changed: it stands as nothing.
     let combined = combined_with(&mut repo, "d/x.txt", record(None));
     assert_eq!(plan_paths(&mut repo, first, combined), ["t"]);
+}
+
+/// A switch limited to such a folder, by its name, doesn't make it either.
+#[test]
+fn a_named_folder_only_conflicts_standing_as_nothing_fill_is_not_made() {
+    let (_dir, mut repo) = project();
+    let combined = combined_with(&mut repo, "d/x.txt", record(None));
+    assert!(acted_on(&mut repo, combined, Some(&["d"])).is_empty());
+}
+
+/// Where the folder holds a file at its path, the switch makes it all the same, in the file's
+/// place.
+#[test]
+fn a_file_where_a_folder_only_conflicts_fill_goes_gives_way_to_it() {
+    let (dir, mut repo) = project();
+    let (with_file, _) = planted(&mut repo, &files(&[("d", b"a file")]));
+    fs::write(dir.path().join("d"), b"a file").unwrap();
+    let combined = combined_with(&mut repo, "d/x.txt", record(None));
+    let plan = planned(&mut repo, with_file, combined, false);
+    let paths: Vec<&str> = plan.actions.iter().map(|a| a.path.as_str()).collect();
+    assert_eq!(paths, ["d", "t"]);
+    assert_eq!(plan.actions[0].change, Change::MakeFolder);
+    assert!(
+        plan.actions[0]
+            .expected
+            .is_some_and(|e| e.kind == EntryKind::File)
+    );
+}
+
+/// An entry removed to put one of another kind in its place counts as removed, both ways round:
+/// a file that gives way to an empty folder, and an empty folder that gives way to a file or a
+/// link.
+#[test]
+fn an_entry_that_gives_way_to_another_kind_counts_as_removed() {
+    let (dir, mut repo) = project();
+    let start = current_save(&repo).unwrap();
+    let file = planted(&mut repo, &files(&[("p", b"p\n")]));
+    crate::test_support::plant_root(&mut repo, |packs| {
+        let (empty, _) = crate::test_support::add_listing(packs, Vec::new());
+        let p = Entry {
+            name: "p".into(),
+            kind: EntryKind::Folder,
+            id: empty,
+            size: 0,
+        };
+        crate::test_support::add_listing(packs, vec![p]).0
+    });
+    let (head, entry) = repo.current().unwrap();
+    let folder = (tip_of(&entry).unwrap(), head);
+    let link = planted(&mut repo, &[("p", EntryKind::Symlink, b"elsewhere")]);
+    let counts = |done: Applied| (done.written, done.removed);
+    assert_eq!(counts(switch(&mut repo, start, file).1), (1, 0));
+    assert_eq!(counts(switch(&mut repo, file.0, folder).1), (0, 1));
+    assert!(dir.path().join("p").is_dir());
+    assert_eq!(counts(switch(&mut repo, folder.0, file).1), (1, 1));
+    assert!(dir.path().join("p").is_file());
+    assert_eq!(counts(switch(&mut repo, file.0, folder).1), (0, 1));
+    // A link, or the file holding its target where this computer can't make one.
+    assert_eq!(counts(switch(&mut repo, folder.0, link).1), (1, 1));
+    assert!(!dir.path().join("p").is_dir());
 }
 
 #[test]

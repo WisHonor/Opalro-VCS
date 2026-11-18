@@ -61,7 +61,8 @@ pub struct Plan {
 pub struct Applied {
     /// Files and links written, placeholders included.
     pub written: usize,
-    /// Files, links and folders removed.
+    /// Files, links and folders removed, those that gave way to an entry of another kind
+    /// included.
     pub removed: usize,
     /// Entries another program held open, left for the next run.
     pub in_use: Vec<String>,
@@ -1107,8 +1108,9 @@ impl Run<'_> {
         match found {
             Some(f) if f.kind == Some(EntryKind::Folder) => return Ok(Outcome::Nothing),
             None => {}
+            // The file or link that gives way to the folder left: it counts as removed.
             Some(f) if f.is(a.expected) => match self.remove_unchanged(os, f.meta) {
-                Ok(true) => {}
+                Ok(true) => self.applied.removed += 1,
                 Ok(false) => return Ok(Outcome::Changed),
                 Err(e) => return classify(e),
             },
@@ -1164,6 +1166,10 @@ impl Run<'_> {
             Some(f) => {
                 if let Some(outcome) = self.clear(os, f)? {
                     return Ok(outcome);
+                }
+                // A folder that gives way to the file left: it counts as removed.
+                if f.kind == Some(EntryKind::Folder) {
+                    self.applied.removed += 1;
                 }
             }
         }
@@ -1362,6 +1368,8 @@ impl Run<'_> {
                     _ => self.remove_unchanged(os, f.meta),
                 };
                 match cleared {
+                    // A folder that gives way to the link left: it counts as removed.
+                    Ok(true) if f.kind == Some(EntryKind::Folder) => self.applied.removed += 1,
                     Ok(true) => {}
                     Ok(false) => return Ok(Outcome::Changed),
                     Err(e) => return classify(e),
