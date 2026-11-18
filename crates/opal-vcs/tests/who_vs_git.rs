@@ -140,8 +140,8 @@ fn commit(smallest: usize) -> impl Strategy<Value = Vec<Step>> {
 fn merged_history() -> impl Strategy<Value = Merged> {
     let round = (
         prop::collection::vec((0..3u8, any::<Index>()), 10),
-        prop::collection::vec(commit(0), 0..=2),
-        prop::collection::vec(commit(0), 1..=3),
+        prop::collection::vec(moving_commit(1, 0), 0..=2),
+        prop::collection::vec(moving_commit(1, 0), 1..=3),
         0..3u8,
         prop::option::weighted(0.3, (any::<Index>(), any::<Index>())),
         prop::option::weighted(0.2, (any::<Index>(), 1..=4usize)),
@@ -170,10 +170,11 @@ fn merged_history() -> impl Strategy<Value = Merged> {
         })
 }
 
-/// A commit of the histories made in both programs: a move, one time in `moves` of 5.
-fn moving_commit(moves: u32) -> impl Strategy<Value = Vec<Step>> {
+/// A commit: a move, one time in `moves` of 5, else changes that add files of at least
+/// `smallest` lines.
+fn moving_commit(moves: u32, smallest: usize) -> impl Strategy<Value = Vec<Step>> {
     prop_oneof![
-        5 - moves => commit(1),
+        5 - moves => commit(smallest),
         moves => (any::<Index>(), any::<Index>()).prop_map(|(f, t)| vec![Step::Move(f, t)]),
     ]
 }
@@ -181,13 +182,13 @@ fn moving_commit(moves: u32) -> impl Strategy<Value = Vec<Step>> {
 fn linear_history() -> impl Strategy<Value = Linear> {
     let fork = (
         prop::collection::vec(any::<bool>(), 10),
-        prop::collection::vec(moving_commit(3), 1..=3),
-        prop::collection::vec(moving_commit(2), 0..=2),
+        prop::collection::vec(moving_commit(3, 1), 1..=3),
+        prop::collection::vec(moving_commit(2, 1), 0..=2),
     )
         .prop_map(|(owners, side, main)| Fork { owners, side, main });
     (
         first(),
-        prop::collection::vec(moving_commit(2), 2..=5),
+        prop::collection::vec(moving_commit(2, 1), 2..=5),
         prop::option::weighted(0.85, fork),
     )
         .prop_map(|(first, commits, fork)| Linear {
@@ -927,10 +928,10 @@ fn floors(part: &str, totals: RefCell<BTreeMap<&'static str, (usize, usize)>>, f
 /// changed one line. Some have a third parent; some rounds cross merges first. Dates tie, run
 /// backwards, and the author's differs from the committer's.
 ///
-/// An imported history carries no move notes, so Opalro follows no move in it while Git's `blame`
-/// follows a whole-file move by likeness. The moved files are therefore made with Opalro's own
-/// commands (each move saved by itself, which notes it, and a branch merged with `opalro
-/// combine`), and the same steps run with Git in a repository beside the project.
+/// The imported histories may move a file, in a commit that changes nothing else, which the import
+/// notes. More histories with moves are made with Opalro's own commands (each move saved by itself,
+/// which notes it, and a branch merged with `opalro combine`), and the same steps run with Git in a
+/// repository beside the project.
 ///
 /// Not drawn: a move with an edit in the same commit (Git guesses and follows, Opalro doesn't); a
 /// line repeated in a file (two right answers); a change of line endings only (a save that only
@@ -978,8 +979,6 @@ fn who_matches_git_blame_on_unique_lines() {
                     &mut seen,
                 )?;
             }
-            let moved = seen.get("lines named through a move").copied();
-            prop_assert_eq!(moved.unwrap_or(0), 0, "a move from Git");
             tally(&imported, seen);
             Ok(())
         })
@@ -1024,6 +1023,9 @@ fn who_matches_git_blame_on_unique_lines() {
             "files both sides changed",
             "lines put back",
             "merges checked with git merge-tree",
+            "lines named through a move",
+            "files moved and edited after",
+            "lines moved on a merged branch",
         ],
     );
     floors(

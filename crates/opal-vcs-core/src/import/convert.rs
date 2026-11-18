@@ -5,6 +5,7 @@
 #![deny(clippy::indexing_slicing, clippy::arithmetic_side_effects)]
 
 use std::borrow::Cow;
+use std::cmp::Ordering;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::io::{self, Read};
 use std::path::Path;
@@ -26,12 +27,13 @@ use crate::id::{ChangeId, ContentHasher, Id, hash_record};
 use crate::ingest::{self, IngestError};
 use crate::link::ProjectLink;
 use crate::listing::{Entry, EntryKind, Listing, SaveLimits};
+use crate::moves::{self, MAX_LEFT_BYTES, MAX_NOTED_BYTES, first_that_fit};
 use crate::names::{MAX_NAME_BYTES, NameError, is_git_alias, validate_name};
 use crate::pack::{MAX_RECORD_SIZE, ObjectKind, PackError, PackSet};
 use crate::repo::RepoError;
 use crate::save::{
     EXTRA_GIT_COMMIT, EXTRA_GIT_HEADER, EXTRA_GIT_ORIGINAL_MESSAGE, MAX_EXTRA_VALUE_BYTES,
-    MAX_MESSAGE_BYTES, Save,
+    MAX_MESSAGE_BYTES, MAX_MOVE_NOTES, MoveNote, Save,
 };
 use crate::store::Store;
 
@@ -491,8 +493,8 @@ pub struct Converter<'r> {
     links: HashMap<GitId, Id>,
     /// Each tree converted whole, wherever it was met.
     trees: HashMap<GitId, Folder>,
-    /// Each commit's save.
-    saves: HashMap<GitId, Id>,
+    /// Each commit's save, and its Git tree, which its children are compared with for moves.
+    saves: HashMap<GitId, (Id, GitId)>,
     /// Every record this converter stored, or found stored.
     records: HashSet<Id>,
     counts: Counts,
@@ -550,7 +552,7 @@ impl<'r> Converter<'r> {
 
     /// The save of the commit `id`, which must be converted already.
     pub fn save_of(&self, id: &GitId) -> Result<Id, ImportError> {
-        self.saves.get(id).copied().ok_or_else(|| {
+        self.saves.get(id).map(|(save, _)| *save).ok_or_else(|| {
             bug(format!(
                 "Opalro needed the save of commit `{}` before it made it",
                 id.to_hex()
@@ -575,7 +577,7 @@ impl<'r> Converter<'r> {
     /// converted already: their saves are taken from what this converter made, in the commit's
     /// own order. A commit converted already gives the same save.
     pub fn commit(&mut self, id: &GitId) -> Result<Id, ImportError> {
-        if let Some(save) = self.saves.get(id) {
+        if let Some((save, _)) = self.saves.get(id) {
             return Ok(*save);
         }
         let hex = id.to_hex();
@@ -593,6 +595,10 @@ impl<'r> Converter<'r> {
             }
         }
         let root = self.snapshot(&c.tree, &hex)?;
+        let move_notes = match c.parents.first() {
+            Some(first) => self.moves_since(first, &c.tree, &hex)?,
+            None => Vec::new(),
+        };
         let message = message_text(c.message, c.encoding);
         let mut extra = BTreeMap::from([(EXTRA_GIT_COMMIT.to_owned(), hex.clone().into_bytes())]);
         if message.as_bytes() != c.message {
@@ -616,7 +622,7 @@ impl<'r> Converter<'r> {
             saver: parse_person(c.committer),
             message: message.into_owned(),
             change_id,
-            move_notes: Vec::new(),
+            move_notes,
             signature: Vec::new(),
             extra,
         };
@@ -642,8 +648,172 @@ impl<'r> Converter<'r> {
         if root.lfs {
             self.counts.lfs_commits = self.counts.lfs_commits.saturating_add(1);
         }
-        self.saves.insert(*id, save_id);
+        self.saves.insert(*id, (save_id, c.tree));
         Ok(save_id)
+    }
+
+    /// The moves the commit `commit` (hex), of the tree `tree`, notes against its first parent
+    /// `first`: by the rule a save notes its own by, within a save's limits.
+    fn moves_since(
+        &mut self,
+        first: &GitId,
+        tree: &GitId,
+        commit: &str,
+    ) -> Result<Vec<MoveNote>, ImportError> {
+        let parent = first.to_hex();
+        let Some((_, before)) = self.saves.get(first).copied() else {
+            return Err(bug(format!(
+                "Opalro compared commit `{commit}` with `{parent}` before it made its save"
+            )));
+        };
+        let moves = moves::moves_by(
+            |each| self.compare((before, *tree), [&parent, commit], each),
+            MAX_LEFT_BYTES,
+        );
+        let mut notes = moves?.unwrap_or_default();
+        let most = usize::try_from(MAX_MOVE_NOTES).unwrap_or(usize::MAX);
+        first_that_fit(&mut notes, most, MAX_NOTED_BYTES);
+        Ok(notes)
+    }
+
+    /// Hands `each` every path whose entry differs between two converted trees, `old` of the
+    /// commit `commits[0]` and `new` of `commits[1]` (hex), with the entry the import made of it on
+    /// each side, as a save's comparison hands them: a folder is gone into only where its Git IDs
+    /// differ, and only names the import keeps are looked at. No path comes twice, since a tree
+    /// holding a name twice doesn't convert.
+    fn compare(
+        &mut self,
+        (old, new): (GitId, GitId),
+        commits: [&str; 2],
+        each: &mut Differs<'_>,
+    ) -> Result<(), ImportError> {
+        let [old_commit, new_commit] = commits;
+        if old == new {
+            return Ok(());
+        }
+        // Folders still to compare, by path, with their Git trees on each side: a stack, since Git
+        // trees can nest thousands of levels deep.
+        let mut todo = vec![(String::new(), Some(old), Some(new))];
+        while let Some((folder, old, new)) = todo.pop() {
+            let olds = self.kept(old, old_commit, &folder)?;
+            let news = self.kept(new, new_commit, &folder)?;
+            let (mut olds, mut news) = (olds.iter().peekable(), news.iter().peekable());
+            loop {
+                let order = match (olds.peek(), news.peek()) {
+                    (None, None) => break,
+                    (Some(_), None) => Ordering::Less,
+                    (None, Some(_)) => Ordering::Greater,
+                    (Some(o), Some(n)) => o.name.cmp(&n.name),
+                };
+                let (o, n) = match order {
+                    Ordering::Less => (olds.next(), None),
+                    Ordering::Greater => (None, news.next()),
+                    Ordering::Equal => (olds.next(), news.next()),
+                };
+                let Some(name) = o.or(n).map(|item| item.name.as_str()) else {
+                    break;
+                };
+                let path = if folder.is_empty() {
+                    name.to_owned()
+                } else {
+                    format!("{folder}/{name}")
+                };
+                let tree =
+                    |i: Option<&Item>| i.filter(|i| i.kind == EntryKind::Folder).map(|i| i.id);
+                let (old_tree, new_tree) = (tree(o), tree(n));
+                if old_tree != new_tree {
+                    todo.push((path.clone(), old_tree, new_tree));
+                }
+                // The same kind of entry from the same Git object converts alike.
+                let leaf = |i: Option<&Item>| {
+                    i.filter(|i| i.kind != EntryKind::Folder)
+                        .map(|i| (i.kind, i.id))
+                };
+                let folder_on_one_side = old_tree.is_some() != new_tree.is_some();
+                if leaf(o) == leaf(n) && !folder_on_one_side {
+                    continue;
+                }
+                let (o, n) = (
+                    self.entry(o, old_commit, &path)?,
+                    self.entry(n, new_commit, &path)?,
+                );
+                // Two Git objects can convert alike too: two Git LFS pointers to one file.
+                let file = |e: &Option<Entry>| {
+                    e.as_ref()
+                        .filter(|e| e.kind != EntryKind::Folder)
+                        .map(|e| (e.kind, e.id))
+                };
+                if file(&o) != file(&n) || folder_on_one_side {
+                    each(&path, o.as_ref(), n.as_ref())?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The entries of the converted tree `id`, the folder `folder` of the commit `commit` (hex),
+    /// whose names the import keeps, in order of their names; none without a tree.
+    fn kept(
+        &self,
+        id: Option<GitId>,
+        commit: &str,
+        folder: &str,
+    ) -> Result<Vec<Item>, ImportError> {
+        let Some(id) = id else {
+            return Ok(Vec::new());
+        };
+        let place = || {
+            folder_place(
+                &shown_path(&folder.split('/').collect::<Vec<_>>()),
+                &id,
+                commit,
+            )
+        };
+        let object = self.git.read(&id).map_err(|e| at(e, place))?;
+        expect_kind(object.kind, ObjectType::Tree, &id, place)?;
+        let entries = parse_tree(&object.data, self.git.hash()).map_err(|e| at(e, place))?;
+        let mut items: Vec<Item> = (entries.into_iter())
+            .filter_map(|e| match judged(e.name) {
+                Judged::Kept(name) => Some(Item {
+                    name: name.to_owned(),
+                    kind: e.kind,
+                    id: e.id,
+                }),
+                _ => None,
+            })
+            .collect();
+        items.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+        Ok(items)
+    }
+
+    /// The entry the import made of `item`, at `path` in the commit `commit` (hex).
+    fn entry(
+        &mut self,
+        item: Option<&Item>,
+        commit: &str,
+        path: &str,
+    ) -> Result<Option<Entry>, ImportError> {
+        let Some(item) = item else {
+            return Ok(None);
+        };
+        let (id, size) = if item.kind == EntryKind::Folder {
+            let Some(folder) = self.trees.get(&item.id) else {
+                return Err(bug(format!(
+                    "Opalro compared a folder of commit `{commit}` before converting it"
+                )));
+            };
+            (folder.listing, 0)
+        } else {
+            let shown = || shown_path(&path.split('/').collect::<Vec<_>>());
+            let (id, size, _) = self.converted(item.kind, &item.id, commit, &shown)?;
+            (id, size)
+        };
+        Ok(Some(Entry {
+            name: item.name.clone(),
+            kind: item.kind,
+            id,
+            size,
+        }))
     }
 
     /// What the Git tag `name` (as Opalro's tag list will name it) at `target` becomes (decision
@@ -675,7 +845,7 @@ impl<'r> Converter<'r> {
         let mut git_tags: Vec<Vec<u8>> = Vec::new();
         let mut message = String::new();
         loop {
-            if let Some(save) = self.saves.get(&id).copied() {
+            if let Some((save, _)) = self.saves.get(&id).copied() {
                 self.remember(&read, 0, ObjectType::Commit);
                 return Ok(TagOutcome::Tag(diary::Tag {
                     save,
@@ -827,15 +997,7 @@ impl<'r> Converter<'r> {
             return Ok(());
         };
         let commit = walk.commit;
-        let place = || {
-            let path = path_of(stack, &[]);
-            let folder = if path.is_empty() {
-                "the top folder".to_owned()
-            } else {
-                format!("the folder `{path}`")
-            };
-            format!("{folder} (tree `{}`) of commit `{commit}`", id.to_hex())
-        };
+        let place = || folder_place(&path_of(stack, &[]), &id, commit);
         let object = self.git.read(&id).map_err(|e| at(e, place))?;
         expect_kind(object.kind, ObjectType::Tree, &id, place)?;
         let entries = parse_tree(&object.data, self.git.hash()).map_err(|e| at(e, place))?;
@@ -844,13 +1006,8 @@ impl<'r> Converter<'r> {
         let mut longest = 0;
         for e in entries {
             exact &= e.standard_mode;
-            let Ok(name) = std::str::from_utf8(e.name) else {
-                exact = false;
-                self.not_utf8(commit, || path_of(stack, &[shown(e.name).as_str()]));
-                continue;
-            };
-            match validate_name(name) {
-                Ok(()) if !is_git_alias(name) => {
+            match judged(e.name) {
+                Judged::Kept(name) => {
                     walk.path(prefix.saturating_add(name.len()), || {
                         path_of(stack, &[name])
                     })?;
@@ -861,14 +1018,18 @@ impl<'r> Converter<'r> {
                         id: e.id,
                     });
                 }
-                Err(NameError::TooLong) => {
+                Judged::NotUtf8 => {
+                    exact = false;
+                    self.not_utf8(commit, || path_of(stack, &[shown(e.name).as_str()]));
+                }
+                Judged::TooLong => {
                     return Err(unimportable(format!(
                         "commit `{commit}` has a name longer than {MAX_NAME_BYTES} bytes, more \
                          than Opalro allows: `{}`",
                         path_of(stack, &[shown(e.name).as_str()])
                     )));
                 }
-                _ => {
+                Judged::Skipped => {
                     exact = false;
                     // A name holding `/` can be any length: it is listed cut, like any other.
                     self.skipped(commit, || path_of(stack, &[shown(e.name).as_str()]));
@@ -936,12 +1097,8 @@ impl<'r> Converter<'r> {
         stack: &[Frame],
         commit: &str,
     ) -> Result<(Entry, bool), ImportError> {
-        let (id, size, lfs) = if item.kind == EntryKind::ProjectLink {
-            (self.link(&item.id)?, 0, false)
-        } else {
-            let path = || path_of(stack, &[item.name.as_str()]);
-            self.blob(&item.id, may_be_lfs(item.kind), commit, &path)?
-        };
+        let path = || path_of(stack, &[item.name.as_str()]);
+        let (id, size, lfs) = self.converted(item.kind, &item.id, commit, &path)?;
         let entry = Entry {
             name: item.name,
             kind: item.kind,
@@ -949,6 +1106,22 @@ impl<'r> Converter<'r> {
             size,
         };
         Ok((entry, lfs))
+    }
+
+    /// The content ID and size of a file, link or project link of `kind` whose Git object is `id`,
+    /// at `path` in the commit `commit` (hex), converted the first time it is met; and whether it
+    /// is a Git LFS file.
+    fn converted(
+        &mut self,
+        kind: EntryKind,
+        id: &GitId,
+        commit: &str,
+        path: &dyn Fn() -> String,
+    ) -> Result<(Id, u64, bool), ImportError> {
+        if kind == EntryKind::ProjectLink {
+            return Ok((self.link(id)?, 0, false));
+        }
+        self.blob(id, may_be_lfs(kind), commit, path)
     }
 
     /// A submodule's link: just the commit, with an empty address (decision 036).
@@ -1286,6 +1459,42 @@ fn attach(stack: &mut [Frame], name: String, done: Folder) -> Option<Folder> {
     None
 }
 
+/// What takes each path whose entry differs between two trees, with the entry on each side.
+type Differs<'a> = dyn FnMut(&str, Option<&Entry>, Option<&Entry>) -> Result<(), ImportError> + 'a;
+
+/// How the import takes a name from a Git tree.
+enum Judged<'a> {
+    Kept(&'a str),
+    /// Left out and listed, for `finish` to stop at.
+    NotUtf8,
+    /// Longer than any name may be: the import stops.
+    TooLong,
+    /// Dangerous, or a spelling of `.git` or `.opalro`: left out and listed.
+    Skipped,
+}
+
+/// The import's judgment of a name, which the conversion and the comparison of trees both follow.
+fn judged(name: &[u8]) -> Judged<'_> {
+    let Ok(name) = std::str::from_utf8(name) else {
+        return Judged::NotUtf8;
+    };
+    match validate_name(name) {
+        Ok(()) if !is_git_alias(name) => Judged::Kept(name),
+        Err(NameError::TooLong) => Judged::TooLong,
+        _ => Judged::Skipped,
+    }
+}
+
+/// The folder at `path` (as shown), the Git tree `id`, of the commit `commit` (hex), for a message.
+fn folder_place(path: &str, id: &GitId, commit: &str) -> String {
+    let folder = if path.is_empty() {
+        "the top folder".to_owned()
+    } else {
+        format!("the folder `{path}`")
+    };
+    format!("{folder} (tree `{}`) of commit `{commit}`", id.to_hex())
+}
+
 /// The path of `names` in the folder on top of the stack, for a list or a message.
 fn path_of(stack: &[Frame], names: &[&str]) -> String {
     let folders = stack.iter().skip(1).map(|frame| frame.name.as_str());
@@ -1399,6 +1608,7 @@ mod tests {
     use crate::git::craft::{Craft, PackEntry, delta, lfs_pointer_to};
     use crate::git::{HashKind, object_id};
     use crate::id::hash_content;
+    use crate::moves::same_contents;
     use crate::pack::{PackReader, WRITER_PACK_OBJECTS};
     use crate::save::Person;
     use crate::test_support::{HOSTILE, assert_hostile_text_escaped, noise};
@@ -2907,22 +3117,30 @@ mod tests {
     }
 
     #[test]
-    fn converting_twice_gives_identical_saves() {
+    fn importing_twice_gives_identical_saves_with_notes() {
         for hash in [Sha1, Sha256] {
             let (dir, git) = repo(hash);
-            let text = blob(&git, b"text\n");
+            let (text, own) = (blob(&git, b"text\n"), blob(&git, b"its own\n"));
             let submodule = GitId::from_hex(hash, &"cd".repeat(hash.len())).unwrap();
+            let link = blob(&git, b"file");
             let bin = git.tree(&[(b"100755", b"run", text)]);
             let tree = git.tree(&[
                 (b"40000", b"bin", bin),
-                (b"100644", b"file", text),
-                (b"120000", b"link", blob(&git, b"file")),
+                (b"100644", b"file", own),
+                (b"120000", b"link", link),
+                (b"160000", b"sub", submodule),
+            ]);
+            // `main` renames `file`.
+            let moved = git.tree(&[
+                (b"40000", b"bin", bin),
+                (b"100644", b"kept", own),
+                (b"120000", b"link", link),
                 (b"160000", b"sub", submodule),
             ]);
             let root = git.commit(&commit_bytes(&tree, &[], "", b"root\n"));
             let side = git.commit(&commit_bytes(&tree, &[root], GPGSIG, b"side\n"));
             let main = git.commit(&commit_bytes(
-                &tree,
+                &moved,
                 &[root],
                 "encoding latin1\n",
                 b"\xe9\n",
@@ -2934,9 +3152,408 @@ mod tests {
                 let m = c.commit(&main).unwrap();
                 [r, s, m, c.commit(&merge).unwrap()]
             };
-            let (first, _) = convert(dir.path(), "a", run);
+            let (first, store) = convert(dir.path(), "a", run);
             let (second, _) = convert(dir.path(), "b", run);
             assert_eq!(first, second, "{hash:?}");
+            assert_eq!(notes(&store, &first[2]), [pair("file", "kept")], "{hash:?}");
+        }
+    }
+
+    /// A commit of a tree of `entries` (mode, name and ID, in Git's order) on `parents`.
+    fn commit_on(git: &Craft, parents: &[GitId], entries: &[(&[u8], &[u8], GitId)]) -> GitId {
+        let tree = git.tree(entries);
+        git.commit(&commit_bytes(&tree, parents, "", b"m\n"))
+    }
+
+    fn pair(from: &str, to: &str) -> (String, String) {
+        (from.to_owned(), to.to_owned())
+    }
+
+    /// The move notes of the save `save`, as (from, to). They must be the notes a save's own
+    /// comparison of its first parent's listings with its own gives, as they were stored.
+    #[track_caller]
+    fn notes(store: &Store, save: &Id) -> Vec<(String, String)> {
+        let pairs = |notes: &[MoveNote]| -> Vec<(String, String)> {
+            notes.iter().map(|n| pair(&n.from, &n.to)).collect()
+        };
+        let save = store.save(save, false).unwrap();
+        if let Some(first) = save.parents.first() {
+            let before = store.save(first, false).unwrap().root;
+            let compared = same_contents(store, &HashMap::new(), before, save.root, MAX_LEFT_BYTES);
+            let mut want = compared.unwrap().unwrap_or_default();
+            first_that_fit(&mut want, MAX_MOVE_NOTES as usize, MAX_NOTED_BYTES);
+            assert_eq!(
+                pairs(&save.move_notes),
+                pairs(&want),
+                "as a save notes them"
+            );
+        }
+        pairs(&save.move_notes)
+    }
+
+    #[test]
+    fn a_rename_with_the_same_contents_is_noted() {
+        let (dir, git) = repo(Sha1);
+        let (hello, stay, go) = (
+            blob(&git, b"hello\n"),
+            blob(&git, b"stay\n"),
+            blob(&git, b"go\n"),
+        );
+        let first = commit_on(
+            &git,
+            &[],
+            &[
+                (b"100644", b"a.txt", hello),
+                (b"100644", b"keep", stay),
+                (b"100755", b"run", go),
+            ],
+        );
+        // The executable mark may change with the move.
+        let bin = git.tree(&[(b"100644", b"run", go)]);
+        let second = commit_on(
+            &git,
+            &[first],
+            &[
+                (b"100644", b"b.txt", hello),
+                (b"40000", b"bin", bin),
+                (b"100644", b"keep", stay),
+            ],
+        );
+        let (saves, store) = convert(dir.path(), "a", |c| {
+            [first, second].map(|id| c.commit(&id).unwrap())
+        });
+        assert_eq!(
+            notes(&store, &saves[1]),
+            [pair("a.txt", "b.txt"), pair("run", "bin/run")]
+        );
+    }
+
+    #[test]
+    fn a_rename_with_an_edit_is_not() {
+        let (dir, git) = repo(Sha1);
+        let first = commit_on(&git, &[], &[(b"100644", b"a.txt", blob(&git, b"hello\n"))]);
+        let edited = blob(&git, b"hello!\n");
+        let second = commit_on(&git, &[first], &[(b"100644", b"b.txt", edited)]);
+        let (saves, store) = convert(dir.path(), "a", |c| {
+            [first, second].map(|id| c.commit(&id).unwrap())
+        });
+        assert!(notes(&store, &saves[1]).is_empty());
+    }
+
+    /// Contents that leave or arrive at two places are no move: which file went where would be a
+    /// guess.
+    #[test]
+    fn two_files_with_one_contents_give_no_note() {
+        let (dir, git) = repo(Sha1);
+        let (same, other) = (blob(&git, b"same\n"), blob(&git, b"other\n"));
+        let twins = commit_on(
+            &git,
+            &[],
+            &[
+                (b"100644", b"a", same),
+                (b"100644", b"b", same),
+                (b"100644", b"k", other),
+            ],
+        );
+        // Both renamed.
+        let both = commit_on(
+            &git,
+            &[twins],
+            &[
+                (b"100644", b"c", same),
+                (b"100644", b"d", same),
+                (b"100644", b"k", other),
+            ],
+        );
+        // Two to one place, and one to two.
+        let joined = commit_on(
+            &git,
+            &[twins],
+            &[(b"100644", b"c", same), (b"100644", b"k", other)],
+        );
+        let one = commit_on(&git, &[], &[(b"100644", b"a", same)]);
+        let split = commit_on(
+            &git,
+            &[one],
+            &[(b"100644", b"c", same), (b"100644", b"d", same)],
+        );
+        let (saves, store) = convert(dir.path(), "a", |c| {
+            [twins, both, joined, one, split].map(|id| c.commit(&id).unwrap())
+        });
+        for (i, save) in saves.iter().enumerate() {
+            assert!(notes(&store, save).is_empty(), "{i}");
+        }
+    }
+
+    /// A file renamed beside one with the same contents that stays where it is: only files that
+    /// left or arrived count, so the move is certain, and no note names the file left in place.
+    #[test]
+    fn a_rename_beside_a_file_with_the_same_contents_is_noted() {
+        let (dir, git) = repo(Sha1);
+        let license = blob(&git, b"the license\n");
+        let sub = git.tree(&[(b"100644", b"LICENSE", license)]);
+        let first = commit_on(
+            &git,
+            &[],
+            &[(b"100644", b"LICENSE", license), (b"40000", b"sub", sub)],
+        );
+        let second = commit_on(
+            &git,
+            &[first],
+            &[(b"100644", b"COPYING", license), (b"40000", b"sub", sub)],
+        );
+        let (saves, store) = convert(dir.path(), "a", |c| {
+            [first, second].map(|id| c.commit(&id).unwrap())
+        });
+        assert_eq!(notes(&store, &saves[1]), [pair("LICENSE", "COPYING")]);
+    }
+
+    /// Each file of a folder moved whole is noted, in order of where it went.
+    #[test]
+    fn a_folder_moved_whole_notes_each_file() {
+        let (dir, git) = repo(Sha1);
+        let names: Vec<String> = (0..2000).map(|i| format!("{i:04}.png")).collect();
+        let pictures: Vec<GitId> = (0..2000)
+            .map(|i| blob(&git, format!("picture {i}\n").as_bytes()))
+            .collect();
+        let entries: Vec<(&[u8], &[u8], GitId)> = (names.iter().zip(&pictures))
+            .map(|(name, id)| (&b"100644"[..], name.as_bytes(), *id))
+            .collect();
+        let art = git.tree(&entries);
+        let readme = blob(&git, b"read me\n");
+        let first = commit_on(
+            &git,
+            &[],
+            &[(b"100644", b"README", readme), (b"40000", b"art", art)],
+        );
+        let assets = git.tree(&[(b"40000", b"art", art)]);
+        let second = commit_on(
+            &git,
+            &[first],
+            &[
+                (b"100644", b"README", readme),
+                (b"40000", b"assets", assets),
+            ],
+        );
+        let (saves, store) = convert(dir.path(), "a", |c| {
+            [first, second].map(|id| c.commit(&id).unwrap())
+        });
+        let want: Vec<(String, String)> = (names.iter())
+            .map(|name| pair(&format!("art/{name}"), &format!("assets/art/{name}")))
+            .collect();
+        assert_eq!(notes(&store, &saves[1]), want);
+    }
+
+    #[test]
+    fn a_link_an_empty_file_and_a_project_link_are_never_noted() {
+        let (dir, git) = repo(Sha1);
+        let (target, empty) = (blob(&git, b"target"), blob(&git, b""));
+        let sub = GitId::from_hex(Sha1, &"ab".repeat(20)).unwrap();
+        let first = commit_on(
+            &git,
+            &[],
+            &[
+                (b"100644", b"a", target),
+                (b"100644", b"e", empty),
+                (b"120000", b"l", target),
+                (b"160000", b"s", sub),
+            ],
+        );
+        let second = commit_on(
+            &git,
+            &[first],
+            &[
+                (b"100644", b"b", target),
+                (b"100644", b"e2", empty),
+                (b"120000", b"l2", target),
+                (b"160000", b"s2", sub),
+            ],
+        );
+        let (saves, store) = convert(dir.path(), "a", |c| {
+            [first, second].map(|id| c.commit(&id).unwrap())
+        });
+        // Nor does a link holding the file's bytes make the file's move unsure.
+        assert_eq!(notes(&store, &saves[1]), [pair("a", "b")]);
+    }
+
+    /// A Git LFS file counts by what it holds: two pointers to one file are the same contents, and
+    /// so are a file and a pointer to its bytes.
+    #[test]
+    fn an_lfs_file_renamed_is_noted_by_what_it_holds() {
+        let (dir, git) = repo(Sha1);
+        let pointer = git.lfs_object(b"the real picture\n");
+        let lf = blob(&git, pointer.as_bytes());
+        let crlf = blob(&git, pointer.replace('\n', "\r\n").as_bytes());
+        let sound = b"a real sound\n";
+        let plain = blob(&git, sound);
+        let to_sound = blob(&git, git.lfs_object(sound).as_bytes());
+        let first = commit_on(
+            &git,
+            &[],
+            &[
+                (b"100644", b"hero.psd", lf),
+                (b"100644", b"sound.wav", plain),
+            ],
+        );
+        let art = git.tree(&[(b"100644", b"hero.psd", crlf)]);
+        let second = commit_on(
+            &git,
+            &[first],
+            &[
+                (b"40000", b"art", art),
+                (b"100644", b"sound.lfs.wav", to_sound),
+            ],
+        );
+        let (saves, store) = convert(dir.path(), "a", |c| {
+            [first, second].map(|id| c.commit(&id).unwrap())
+        });
+        assert_eq!(
+            notes(&store, &saves[1]),
+            [
+                pair("hero.psd", "art/hero.psd"),
+                pair("sound.wav", "sound.lfs.wav")
+            ]
+        );
+    }
+
+    /// A name the import leaves out, and what is below it, is never a place a file left or
+    /// arrived at.
+    #[test]
+    fn a_name_the_import_leaves_out_is_in_no_note() {
+        let (dir, git) = repo(Sha1);
+        let (secret, kept) = (blob(&git, b"secret\n"), blob(&git, b"kept\n"));
+        // A file renamed to a name the import leaves out.
+        let one = commit_on(
+            &git,
+            &[],
+            &[(b"100644", b"config", secret), (b"100644", b"keep", kept)],
+        );
+        let two = commit_on(
+            &git,
+            &[one],
+            &[(b"100644", b"git~1", secret), (b"100644", b"keep", kept)],
+        );
+        let (saves, store) = convert(dir.path(), "a", |c| {
+            [one, two].map(|id| c.commit(&id).unwrap())
+        });
+        assert!(notes(&store, &saves[1]).is_empty());
+        // Out of a folder the import leaves out, then into another.
+        let hooks = git.tree(&[(b"100644", b"config", secret)]);
+        let first = commit_on(
+            &git,
+            &[],
+            &[(b"40000", b".GIT", hooks), (b"100644", b"keep", kept)],
+        );
+        let second = commit_on(
+            &git,
+            &[first],
+            &[(b"100644", b"config", secret), (b"100644", b"keep", kept)],
+        );
+        let third = commit_on(
+            &git,
+            &[second],
+            &[(b"40000", b"git~1", hooks), (b"100644", b"keep", kept)],
+        );
+        let (saves, store) = convert(dir.path(), "b", |c| {
+            [first, second, third].map(|id| c.commit(&id).unwrap())
+        });
+        for (i, save) in saves.iter().enumerate() {
+            assert!(notes(&store, save).is_empty(), "{i}");
+        }
+    }
+
+    /// Letter case and Unicode form tell two names apart, so a rename that changes only them is a
+    /// move.
+    #[test]
+    fn a_case_only_rename_is_noted() {
+        let (dir, git) = repo(Sha1);
+        let (readme, menu) = (blob(&git, b"read me\n"), blob(&git, b"menu\n"));
+        let first = commit_on(
+            &git,
+            &[],
+            &[
+                (b"100644", b"README", readme),
+                (b"100644", "caf\u{e9}.txt".as_bytes(), menu),
+            ],
+        );
+        let second = commit_on(
+            &git,
+            &[first],
+            &[
+                (b"100644", b"Readme", readme),
+                (b"100644", "cafe\u{301}.txt".as_bytes(), menu),
+            ],
+        );
+        let (saves, store) = convert(dir.path(), "a", |c| {
+            [first, second].map(|id| c.commit(&id).unwrap())
+        });
+        assert_eq!(
+            notes(&store, &saves[1]),
+            [
+                pair("README", "Readme"),
+                pair("caf\u{e9}.txt", "cafe\u{301}.txt")
+            ]
+        );
+    }
+
+    /// A merge notes against its first parent, as a combined save does: so it records the moves
+    /// the other line brought in.
+    #[test]
+    fn a_merge_notes_against_its_first_parent() {
+        let (dir, git) = repo(Sha1);
+        let (moved, stays, own) = (
+            blob(&git, b"moved\n"),
+            blob(&git, b"stays\n"),
+            blob(&git, b"the left line's\n"),
+        );
+        let base = commit_on(
+            &git,
+            &[],
+            &[(b"100644", b"a.txt", moved), (b"100644", b"b.txt", stays)],
+        );
+        let left = commit_on(
+            &git,
+            &[base],
+            &[
+                (b"100644", b"a.txt", moved),
+                (b"100644", b"b.txt", stays),
+                (b"100644", b"l.txt", own),
+            ],
+        );
+        let right = commit_on(
+            &git,
+            &[base],
+            &[(b"100644", b"b.txt", stays), (b"100644", b"c.txt", moved)],
+        );
+        let merged: &[(&[u8], &[u8], GitId)] = &[
+            (b"100644", b"b.txt", stays),
+            (b"100644", b"c.txt", moved),
+            (b"100644", b"l.txt", own),
+        ];
+        let merge = commit_on(&git, &[left, right], merged);
+        let other_way = commit_on(&git, &[right, left], merged);
+        let (saves, store) = convert(dir.path(), "a", |c| {
+            [base, left, right, merge, other_way].map(|id| c.commit(&id).unwrap())
+        });
+        assert_eq!(notes(&store, &saves[2]), [pair("a.txt", "c.txt")]);
+        assert_eq!(notes(&store, &saves[3]), [pair("a.txt", "c.txt")]);
+        // Its first parent had moved the file already.
+        assert!(notes(&store, &saves[4]).is_empty());
+    }
+
+    /// A commit without parents notes nothing, the first or any other.
+    #[test]
+    fn the_first_commit_notes_nothing() {
+        let (dir, git) = repo(Sha1);
+        let file = blob(&git, b"a file\n");
+        let first = commit_on(&git, &[], &[(b"100644", b"a", file)]);
+        // Another start, as `git checkout --orphan` makes one.
+        let again = commit_on(&git, &[], &[(b"100644", b"b", file)]);
+        let (saves, store) = convert(dir.path(), "a", |c| {
+            [first, again].map(|id| c.commit(&id).unwrap())
+        });
+        for save in &saves {
+            assert!(store.save(save, false).unwrap().move_notes.is_empty());
         }
     }
 

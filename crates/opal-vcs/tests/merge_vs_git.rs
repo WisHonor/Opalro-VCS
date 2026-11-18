@@ -663,12 +663,13 @@ fn branch_named(name: &str) -> usize {
 /// they leave the same files, folders and marks, on disk and in the saves. Where Opalro asked for
 /// a clean line stops, it stopped for conflicts and changed nothing; kept, they are at the places
 /// Git reports unmerged, and taking one side everywhere gives what Git's `checkout --ours` or
-/// `--theirs` gives. Git pairs a file moved and edited with its old self by likeness, which
-/// Opalro never guesses: so Git alone may merge (Opalro's reasons then name moved files), where
-/// the other branch removed the file Opalro alone keeps it where Git reports exactly that pair of
-/// conflicts, and where both conflict only moved files may tell their places apart (such a case
-/// is counted and printed, not compared). The seed is fixed; counts sit between floors and
-/// ceilings.
+/// `--theirs` gives. Git pairs a moved file with its old self by likeness at the branch's end;
+/// Opalro follows each move the history recorded (the import notes a move committed by itself)
+/// and guesses none. So one may merge where the other stops, as long as Opalro's reasons name
+/// moved files; where the other branch removed a file moved and edited in one commit, Opalro alone
+/// keeps it where Git reports exactly that pair of conflicts; and where both conflict only moved
+/// files may tell their places apart (such a case is counted and printed, not compared). The seed
+/// is fixed; counts sit between floors and ceilings.
 #[test]
 fn combine_matches_git_merge() {
     const KINDS: [&str; 4] = [
@@ -798,21 +799,28 @@ fn combine_matches_git_merge() {
                     keep_sides_match_git(&env, clone.path(), fast_import)?;
                     *compared.borrow_mut() += 1;
                 } else {
-                    // Set aside only where Git says it followed a move at every path that tells
-                    // the two apart, and only once nothing either line made is lost.
+                    // Set aside only where a move one program followed and the other didn't
+                    // explains every path that tells the two apart, and only once nothing either
+                    // line made is lost. Git's rename detection follows a moved and edited file by
+                    // likeness; Opalro follows each move the history made, which the import
+                    // noted, even where later edits leave the file too unlike its old self for
+                    // Git's merge to pair them.
                     let renamed = git_renames(clone.path());
                     let apart: Vec<&String> = unmerged.symmetric_difference(&places).collect();
+                    let (by_git, by_opalro): (Vec<&String>, Vec<&String>) =
+                        apart.iter().copied().partition(|p| renamed.contains(*p));
                     let unexplained: Vec<&&String> =
-                        apart.iter().filter(|p| !renamed.contains(**p)).collect();
+                        by_opalro.iter().filter(|p| !made.moved(p)).collect();
                     prop_assert!(
                         unexplained.is_empty(),
-                        "Git: {unmerged:?}, Opalro: {places:?}; no move Git followed at {unexplained:?}\n{fast_import}"
+                        "Git: {unmerged:?}, Opalro: {places:?}; no move at {unexplained:?}\n{fast_import}"
                     );
                     if let Err(lost) = nothing_lost(&made, &kept_sides(&env)) {
                         prop_assert!(false, "{lost}\n{fast_import}");
                     }
                     skipped.borrow_mut().push(format!(
-                        "Git {unmerged:?}, Opalro {places:?}: Git followed a move at {apart:?}"
+                        "Git {unmerged:?}, Opalro {places:?}: a move Git followed at {by_git:?}, \
+                         one only Opalro followed at {by_opalro:?}"
                     ));
                 }
             }
@@ -877,7 +885,8 @@ fn combine_matches_git_merge() {
                 opalro_only.borrow_mut().push(format!("{renamed:?}"));
             }
             if kind == 3 {
-                // Git followed a move Opalro didn't: each file Opalro names was moved.
+                // A move one of them followed and the other didn't: each file Opalro names was
+                // moved.
                 for line in &why {
                     let path = line.trim_start().split_once(": ").unwrap().0;
                     prop_assert!(made.moved(path), "{said}\n{fast_import}");
@@ -921,7 +930,8 @@ fn combine_matches_git_merge() {
     }
     let compared = compared.into_inner();
     println!(
-        "both conflict: {compared} compared, {} set aside where Git followed a move",
+        "both conflict: {compared} compared, {} set aside where a move only one followed tells \
+         them apart",
         skipped.len()
     );
     println!("took {:.1?}", started.elapsed());
@@ -929,11 +939,14 @@ fn combine_matches_git_merge() {
         compared >= 16,
         "{compared} cases where both conflict compared"
     );
-    // Measured with Git 2.50.1: 57 both clean, 34 both conflict (20 compared, 14 set aside where
-    // Git followed a move, nothing lost), 1 Opalro clean only (the accepted case; any other fails), 4 Git
-    // clean only, 12 moves followed into a file the other branch edited, 5 files edited before
-    // their move and on the other branch. Another Git can pair a few files its own way, so each
-    // bound has some room.
+    // Measured with Git 2.50.1, with the import's notes: 57 both clean, 35 both conflict (25
+    // compared; 10 set aside, 8 where Git followed a move and 2 where only Opalro did, nothing
+    // lost), 0 Opalro clean only (these histories never move and edit a file in one commit), 4 Git
+    // clean only (each a file moved and edited, in commits of their own, on one branch and removed
+    // on the other: Opalro follows the noted move and asks, where Git finds the ends too unlike to
+    // pair), 11 moves followed into a file the other branch edited, 5 files edited before their
+    // move and on the other branch. Another Git can pair a few files its own way, so each bound
+    // has some room.
     assert!(counts[0] >= 40 && counts[3] <= 8, "{KINDS:?}: {counts:?}");
     assert!(
         followed >= 4,
@@ -1177,50 +1190,65 @@ fn opalro(env: &Env, args: &[&str], code: i32) -> String {
     said
 }
 
-/// A file moved and edited on one line and removed on the other: from Git's history, Opalro sees
-/// an old file both lines removed and a new file, and keeps it; Git pairs the two and asks.
+/// A file moved and edited on one line and removed on the other, imported from Git, where Git
+/// pairs the two and asks. The move committed by itself is noted by the import, and the combine
+/// stops as Git does; committed with the edit, it has no note, and Opalro sees an old file both
+/// lines removed and a new file, which it keeps.
 #[test]
-fn a_file_moved_and_changed_and_removed_on_the_other_line_is_kept_where_git_asks() {
-    let env = Env::new();
-    env.commit("a.txt", "1\n2\n3\n", "First");
-    env.git(&["checkout", "-q", "-b", "side"]);
-    env.git(&["rm", "-q", "a.txt"]);
-    env.git(&["commit", "-q", "-m", "Side removes a.txt"]);
-    env.git(&["checkout", "-q", "main"]);
-    env.git(&["mv", "a.txt", "b.txt"]);
-    env.git(&["commit", "-q", "-m", "Main moves a.txt"]);
-    env.commit("b.txt", "one\n2\n3\n", "Main edits b.txt");
-    env.import();
-    let clone = tempfile::tempdir().unwrap();
-    git(
-        env.root(),
-        &["clone", "-q", ".", clone.path().to_str().unwrap()],
-    );
+fn a_move_committed_by_itself_is_followed_and_one_committed_with_an_edit_is_not() {
+    for apart in [true, false] {
+        let env = Env::new();
+        env.commit("a.txt", "1\n2\n3\n", "First");
+        env.git(&["checkout", "-q", "-b", "side"]);
+        env.git(&["rm", "-q", "a.txt"]);
+        env.git(&["commit", "-q", "-m", "Side removes a.txt"]);
+        env.git(&["checkout", "-q", "main"]);
+        env.git(&["mv", "a.txt", "b.txt"]);
+        if apart {
+            env.git(&["commit", "-q", "-m", "Main moves a.txt"]);
+        }
+        env.commit("b.txt", "one\n2\n3\n", "Main edits b.txt");
+        env.import();
+        let clone = tempfile::tempdir().unwrap();
+        git(
+            env.root(),
+            &["clone", "-q", ".", clone.path().to_str().unwrap()],
+        );
 
-    opalro(&env, &["combine", "side", "--only-if-clean"], 0);
-    assert_eq!(
-        files(env.root()),
-        support::holding(&[("b.txt", "one\n2\n3\n")])
-    );
-    let theirs = git_with_input(
-        clone.path(),
-        &[
-            "-c",
-            "merge.directoryRenames=false",
-            "-c",
-            "merge.renames=true",
-            "merge",
-            "--no-edit",
-            "origin/side",
-        ],
-        b"",
-    );
-    assert_eq!(theirs.status.code(), Some(1));
-    assert!(
-        text(&theirs.stdout).contains("CONFLICT (rename/delete): a.txt renamed to b.txt in HEAD"),
-        "{}",
-        text(&theirs.stdout)
-    );
+        if apart {
+            let said = opalro(&env, &["combine", "side", "--only-if-clean"], 1);
+            assert!(
+                said.contains("\n  b.txt: moved here from a.txt on main, removed on side"),
+                "{said}"
+            );
+        } else {
+            opalro(&env, &["combine", "side", "--only-if-clean"], 0);
+            assert_eq!(
+                files(env.root()),
+                support::holding(&[("b.txt", "one\n2\n3\n")])
+            );
+        }
+        let theirs = git_with_input(
+            clone.path(),
+            &[
+                "-c",
+                "merge.directoryRenames=false",
+                "-c",
+                "merge.renames=true",
+                "merge",
+                "--no-edit",
+                "origin/side",
+            ],
+            b"",
+        );
+        assert_eq!(theirs.status.code(), Some(1));
+        assert!(
+            text(&theirs.stdout)
+                .contains("CONFLICT (rename/delete): a.txt renamed to b.txt in HEAD"),
+            "{}",
+            text(&theirs.stdout)
+        );
+    }
 }
 
 /// The same made in Opalro: a move saved by itself is noted, and the combine stops as Git does; a
