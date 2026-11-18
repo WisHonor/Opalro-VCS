@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 11; the owner put it first in the next version, [decision 189](189-the-owners-review-of-v0.2.md) point 5: "it changes what an import writes, so it gets a decision of its own and its comparison with Git")
 - **Decided by:** the owner, the rule (a commit that takes a file away from one path and puts the same contents at exactly one new path); Claude, while the owner was away, how it is built and what follows from it. The owner can reverse any part.
 - **Refines:** [decision 032](032-exact-repeatable-commit-import.md) (commits become saves exactly and repeatably), [decision 040](040-import-once-catch-up-later.md) (catching up later), [decision 168](168-moves-in-saves-and-in-combines.md) (moves in saves and combines), [decision 170](170-what-building-milestone-8-refined.md), [decision 184](184-opalro-who-the-save-behind-each-line.md) (what `who` follows)
+- **Refined by:** [decision 197](197-red-team-m11-rulings.md) (after the red team: what comparing commits may cost, and how it is counted)
 
 ## Context
 

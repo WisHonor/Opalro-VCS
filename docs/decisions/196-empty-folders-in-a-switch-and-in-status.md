@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 11; the owner put it first in the next version, [decision 189](189-the-owners-review-of-v0.2.md) point 5: "one decision for both, since they share a cause")
 - **Decided by:** the owner, that both change; Claude, while the owner was away, how. The owner can reverse any part.
 - **Refines:** [decision 004](004-project-contents.md) (empty folders are part of a save), [decision 170](170-what-building-milestone-8-refined.md) (a combine's empty folders), [decision 177](177-recording-a-fix-save-and-resolve.md) (`resolve --keep`), [decision 179](179-every-command-and-a-conflict.md) (`status` and conflicts), [decision 188](188-red-team-m10-rulings.md) (RT24-1)
+- **Refined by:** [decision 197](197-red-team-m11-rulings.md) (after the red team: a switch counts an entry it removes to put one of another kind in its place)
 
 ## Context
 
