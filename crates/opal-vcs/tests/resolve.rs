@@ -1019,6 +1019,27 @@ fn keeping_nothing_where_the_folder_is_on_disk_keeps_it_empty() {
     assert_eq!(support::entries(env.root()), before);
 }
 
+/// The same, where a link to a folder outside stands where the folder was: a link is never
+/// followed, so the folder counts as gone, and what the link leads to is left as it is.
+#[test]
+fn keeping_nothing_where_a_link_stands_for_the_folder_leaves_it_out() {
+    let env = project();
+    in_a_deleted_folder(&env);
+    let outside = env.config().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("theirs.txt"), "theirs\n").unwrap();
+    support::link_folder(&outside, &env.root().join("d"));
+    run(&env, &["resolve", "d/a.txt", "--keep", "mine"], 0);
+    let saved = support::saved_paths(&env, support::main_tip(&env));
+    assert!(!saved.contains_key("d"), "{saved:?}");
+    let left: Vec<_> = std::fs::read_dir(&outside).unwrap().collect();
+    assert_eq!(left.len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(outside.join("theirs.txt")).unwrap(),
+        "theirs\n"
+    );
+}
+
 /// The same, kept on the side that holds a file there: the folder is made, to hold it.
 #[test]
 fn keeping_a_file_below_a_deleted_folder_makes_the_folder_for_it() {

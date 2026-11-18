@@ -644,7 +644,7 @@ Planned on 2026-11-17 after decisions [193](decisions/193-the-next-version-start
 **5. The flush after the journal is removed** ✅ (2026-11-18; Task 7)
 - The journal a finished switch can leave is put to every command; the crash tests' page says what they do.
 - *Done when:* the tests pass on the code as it is and the write-up for the owner is in [benchmarks.md](benchmarks.md) and the follow-ups. No flush changes.
-- No fault was found: every command handles the journal a lost removal leaves, and the one state that dropping the flush could add, which only a drive that reorders could make, stops every change until the journal is deleted ([benchmarks.md](benchmarks.md) §15; the [follow-ups](plans/2026-11-01-milestone-1-follow-ups.md), "For the owner to decide").
+- No fault was found: every command (all but `setup --upgrade`, which only turns on features) handles the journal a lost removal leaves, and the one state that dropping the flush could add, which only a drive that reorders could make, stops every change but that one until the journal is deleted ([benchmarks.md](benchmarks.md) §15; the [follow-ups](plans/2026-11-01-milestone-1-follow-ups.md), "For the owner to decide").
 
 **6. `who` at a combine** ✅ (2026-11-18; Task 8)
 - Git's rule measured on a throwaway branch against `who`'s.

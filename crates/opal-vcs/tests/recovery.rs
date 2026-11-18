@@ -961,6 +961,8 @@ fn every_reading_command_warns(env: &Env, warning: &str) {
         assert_eq!(out.status.code(), Some(0), "{args:?}: {said}");
         assert!(said.contains(warning), "{args:?}: {said}");
     }
+    // Reading leaves the journal for a command that changes the project.
+    assert!(env.root().join(".opalro/state/journal").is_file());
 }
 
 #[cfg(feature = "fault-injection")]

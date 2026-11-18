@@ -689,8 +689,13 @@ fn only_conflicts_fill(stored: &Tree, folder: &str) -> bool {
 fn put_back(stored: &Tree, folder: &Tree) -> Tree {
     let mut tree = stored.standing();
     let has = |f: &String| folder.folders.contains(f) || folder.files.contains_key(f);
-    tree.folders
-        .retain(|f| has(f) || !only_conflicts_fill(stored, f));
+    tree.folders.retain(|f| {
+        let left_out = !has(f) && only_conflicts_fill(stored, f);
+        if left_out {
+            met("put back: a folder only conflicts fill left out");
+        }
+        !left_out
+    });
     tree
 }
 
@@ -731,8 +736,13 @@ fn switch(folder: &Tree, from: &Tree, into: &Tree) -> Result<Tree, BTreeSet<Stri
     }
     // Not one only places standing as nothing fill, unless a file of the folder's is in its way.
     for p in into.folders.difference(&from.folders) {
-        if !only_conflicts_fill(stored, p) || folder.files.contains_key(p) {
-            after.add_folder(p);
+        match (only_conflicts_fill(stored, p), folder.files.contains_key(p)) {
+            (false, _) => after.add_folder(p),
+            (true, true) => {
+                met("a switch made a folder only conflicts fill, in a file's place");
+                after.add_folder(p);
+            }
+            (true, false) => met("a switch left out a folder only conflicts fill"),
         }
     }
     Ok(after)
@@ -5220,8 +5230,10 @@ fn cases() -> u32 {
 /// The kinds of case the fixed pass must meet at least 3 times each: every clash a combine keeps
 /// that the model's files can make (two kinds at one place, a link, a rule against markers and
 /// files past the text limits they can't), the starting points that disagree, a line's conflict
-/// that stops a combine, and each way the other commands meet a conflict.
-const MUST_MEET: [&str; 40] = [
+/// that stops a combine, each way the other commands meet a conflict, and an empty folder
+/// `status` lists as added (one removed is met too seldom here: the folders' own pass needs it).
+const MUST_MEET: [&str; 41] = [
+    "status: an empty folder added",
     "changed on both, in the same place",
     "changed on both, not text",
     "changed, removed",
@@ -5362,6 +5374,54 @@ fn a_start_in_conflict_that_both_lines_fixed_is_unknown() {
 #[test]
 fn a_start_in_conflict_that_both_lines_fixed_is_unknown_when_asked_for_a_clean_line() {
     run(&parted_in_conflict(true));
+}
+
+/// Acts on folders, files, saves and switches only, so that empty folders come and go often.
+fn folder_act() -> impl Strategy<Value = Act> {
+    let folder = || prop::sample::select(&FOLDERS[..]);
+    let file = || prop::sample::select(&FILES[..]);
+    prop_oneof![
+        3 => folder().prop_map(Act::MakeFolder),
+        3 => folder().prop_map(Act::DeleteFolder),
+        3 => Just(Act::Save),
+        2 => (file(), any::<u8>()).prop_map(|(p, b)| Act::Write(p, b, 1, When::Now)),
+        1 => file().prop_map(Act::Delete),
+        2 => (any::<usize>(), any::<bool>()).prop_map(|(pick, by_line)| Act::Goto {
+            pick,
+            by_line,
+            unsaved: Unsaved::Save
+        }),
+        1 => Just(Act::Discard(None)),
+    ]
+}
+
+/// Folders made, deleted and saved among files and switches, from a fixed seed: the main pass
+/// meets an empty folder removed too seldom to require it, so this one requires both kinds.
+#[test]
+fn a_fixed_pass_of_folders_meets_both_kinds_of_empty_folder() {
+    let config = ProptestConfig {
+        cases: 32,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    };
+    let rng = TestRng::deterministic_rng(RngAlgorithm::ChaCha);
+    let acts = prop::collection::vec(folder_act(), 1..=20);
+    let done = TestRunner::new_with_rng(config, rng).run(&acts, |acts| {
+        run(&acts);
+        Ok(())
+    });
+    if let Err(e) = done {
+        panic!("{e}");
+    }
+    let met = MET.with(|m| m.borrow().clone());
+    println!("met on the folders' pass: {met:#?}");
+    for kind in [
+        "status: an empty folder added",
+        "status: an empty folder removed",
+    ] {
+        let n = met.get(kind).copied().unwrap_or(0);
+        assert!(n >= 3, "{kind}: met {n} times");
+    }
 }
 
 /// A saved empty folder deleted, then a new one made in a folder that holds a file.

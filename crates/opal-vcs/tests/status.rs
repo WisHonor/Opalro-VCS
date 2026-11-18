@@ -588,6 +588,29 @@ fn status_shows_an_empty_folder_added_and_removed() {
     );
 }
 
+/// Where a file and an empty folder share a path, the row of the one that went comes first,
+/// whichever it is.
+#[test]
+fn a_file_and_an_empty_folder_at_one_path_list_what_went_first() {
+    let env = project(&[("a.txt", "a"), ("p", "pp")]);
+    fs::create_dir(env.root().join("q")).unwrap();
+    env.opalro().args(["save", "Both"]).assert().success();
+    fs::remove_file(env.root().join("p")).unwrap();
+    fs::create_dir(env.root().join("p")).unwrap();
+    fs::remove_dir(env.root().join("q")).unwrap();
+    fs::write(env.root().join("q"), "qqq").unwrap();
+    let out = env.opalro().arg("status").output().unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    let said = text(&out.stdout);
+    assert!(
+        said.ends_with(
+            "\nChanged since then (2 files):\n\n    removed  p           2 B\n    added    p  \
+             empty folder\n    removed  q  empty folder\n    added    q           3 B\n"
+        ),
+        "{said}"
+    );
+}
+
 #[test]
 fn status_json_lists_empty_folders() {
     let env = project(&[("a.txt", "a")]);

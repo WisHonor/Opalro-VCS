@@ -910,18 +910,21 @@ mod tests {
                     Ok::<(), StoreError>(())
                 })
                 .unwrap();
-                let want = same_contents(&store, &unstored, a, b, MAX_LEFT_BYTES).unwrap();
-                let got = moves_by(
-                    |each| {
+                let reversed = |most| {
+                    let walk = |each: &mut dyn FnMut(&str, Option<&Entry>, Option<&Entry>) -> _| {
                         for (path, old, new) in changes.iter().rev() {
                             each(path, old.as_ref(), new.as_ref())?;
                         }
                         Ok::<(), StoreError>(())
-                    },
-                    MAX_LEFT_BYTES,
-                )
-                .unwrap();
-                prop_assert_eq!(&got, &want);
+                    };
+                    moves_by(walk, most).unwrap()
+                };
+                let want = same_contents(&store, &unstored, a, b, MAX_LEFT_BYTES).unwrap();
+                prop_assert_eq!(&reversed(MAX_LEFT_BYTES), &want);
+                // At a bound some cases pass, the answer doesn't depend on the order either.
+                let small = 2 * HELD_PER_PLACE + 4;
+                let want_small = same_contents(&store, &unstored, a, b, small).unwrap();
+                prop_assert_eq!(&reversed(small), &want_small);
                 // What each case met, from the paths that left and arrived.
                 let notes = want.unwrap_or_default();
                 let (mut left, mut arrived) = (Vec::new(), Vec::new());
@@ -939,11 +942,19 @@ mod tests {
                 if !notes.is_empty() {
                     kinds.insert("a note");
                 }
+                if want_small.is_none() {
+                    kinds.insert("past a small bound");
+                }
                 for (path, e) in &left {
                     let went = left.iter().filter(|(_, l)| alike(l, e)).count();
                     let came = arrived.iter().filter(|(_, a)| alike(a, e)).count();
                     let kind = match (e.kind == Symlink || e.size == 0, went, came) {
-                        (_, _, 0) | (false, 1, 1) => continue,
+                        (_, _, 0) => continue,
+                        // Contents that left once and arrived once moved.
+                        (false, 1, 1) => {
+                            prop_assert!(notes.iter().any(|n| n.from == **path), "{path}");
+                            continue;
+                        }
                         (true, ..) => "a link or empty file passed over",
                         (false, 1, _) => "contents that arrived twice",
                         (false, ..) => "contents that left twice",
@@ -963,8 +974,49 @@ mod tests {
             "contents that left twice",
             "contents that arrived twice",
             "a link or empty file passed over",
+            "past a small bound",
         ] {
             assert!(met.get(kind).is_some_and(|&n| n >= 3), "{met:?}");
+        }
+    }
+
+    /// A walk that fails gives its error back, the first time it is asked or the second, when
+    /// the pairing looks for arrivals.
+    #[test]
+    fn a_walk_that_fails_gives_its_error_back() {
+        #[derive(Debug, PartialEq)]
+        struct Failed;
+        impl From<StoreError> for Failed {
+            fn from(_: StoreError) -> Failed {
+                Failed
+            }
+        }
+        let file = |name: &str| Entry {
+            name: name.into(),
+            kind: File,
+            id: hash_content(b"1"),
+            size: 1,
+        };
+        // A move, so that the pairing walks twice.
+        let changes = [("a", Some(file("a")), None), ("b", None, Some(file("b")))];
+        for failing in [1, 2] {
+            let mut calls = 0;
+            let got = moves_by(
+                |each| {
+                    calls += 1;
+                    for (path, old, new) in &changes {
+                        each(path, old.as_ref(), new.as_ref())?;
+                    }
+                    if calls == failing {
+                        Err(Failed)
+                    } else {
+                        Ok(())
+                    }
+                },
+                MAX_LEFT_BYTES,
+            );
+            assert_eq!(got, Err(Failed), "failing at call {failing}");
+            assert_eq!(calls, failing);
         }
     }
 }

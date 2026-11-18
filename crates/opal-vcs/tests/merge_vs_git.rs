@@ -801,19 +801,25 @@ fn combine_matches_git_merge() {
                 } else {
                     // Set aside only where a move one program followed and the other didn't
                     // explains every path that tells the two apart, and only once nothing either
-                    // line made is lost. Git's rename detection follows a moved and edited file by
-                    // likeness; Opalro follows each move the history made, which the import
-                    // noted, even where later edits leave the file too unlike its old self for
-                    // Git's merge to pair them.
+                    // line made is lost: a path Git's rename detection names as a rename's old or
+                    // new place, where Git followed a move by likeness; or else one where the
+                    // history moved a file, and, where only Opalro holds a conflict, a note on
+                    // either line names it, so Opalro followed that move, as it does even where
+                    // later edits leave the file too unlike its old self for Git's merge to pair.
                     let renamed = git_renames(clone.path());
                     let apart: Vec<&String> = unmerged.symmetric_difference(&places).collect();
                     let (by_git, by_opalro): (Vec<&String>, Vec<&String>) =
                         apart.iter().copied().partition(|p| renamed.contains(*p));
-                    let unexplained: Vec<&&String> =
-                        by_opalro.iter().filter(|p| !made.moved(p)).collect();
+                    let noted = noted_paths(&env);
+                    let unexplained: Vec<&&String> = (by_opalro.iter())
+                        .filter(|p| {
+                            !made.moved(p) || (places.contains(**p) && !noted.contains(**p))
+                        })
+                        .collect();
                     prop_assert!(
                         unexplained.is_empty(),
-                        "Git: {unmerged:?}, Opalro: {places:?}; no move at {unexplained:?}\n{fast_import}"
+                        "Git: {unmerged:?}, Opalro: {places:?}; no move followed at \
+                         {unexplained:?}\n{fast_import}"
                     );
                     if let Err(lost) = nothing_lost(&made, &kept_sides(&env)) {
                         prop_assert!(false, "{lost}\n{fast_import}");
@@ -960,6 +966,25 @@ fn combine_matches_git_merge() {
 
 /// The old and new paths of every move Git's rename detection finds on either branch since where
 /// they parted, in the stopped merge in `clone`: the moves Git follows.
+/// Every path a move note names, as where a file was or where it went, in the saves the
+/// project's lines reach.
+fn noted_paths(env: &Env) -> BTreeSet<String> {
+    let (repo, state) = env.state();
+    let mut todo: Vec<_> = state.lines.values().copied().collect();
+    let (mut seen, mut paths) = (BTreeSet::new(), BTreeSet::new());
+    while let Some(id) = todo.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        let save = repo.store().save(&id, false).unwrap();
+        for note in &save.move_notes {
+            paths.extend([note.from.clone(), note.to.clone()]);
+        }
+        todo.extend(save.parents.iter().copied());
+    }
+    paths
+}
+
 fn git_renames(clone: &Path) -> BTreeSet<String> {
     let base = text(&git(clone, &["merge-base", "HEAD", "origin/side"]));
     let mut found = BTreeSet::new();
