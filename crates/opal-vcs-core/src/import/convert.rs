@@ -92,6 +92,8 @@ thread_local! {
     static LEAST_COMPARED: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
     /// What the comparison's cache holds at most on this thread, in place of `TREE_CACHE_BYTES`.
     static CACHED_AT_MOST: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    /// The most folders, each with its path, the comparison has held at once on this thread.
+    static MOST_FOLDERS_HELD: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// What comparing commits for their renames may do once converting the import's Git trees took
@@ -230,6 +232,15 @@ struct Frame {
     longest: usize,
     exact: bool,
     lfs: bool,
+}
+
+/// A folder the comparison of two trees has gone into: its path, its kept entries on each side,
+/// and how far through each the comparison has got.
+struct Compared {
+    path: String,
+    olds: Rc<[Item]>,
+    news: Rc<[Item]>,
+    next: (usize, usize),
 }
 
 /// A tree entry whose name passed.
@@ -742,9 +753,9 @@ impl<'r> Converter<'r> {
 
     /// Hands `each` every path whose entry differs between two converted trees, `old` of the
     /// commit `commits[0]` and `new` of `commits[1]` (hex), with the entry the import made of it on
-    /// each side, as a save's comparison hands them: a folder is gone into only where its Git IDs
-    /// differ, and only names the import keeps are looked at. No path comes twice, since a tree
-    /// holding a name twice doesn't convert.
+    /// each side: what a save's comparison hands, in another order. A folder is gone into only
+    /// where its Git IDs differ, and only names the import keeps are looked at. No path comes
+    /// twice, since a tree holding a name twice doesn't convert.
     fn compare(
         &mut self,
         (old, new): (GitId, GitId),
@@ -755,53 +766,54 @@ impl<'r> Converter<'r> {
         if old == new {
             return Ok(());
         }
-        // Folders still to compare, by path, with their Git trees on each side: a stack, since Git
-        // trees can nest thousands of levels deep.
-        let mut todo = vec![(String::new(), Some(old), Some(new))];
-        while let Some((folder, old, new)) = todo.pop() {
-            let olds = self.kept(old, old_commit, &folder)?;
-            let news = self.kept(new, new_commit, &folder)?;
-            let (mut olds, mut news) = (olds.iter().peekable(), news.iter().peekable());
-            loop {
-                let order = match (olds.peek(), news.peek()) {
-                    (None, None) => break,
-                    (Some(_), None) => Ordering::Less,
-                    (None, Some(_)) => Ordering::Greater,
-                    (Some(o), Some(n)) => o.name.cmp(&n.name),
-                };
-                let (o, n) = match order {
-                    Ordering::Less => (olds.next(), None),
-                    Ordering::Greater => (None, news.next()),
-                    Ordering::Equal => (olds.next(), news.next()),
-                };
-                let Some(name) = o.or(n).map(|item| item.name.as_str()) else {
-                    break;
-                };
-                let tree =
-                    |i: Option<&Item>| i.filter(|i| i.kind == EntryKind::Folder).map(|i| i.id);
-                let (old_tree, new_tree) = (tree(o), tree(n));
-                // The same kind of entry from the same Git object converts alike.
-                let leaf = |i: Option<&Item>| {
-                    i.filter(|i| i.kind != EntryKind::Folder)
-                        .map(|i| (i.kind, i.id))
-                };
-                let folder_on_one_side = old_tree.is_some() != new_tree.is_some();
-                let same_leaf = leaf(o) == leaf(n) && !folder_on_one_side;
-                // Most entries are the same on both sides: a path is built only where one differs.
-                if old_tree == new_tree && same_leaf {
+        // Depth first, one folder for each level gone into, as the snapshot's walk goes: Git trees
+        // can nest thousands of levels deep, and a folder can hold a million folders that differ.
+        let mut stack = vec![Compared {
+            path: String::new(),
+            olds: self.kept(Some(old), old_commit, "")?,
+            news: self.kept(Some(new), new_commit, "")?,
+            next: (0, 0),
+        }];
+        while let Some(top) = stack.last_mut() {
+            let (o, n) = (top.olds.get(top.next.0), top.news.get(top.next.1));
+            let order = match (o, n) {
+                (None, None) => {
+                    stack.pop();
                     continue;
                 }
-                let path = if folder.is_empty() {
-                    name.to_owned()
-                } else {
-                    format!("{folder}/{name}")
-                };
-                if old_tree != new_tree {
-                    todo.push((path.clone(), old_tree, new_tree));
-                }
-                if same_leaf {
-                    continue;
-                }
+                (Some(_), None) => Ordering::Less,
+                (None, Some(_)) => Ordering::Greater,
+                (Some(o), Some(n)) => o.name.cmp(&n.name),
+            };
+            let (o, n) = match order {
+                Ordering::Less => (o, None),
+                Ordering::Greater => (None, n),
+                Ordering::Equal => (o, n),
+            };
+            top.next.0 = top.next.0.saturating_add(usize::from(o.is_some()));
+            top.next.1 = top.next.1.saturating_add(usize::from(n.is_some()));
+            let Some(name) = o.or(n).map(|item| item.name.as_str()) else {
+                continue;
+            };
+            let tree = |i: Option<&Item>| i.filter(|i| i.kind == EntryKind::Folder).map(|i| i.id);
+            let (old_tree, new_tree) = (tree(o), tree(n));
+            // The same kind of entry from the same Git object converts alike.
+            let leaf = |i: Option<&Item>| {
+                i.filter(|i| i.kind != EntryKind::Folder)
+                    .map(|i| (i.kind, i.id))
+            };
+            let folder_on_one_side = old_tree.is_some() != new_tree.is_some();
+            let same_leaf = leaf(o) == leaf(n) && !folder_on_one_side;
+            // Most entries are the same on both sides: a path is built only where one differs.
+            if old_tree == new_tree && same_leaf {
+                continue;
+            }
+            let path = if top.path.is_empty() {
+                name.to_owned()
+            } else {
+                format!("{}/{name}", top.path)
+            };
+            if !same_leaf {
                 let (o, n) = (
                     self.entry(o, old_commit, &path)?,
                     self.entry(n, new_commit, &path)?,
@@ -815,6 +827,18 @@ impl<'r> Converter<'r> {
                 if file(&o) != file(&n) || folder_on_one_side {
                     each(&path, o.as_ref(), n.as_ref())?;
                 }
+            }
+            if old_tree != new_tree {
+                let olds = self.kept(old_tree, old_commit, &path)?;
+                let news = self.kept(new_tree, new_commit, &path)?;
+                stack.push(Compared {
+                    path,
+                    olds,
+                    news,
+                    next: (0, 0),
+                });
+                #[cfg(test)]
+                MOST_FOLDERS_HELD.set(MOST_FOLDERS_HELD.get().max(stack.len()));
             }
         }
         Ok(())
@@ -1643,8 +1667,8 @@ impl TreeCache {
     }
 }
 
-/// What the cache counts for a tree of `items`: the same on every computer, about what it takes
-/// in memory.
+/// What the cache counts for a tree of `items`, the same on every computer. A tree takes more in
+/// memory, up to about four times this.
 fn cache_cost(items: &[Item]) -> u64 {
     items.iter().fold(CACHED_TREE_BYTES, |cost, item| {
         let entry = CACHED_ENTRY_BYTES.saturating_add(item.name.len() as u64);
@@ -3744,6 +3768,255 @@ mod tests {
         });
         for save in &saves {
             assert!(store.save(save, false).unwrap().move_notes.is_empty());
+        }
+    }
+
+    /// A folder three levels down holds 1,000 folders, each holding a file that differs between
+    /// two commits: the comparison holds one folder for each level it has gone into, with its
+    /// path, never one for each folder it has still to compare.
+    #[test]
+    fn the_comparison_holds_one_folder_for_each_level_however_wide() {
+        let (dir, git) = repo(Sha1);
+        let names: Vec<String> = (0..1000).map(|i| format!("s{i:04}")).collect();
+        let mut commits: Vec<GitId> = Vec::new();
+        for body in [b"A\n", b"B\n"] {
+            let one = git.tree(&[(b"100644", b"x", blob(&git, body))]);
+            let wide: Vec<(&[u8], &[u8], GitId)> = (names.iter())
+                .map(|name| (&b"40000"[..], name.as_bytes(), one))
+                .collect();
+            let mut top = git.tree(&wide);
+            for level in ["c", "b", "a"] {
+                top = git.tree(&[(b"40000", level.as_bytes(), top)]);
+            }
+            commits.push(git.commit(&commit_bytes(&top, &commits, "", b"m\n")));
+        }
+        MOST_FOLDERS_HELD.set(0);
+        convert(dir.path(), "a", |c| {
+            for id in &commits {
+                c.commit(id).unwrap();
+            }
+        });
+        // The top folder, `a`, `a/b`, `a/b/c` and one of its folders at a time.
+        assert_eq!(MOST_FOLDERS_HELD.get(), 5);
+    }
+
+    /// Where a random side may hold an entry, each path after those above it: `.git` and
+    /// `git~1`, which the import leaves out, and `a.b` and `a0`, which Git sorts on either side
+    /// of the folder `a`.
+    const SIDE_PATHS: [&str; 10] = [
+        "a", "a.b", "a0", "a/x", "a/y/x", "a/y/z", "b/x", "b/.git/x", "b/git~1", "c/d/e/x",
+    ];
+
+    /// The modes a random side's entries take: a file twice as often, a mode Git no longer
+    /// writes (a file to Opalro), and an empty folder.
+    const SIDE_MODES: [&[u8]; 7] = [
+        b"100644", b"100644", b"100755", b"120000", b"160000", b"100664", b"40000",
+    ];
+
+    /// A random side: at each of `SIDE_PATHS`, nothing, or one of `SIDE_MODES` and which of five
+    /// blobs it holds.
+    type Side = Vec<Option<(usize, usize)>>;
+
+    /// Two random sides: a first, and a second made from it by up to three changes, each a new
+    /// entry, none, or the entry there as its twin, so that most of each pair is alike, as from
+    /// one commit to the next.
+    fn side_pair() -> impl proptest::strategy::Strategy<Value = (Side, Side)> {
+        use proptest::strategy::Strategy;
+        let entry = || proptest::option::of((0..SIDE_MODES.len(), 0..5usize));
+        let first = proptest::collection::vec(entry(), SIDE_PATHS.len());
+        let change = (0..SIDE_PATHS.len(), entry(), proptest::bool::weighted(0.25));
+        let changes = proptest::collection::vec(change, 0..=3);
+        (first, changes).prop_map(|(first, changes)| {
+            let mut second = first.clone();
+            for (at, entry, as_twin) in changes {
+                second[at] = if as_twin { second[at].map(twin) } else { entry };
+            }
+            (first, second)
+        })
+    }
+
+    /// The same entry as another Git object: a file in the other of the two modes Opalro reads
+    /// alike, or an executable Git LFS pointer in its other form (the fourth and fifth blobs);
+    /// anything else as it is.
+    fn twin((mode, blob): (usize, usize)) -> (usize, usize) {
+        match (SIDE_MODES[mode], blob) {
+            (b"100644", _) => (5, blob),
+            (b"100664", _) => (0, blob),
+            (b"100755", 3) => (mode, 4),
+            (b"100755", 4) => (mode, 3),
+            _ => (mode, blob),
+        }
+    }
+
+    /// Writes `side`, whose entries hold `blobs`, as Git trees: an entry below a path that holds
+    /// one already is left out, and a folder entry is an empty folder. Its top tree, and its
+    /// entries by path.
+    fn side_tree(
+        git: &Craft,
+        side: &Side,
+        blobs: &[GitId],
+    ) -> (GitId, BTreeMap<&'static str, (&'static [u8], GitId)>) {
+        let empty = git.tree(&[]);
+        let mut entries = BTreeMap::new();
+        for (path, drawn) in SIDE_PATHS.into_iter().zip(side) {
+            let below = |above: &&str| path.starts_with(&format!("{above}/"));
+            if let Some((mode, blob)) = *drawn
+                && !entries.keys().any(below)
+            {
+                let mode = SIDE_MODES[mode];
+                let id = if mode == b"40000" { empty } else { blobs[blob] };
+                entries.insert(path, (mode, id));
+            }
+        }
+        (git_folder(git, "", &entries), entries)
+    }
+
+    /// The Git tree of the folder `at` (its path and a `/`, or nothing for the top) of a side
+    /// whose entries are `entries`.
+    fn git_folder(
+        git: &Craft,
+        at: &str,
+        entries: &BTreeMap<&'static str, (&'static [u8], GitId)>,
+    ) -> GitId {
+        // In Git's order, which sorts a folder as though its name ended in `/`.
+        let mut here: BTreeMap<String, (&[u8], &str, GitId)> = BTreeMap::new();
+        for (&path, &(mode, id)) in entries {
+            let Some(rest) = path.strip_prefix(at) else {
+                continue;
+            };
+            match rest.split_once('/') {
+                None if mode == b"40000" => here.insert(format!("{rest}/"), (mode, rest, id)),
+                None => here.insert(rest.to_owned(), (mode, rest, id)),
+                Some((name, _)) if here.contains_key(&format!("{name}/")) => continue,
+                Some((name, _)) => {
+                    let below = git_folder(git, &format!("{at}{name}/"), entries);
+                    here.insert(format!("{name}/"), (b"40000", name, below))
+                }
+            };
+        }
+        let listed: Vec<(&[u8], &[u8], GitId)> = (here.values())
+            .map(|&(mode, name, id)| (mode, name.as_bytes(), id))
+            .collect();
+        git.tree(&listed)
+    }
+
+    /// On random pairs of trees, the comparison hands over exactly the paths, and the entries on
+    /// each side, that a save's own comparison of the two listings the import made gives, in
+    /// whatever order. The seed is fixed.
+    #[test]
+    fn the_comparison_hands_over_what_a_saves_own_comparison_does() {
+        use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
+        const KINDS: [&str; 8] = [
+            "a file changed in place",
+            "a file added or removed",
+            "a folder on one side only",
+            "a folder against a file",
+            "a change two levels down",
+            "trees that differ only where they convert alike",
+            "a file two Git objects give alike",
+            "a name the import leaves out, changed",
+        ];
+        let (dir, git) = repo(Sha1);
+        let pointer = git.lfs_object(b"the real picture\n");
+        let bodies = [b"".as_slice(), b"1", b"2", pointer.as_bytes()];
+        let mut blobs: Vec<GitId> = bodies.iter().map(|b| blob(&git, b)).collect();
+        blobs.push(blob(&git, pointer.replace('\n', "\r\n").as_bytes()));
+        let pointers = [blobs[3], blobs[4]];
+        let met = std::cell::RefCell::new(BTreeMap::<&str, usize>::new());
+        let stores = std::cell::Cell::new(0);
+        let config = Config {
+            cases: 256,
+            failure_persistence: None,
+            ..Config::default()
+        };
+        let mut runner =
+            TestRunner::new_with_rng(config, TestRng::deterministic_rng(RngAlgorithm::ChaCha));
+        runner
+            .run(&side_pair(), |(first, second)| {
+                let (a, a_entries) = side_tree(&git, &first, &blobs);
+                let (b, b_entries) = side_tree(&git, &second, &blobs);
+                let one = git.commit(&commit_bytes(&a, &[], "", b"1\n"));
+                let two = git.commit(&commit_bytes(&b, &[one], "", b"2\n"));
+                stores.set(stores.get() + 1);
+                let name = format!("s{}", stores.get());
+                let ((saves, mut got), store) = convert(dir.path(), &name, |c| {
+                    let saves = [one, two].map(|id| c.commit(&id).unwrap());
+                    let mut got = Vec::new();
+                    let mut each = |path: &str, o: Option<&Entry>, n: Option<&Entry>| {
+                        got.push((path.to_owned(), o.cloned(), n.cloned()));
+                        Ok::<(), ImportError>(())
+                    };
+                    c.compare((a, b), ["1", "2"], &mut each).unwrap();
+                    (saves, got)
+                });
+                let roots = saves.map(|save| store.save(&save, false).unwrap().root);
+                let mut want = Vec::new();
+                let walked = crate::diff::for_each_entry_change_in(
+                    &store,
+                    &HashMap::new(),
+                    Some(roots[0]),
+                    roots[1],
+                    |path, o, n| {
+                        want.push((path.to_owned(), o.cloned(), n.cloned()));
+                        Ok::<(), crate::store::StoreError>(())
+                    },
+                );
+                walked.unwrap();
+                got.sort_by(|x, y| x.0.cmp(&y.0));
+                want.sort_by(|x, y| x.0.cmp(&y.0));
+                proptest::prop_assert_eq!(&got, &want);
+
+                // What each case met, from what the save's comparison gave and the Git entries.
+                let mut kinds = std::collections::BTreeSet::new();
+                let folder = |e: &Option<Entry>| e.as_ref().map(|e| e.kind == EntryKind::Folder);
+                for (path, o, n) in &want {
+                    kinds.insert(match (folder(o), folder(n)) {
+                        (Some(false), Some(false)) => KINDS[0],
+                        (Some(false), None) | (None, Some(false)) => KINDS[1],
+                        (Some(true), None) | (None, Some(true)) => KINDS[2],
+                        (Some(true), Some(false)) | (Some(false), Some(true)) => KINDS[3],
+                        _ => "two folders, or nothing on either side",
+                    });
+                    if path.matches('/').count() >= 2 {
+                        kinds.insert(KINDS[4]);
+                    }
+                }
+                if a != b && want.is_empty() {
+                    kinds.insert(KINDS[5]);
+                }
+                let kind = |mode: &[u8]| match mode {
+                    b"100644" | b"100664" => "file",
+                    b"100755" => "executable",
+                    b"120000" => "link",
+                    b"160000" => "project link",
+                    _ => "folder",
+                };
+                let left_out = |path: &str| path.split('/').any(|n| n == ".git" || n == "git~1");
+                for path in a_entries.keys().chain(b_entries.keys()).copied() {
+                    let (old, new) = (a_entries.get(path), b_entries.get(path));
+                    if old == new {
+                        continue;
+                    }
+                    if left_out(path) {
+                        kinds.insert(KINDS[7]);
+                    } else if let (Some(&(m, i)), Some(&(n, j))) = (old, new) {
+                        let lfs = |id: GitId| pointers.contains(&id);
+                        let files = matches!(kind(m), "file" | "executable");
+                        if kind(m) == kind(n) && (i == j || (files && lfs(i) && lfs(j))) {
+                            kinds.insert(KINDS[6]);
+                        }
+                    }
+                }
+                for kind in kinds {
+                    *met.borrow_mut().entry(kind).or_default() += 1;
+                }
+                Ok(())
+            })
+            .unwrap();
+        let met = met.into_inner();
+        println!("cases with each: {met:?}");
+        for kind in KINDS {
+            assert!(met.get(kind).is_some_and(|&n| n >= 3), "{kind}: {met:?}");
         }
     }
 

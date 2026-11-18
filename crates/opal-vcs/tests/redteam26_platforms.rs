@@ -29,14 +29,13 @@ fn name36(mut i: usize) -> String {
     String::from_utf8(out.to_vec()).unwrap()
 }
 
-/// RT26-2: the comparison's list of folders still to compare holds each one's whole path. A
+/// RT26-2: the comparison's list of folders still to compare held each one's whole path. A
 /// folder 4,085 bytes down, of 300,000 folders that each hold the file `x`, as one blob in the
-/// first commit and another in the second: the comparison lists all 300,000 paths, 4 KB each,
-/// before it compares any. In release, with 250,000 of them (a 1.4 MB repository) the import
+/// first commit and another in the second: the comparison listed all 300,000 paths, 4 KB each,
+/// before it compared any. In release, with 250,000 of them (a 1.4 MB repository) the import
 /// held 1,081 MB where v0.2 held 91 MB; with 1,000,000 (4.9 MB) it passed the sandbox's 4 GB
 /// and was killed, where v0.2 imported it holding 312 MB (`widedeep.py`).
 #[test]
-#[ignore = "RT26-2: the comparison's list of folders to compare holds a whole path for each"]
 fn comparing_a_wide_folder_deep_down_holds_no_path_for_each_entry() {
     const FOLDERS: usize = 300_000;
     const MOST: u64 = 512 << 20;
