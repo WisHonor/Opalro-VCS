@@ -56,15 +56,10 @@ pub(crate) fn same_contents(
     to_root: Id,
     most_left_bytes: usize,
 ) -> Moves {
-    count_and_moves(
-        store,
-        unstored,
-        from_root,
-        to_root,
+    moves_by(
+        |each| for_each_entry_change_in(store, unstored, Some(from_root), to_root, each),
         most_left_bytes,
-        &|_, _| false,
-    )?
-    .1
+    )
 }
 
 /// Moves found by contents: none at all when there were too many files to hold.
@@ -78,7 +73,10 @@ pub(crate) const MAX_LEFT_BYTES: usize = 64 << 20;
 /// What holding one file that left or arrived takes beside its path, at its peak. While a map
 /// grows, its old table and the new one twice as big are both alive: three buckets, each with a
 /// control byte. An allocator rounds a short path up to about 32 bytes.
-pub(crate) const HELD_PER_PLACE: usize = 3 * (size_of::<(Id, Option<String>)>() + 1) + 32;
+///
+/// It is what `3 * (size_of::<(Id, Option<String>)>() + 1) + 32` gives on a 64-bit computer,
+/// fixed since whether moves are noted depends on it, and notes are part of a save's fingerprint.
+pub(crate) const HELD_PER_PLACE: usize = 203;
 
 #[cfg(test)]
 thread_local! {
@@ -99,53 +97,69 @@ pub(crate) fn count_and_moves(
     most_left_bytes: usize,
     passed_over: &PassedOver,
 ) -> Result<(usize, Moves), StoreError> {
+    let (mut changed, mut walks) = (0, 0);
+    let moves = moves_by(
+        |each| {
+            walks += 1;
+            let counting = walks == 1;
+            let mut passed = Passed::new(passed_over);
+            for_each_entry_change_in(
+                store,
+                unstored,
+                Some(from_root),
+                to_root,
+                |path, old, new| {
+                    changed += usize::from(counting && file_change(old, new).is_some());
+                    if passed.at(path, old, new) {
+                        return Ok(());
+                    }
+                    each(path, old, new)
+                },
+            )
+        },
+        most_left_bytes,
+    );
+    match moves {
+        // Only a first walk that failed leaves no count.
+        Err(why) if walks == 1 => Err(why),
+        moves => Ok((changed, moves)),
+    }
+}
+
+/// `same_contents`' moves between two sides that `walk` gives: each call of `walk` calls its
+/// argument with every path whose entry differs and the entry on each side, the same paths each
+/// time, in any order. None when holding the files would take more than `most_left_bytes`.
+pub(crate) fn moves_by<E: From<StoreError>>(
+    mut walk: impl FnMut(
+        &mut dyn FnMut(&str, Option<&Entry>, Option<&Entry>) -> Result<(), E>,
+    ) -> Result<(), E>,
+    most_left_bytes: usize,
+) -> Result<Option<Vec<MoveNote>>, E> {
     // The files that left first: arrivals are worth keeping only for the contents of one, and a
     // save that adds a great deal often has none.
-    let (mut changed, mut left, mut left_bytes, mut arrivals) = (0, Places::new(), 0usize, false);
-    let mut passed = Passed::new(passed_over);
-    for_each_entry_change_in(
-        store,
-        unstored,
-        Some(from_root),
-        to_root,
-        |path, old, new| {
-            changed += usize::from(file_change(old, new).is_some());
-            if passed.at(path, old, new) {
-                return Ok(());
+    let (mut left, mut left_bytes, mut arrivals) = (Places::new(), 0usize, false);
+    walk(&mut |path, old, new| {
+        arrivals |= matches!((old, file(new)), (None, Some(_)));
+        if let (Some(f), None) = (file(old), new)
+            && left_bytes <= most_left_bytes
+        {
+            left_bytes = left_bytes.saturating_add(HELD_PER_PLACE + path.len());
+            if left_bytes > most_left_bytes {
+                left = Places::new();
+            } else {
+                seen(&mut left, f.id, path);
             }
-            arrivals |= matches!((old, file(new)), (None, Some(_)));
-            if let (Some(f), None) = (file(old), new)
-                && left_bytes <= most_left_bytes
-            {
-                left_bytes = left_bytes.saturating_add(HELD_PER_PLACE + path.len());
-                if left_bytes > most_left_bytes {
-                    left = Places::new();
-                } else {
-                    seen(&mut left, f.id, path);
-                }
-            }
-            Ok::<(), StoreError>(())
-        },
-    )?;
+        }
+        Ok(())
+    })?;
     if left_bytes > most_left_bytes {
-        return Ok((changed, Ok(None)));
+        return Ok(None);
     }
     left.retain(|_, from| from.is_some());
     if left.is_empty() || !arrivals {
-        return Ok((changed, Ok(Some(vec![]))));
+        return Ok(Some(vec![]));
     }
-    let room = most_left_bytes.saturating_sub(left_bytes);
-    Ok((
-        changed,
-        paired(
-            store,
-            unstored,
-            (from_root, to_root),
-            left,
-            room,
-            passed_over,
-        ),
-    ))
+    paired(walk, left, most_left_bytes.saturating_sub(left_bytes))
 }
 
 /// Whether a comparison passes over a path, from the entries on each side.
@@ -183,43 +197,32 @@ impl<'p> Passed<'p> {
 /// The moves of the files in `left` (contents to the one path that left with them), from a
 /// second walk for the files that arrived with those contents; none when holding those takes
 /// more than `room` bytes.
-fn paired(
-    store: &Store,
-    unstored: &HashMap<Id, Listing>,
-    (from_root, to_root): (Id, Id),
+fn paired<E>(
+    mut walk: impl FnMut(
+        &mut dyn FnMut(&str, Option<&Entry>, Option<&Entry>) -> Result<(), E>,
+    ) -> Result<(), E>,
     mut left: Places,
     room: usize,
-    passed_over: &PassedOver,
-) -> Moves {
+) -> Result<Option<Vec<MoveNote>>, E> {
     #[cfg(test)]
     SECOND_WALKS.set(SECOND_WALKS.get() + 1);
     let (mut arrived, mut held) = (Places::new(), 0usize);
-    let mut passed = Passed::new(passed_over);
-    for_each_entry_change_in(
-        store,
-        unstored,
-        Some(from_root),
-        to_root,
-        |path, old, new| {
-            if passed.at(path, old, new) {
-                return Ok(());
+    walk(&mut |path, old, new| {
+        if let (None, Some(f)) = (old, file(new))
+            && left.contains_key(&f.id)
+            && held <= room
+        {
+            held = held.saturating_add(HELD_PER_PLACE + path.len());
+            if held > room {
+                arrived = Places::new();
+            } else {
+                #[cfg(test)]
+                ARRIVALS_KEPT.set(ARRIVALS_KEPT.get() + 1);
+                seen(&mut arrived, f.id, path);
             }
-            if let (None, Some(f)) = (old, file(new))
-                && left.contains_key(&f.id)
-                && held <= room
-            {
-                held = held.saturating_add(HELD_PER_PLACE + path.len());
-                if held > room {
-                    arrived = Places::new();
-                } else {
-                    #[cfg(test)]
-                    ARRIVALS_KEPT.set(ARRIVALS_KEPT.get() + 1);
-                    seen(&mut arrived, f.id, path);
-                }
-            }
-            Ok::<(), StoreError>(())
-        },
-    )?;
+        }
+        Ok(())
+    })?;
     if held > room {
         return Ok(None);
     }
@@ -485,7 +488,8 @@ mod tests {
     use super::*;
     use crate::id::hash_content;
     use crate::listing::{Entry, EntryKind, Listing};
-    use std::collections::{BTreeMap, HashMap};
+    use proptest::prelude::*;
+    use std::collections::{BTreeMap, BTreeSet, HashMap};
 
     /// Listings for `files` (path, kind, bytes), kept in `unstored`; returns the root's ID.
     fn tree(unstored: &mut HashMap<Id, Listing>, files: &[(&str, EntryKind, &[u8])]) -> Id {
@@ -858,5 +862,109 @@ mod tests {
             &[("b", File, b"target"), ("l", Symlink, b"target")],
         );
         assert_eq!(got, [pair("a", "b")]);
+    }
+
+    /// One side of a random pair: few paths, kinds and contents, so that contents often leave or
+    /// arrive twice and links and empty files often move.
+    fn side() -> impl Strategy<Value = Vec<(&'static str, EntryKind, &'static [u8])>> {
+        const PATHS: [&str; 7] = ["a", "b", "c", "a/b", "d/a", "d/e", "f/g/a"];
+        const KINDS: [EntryKind; 6] = [File, File, File, Executable, Symlink, Folder];
+        const BYTES: [&[u8]; 3] = [b"", b"1", b"2"];
+        let entry = proptest::option::of((0..KINDS.len(), 0..BYTES.len()));
+        proptest::collection::vec(entry, PATHS.len()).prop_map(|drawn| {
+            let mut side: Vec<(&str, EntryKind, &[u8])> = Vec::new();
+            for (path, entry) in PATHS.into_iter().zip(drawn) {
+                // A path can't be a file and a folder at once.
+                if let Some((k, b)) = entry
+                    && !side
+                        .iter()
+                        .any(|(q, ..)| path.starts_with(&format!("{q}/")))
+                {
+                    side.push((path, KINDS[k], BYTES[b]));
+                }
+            }
+            side
+        })
+    }
+
+    #[test]
+    fn moves_by_a_walk_in_another_order_gives_the_same_notes() {
+        use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let met: std::cell::RefCell<BTreeMap<&str, usize>> = Default::default();
+        let config = Config {
+            cases: 1024,
+            failure_persistence: None,
+            ..Config::default()
+        };
+        let mut runner =
+            TestRunner::new_with_rng(config, TestRng::deterministic_rng(RngAlgorithm::ChaCha));
+        runner
+            .run(&(side(), side()), |(from, to)| {
+                let mut unstored = HashMap::new();
+                let (a, b) = (tree(&mut unstored, &from), tree(&mut unstored, &to));
+                let mut changes = Vec::new();
+                for_each_entry_change_in(&store, &unstored, Some(a), b, |path, old, new| {
+                    changes.push((path.to_owned(), old.cloned(), new.cloned()));
+                    Ok::<(), StoreError>(())
+                })
+                .unwrap();
+                let want = same_contents(&store, &unstored, a, b, MAX_LEFT_BYTES).unwrap();
+                let got = moves_by(
+                    |each| {
+                        for (path, old, new) in changes.iter().rev() {
+                            each(path, old.as_ref(), new.as_ref())?;
+                        }
+                        Ok::<(), StoreError>(())
+                    },
+                    MAX_LEFT_BYTES,
+                )
+                .unwrap();
+                prop_assert_eq!(&got, &want);
+                // What each case met, from the paths that left and arrived.
+                let notes = want.unwrap_or_default();
+                let (mut left, mut arrived) = (Vec::new(), Vec::new());
+                for (path, old, new) in &changes {
+                    match (old, new) {
+                        (Some(e), None) if e.kind != Folder => left.push((path, e)),
+                        (None, Some(e)) if e.kind != Folder => arrived.push((path, e)),
+                        _ => {}
+                    }
+                }
+                let alike = |a: &Entry, b: &Entry| {
+                    a.id == b.id && (a.kind == Symlink) == (b.kind == Symlink)
+                };
+                let mut kinds = BTreeSet::new();
+                if !notes.is_empty() {
+                    kinds.insert("a note");
+                }
+                for (path, e) in &left {
+                    let went = left.iter().filter(|(_, l)| alike(l, e)).count();
+                    let came = arrived.iter().filter(|(_, a)| alike(a, e)).count();
+                    let kind = match (e.kind == Symlink || e.size == 0, went, came) {
+                        (_, _, 0) | (false, 1, 1) => continue,
+                        (true, ..) => "a link or empty file passed over",
+                        (false, 1, _) => "contents that arrived twice",
+                        (false, ..) => "contents that left twice",
+                    };
+                    prop_assert!(!notes.iter().any(|n| n.from == **path), "{kind}: {path}");
+                    kinds.insert(kind);
+                }
+                for kind in kinds {
+                    *met.borrow_mut().entry(kind).or_default() += 1;
+                }
+                Ok(())
+            })
+            .unwrap();
+        let met = met.into_inner();
+        for kind in [
+            "a note",
+            "contents that left twice",
+            "contents that arrived twice",
+            "a link or empty file passed over",
+        ] {
+            assert!(met.get(kind).is_some_and(|&n| n >= 3), "{met:?}");
+        }
     }
 }
