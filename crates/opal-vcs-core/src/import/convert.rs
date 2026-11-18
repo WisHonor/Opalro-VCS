@@ -882,16 +882,8 @@ impl<'r> Converter<'r> {
         if self.compared_trees <= allowance {
             return Ok(());
         }
-        Err(ImportError::Stop {
-            what: format!(
-                "Opalro can't import this Git repository: comparing its commits to find their \
-                 renames would take more than the {} GiB of work Opalro allows: the repository's \
-                 history goes back and forth between the same big folders many times, or it was \
-                 built to make importing slow.",
-                allowance >> 30
-            ),
-            hint: Some("Nothing was changed.".to_owned()),
-        })
+        let gib = allowance.div_ceil(1 << 30);
+        Err(ImportError::TooMuchComparing { gib })
     }
 
     /// The entry the import made of `item`, at `path` in the commit `commit` (hex).
@@ -3828,31 +3820,29 @@ mod tests {
                 panic!("imported past the comparison's allowance")
             };
             assert!((30..45).contains(&converted), "{converted}");
-            let said = stopped.to_string();
-            let words = [
+            // An allowance of about 1 MiB, rounded up.
+            assert_eq!(
+                stopped.to_string(),
                 "Opalro can't import this Git repository: comparing its commits to find their \
-                 renames would take more than the ",
-                " of work Opalro allows: the repository's history goes back and forth between the \
-                 same big folders many times, or it was built to make importing slow.",
-            ];
-            for part in words {
-                assert!(said.contains(part), "{said}");
-            }
+                 renames would take more than the 1 GiB of work Opalro allows: the repository's \
+                 history goes back and forth between the same big folders many times, or it was \
+                 built to make importing slow."
+            );
             assert!(
                 matches!(
                     &stopped,
                     ImportError::Unfinished { stop, committed: false }
-                        if matches!(**stop, ImportError::Stop { .. })
+                        if matches!(**stop, ImportError::TooMuchComparing { gib: 1 })
                 ),
                 "{stopped:?}"
             );
-            // Nothing to advise but that nothing was committed. How Git packed the trees moves
-            // the stop a little at most (here every tree walked comes from the cache), and a stop
-            // gives no saves.
+            // How Git packed the trees can move the stop (not here, where every tree walked comes
+            // from the cache), but no second run passes it, so the hint offers only to delete.
             let hint = stopped.hint().unwrap();
-            let kept = "Nothing was committed. Opalro kept the .opalro folder it began here: opalro \
-                        import stops the same way until the cause is fixed, then finishes from \
-                        what it stored. Or delete that folder.";
+            let kept = "This is a limit of the import's rename notes, not damage in the \
+                        repository.\nNothing was committed. Opalro kept the .opalro folder it \
+                        began here; opalro import stops the same way each time it runs, so delete \
+                        that folder.";
             assert_eq!(hint, kept);
             assert!(!dir.path().join(".opalro/format").exists());
         }

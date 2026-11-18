@@ -165,6 +165,15 @@ pub enum ImportError {
         commit: String,
         path: String,
     },
+    /// Comparing commits for their renames would take more than the work it may do, `gib` GiB
+    /// rounded up: a limit of the import's rename notes, which every run meets alike.
+    #[error(
+        "Opalro can't import this Git repository: comparing its commits to find their renames \
+         would take more than the {gib} GiB of work Opalro allows: the repository's history goes \
+         back and forth between the same big folders many times, or it was built to make \
+         importing slow."
+    )]
+    TooMuchComparing { gib: u64 },
     /// The import stopped after it began the project, before `format`: the `.opalro` it began
     /// stays, for a later run to finish from what it stored (decision 041). `committed`: it holds
     /// a head, whose entry may hold the whole import.
@@ -188,6 +197,9 @@ impl ImportError {
                 let kept = if *committed {
                     "The import's history is stored, but the .opalro folder isn't a finished project \
                      yet. Run opalro import again here to finish it from what was stored."
+                } else if matches!(**e, ImportError::TooMuchComparing { .. }) {
+                    "Nothing was committed. Opalro kept the .opalro folder it began here; opalro \
+                     import stops the same way each time it runs, so delete that folder."
                 } else if e.may_pass_when_run_again() {
                     "Nothing was committed. Opalro kept the .opalro folder it began here, so that \
                      running opalro import again can finish the import from what it stored; or \
@@ -212,6 +224,10 @@ impl ImportError {
             ImportError::Repo(e) => e.hint(),
             ImportError::Store(_) | ImportError::Pack(_) => None,
             ImportError::Stop { hint, .. } => hint.clone(),
+            ImportError::TooMuchComparing { .. } => Some(format!(
+                "{NOTHING_CHANGED} This is a limit of the import's rename notes, not damage in the \
+                 repository."
+            )),
             ImportError::NotUtf8Names { .. } => Some(
                 "Nothing was changed. Rename them in the Git history to names in UTF-8, then run \
                  opalro import again."

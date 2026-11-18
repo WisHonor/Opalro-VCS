@@ -1595,9 +1595,9 @@ fn changes_command(
                     (Some(_), Some(_)) => {
                         writeln!(out, "Save {short} changed no files in those paths.")
                     }
-                    (None, None) => writeln!(out, "Nothing changed since {short}."),
+                    (None, None) => writeln!(out, "No file changed since {short}."),
                     (None, Some(_)) => {
-                        writeln!(out, "Nothing changed in those paths since {short}.")
+                        writeln!(out, "No file changed in those paths since {short}.")
                     }
                 };
                 said?;
