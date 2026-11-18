@@ -455,9 +455,9 @@ impl CombineError {
                 why: NotKept::NoFeature,
                 ..
             } => {
-                "opalro setup --upgrade lets this project keep conflicts (Opalro 0.1 can't open it \
-                 afterwards). Or make the two lines agree on these files, save, and run opalro \
-                 combine again."
+                "opalro setup --upgrade lets this project keep conflicts (Opalro before 0.2 can't \
+                 open it afterwards). Or make the two lines agree on these files, save, and run \
+                 opalro combine again."
             }
             // Nothing to combine: the conflicts are on the line already, and a run without the
             // flag would only say so.

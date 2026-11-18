@@ -5,6 +5,7 @@
 - **Agenda topic:** none (milestone 10, its red-team sessions RT23 and RT24)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 176](176-a-conflict-in-the-folder.md) (what the folder shows for a place in conflict); [decision 184](184-opalro-who-the-save-behind-each-line.md), [185](185-save-amend-and-a-save-something-else-holds.md) and [186](186-speed-before-v0.2.md) (the code the two sessions attacked)
+- **Refined by:** [decision 196](196-empty-folders-in-a-switch-and-in-status.md) (RT24-1: a switch no longer makes that folder)
 
 ## Context
 

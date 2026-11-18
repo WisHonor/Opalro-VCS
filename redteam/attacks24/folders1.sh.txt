@@ -1,0 +1,74 @@
+#!/bin/sh
+# Folders that only conflicts standing as nothing fill: Task 3's review sequence and friends.
+o() { echo "\$ opalro $*"; sh /work/rt25/op.sh "$@" 2>&1 | sed 's/^/    /'; }
+fresh() { rm -rf "$1"; mkdir -p "$1"; cd "$1"; }
+
+echo "=== S1: combine leaves d only conflicts fill; mkdir d; goto away; undo"
+fresh /tmp/f1
+o start --preset custom >/dev/null
+mkdir d; echo base > d/x.txt; echo y > y.txt
+o save First >/dev/null
+o line new side >/dev/null
+echo side > d/x.txt
+o save Side >/dev/null
+o goto main >/dev/null
+mv d e
+o save Main >/dev/null
+o combine side
+echo "d after combine: $(test -e d && echo exists || echo absent)"
+o status
+mkdir d
+echo "mkdir d"
+o status
+o goto side
+echo "d after goto side: $(test -e d && echo exists || echo absent); ls d: $(ls d 2>&1)"
+o undo
+echo "d after undo: $(test -e d && echo exists || echo absent)"
+o status
+o redo
+echo "d after redo: $(test -e d && echo exists || echo absent)"
+o undo
+o resolve --keep mine d/x.txt
+echo "d after resolve --keep mine: $(test -e d && echo exists || echo absent)"
+o status
+
+echo "=== S2: same, but d holds a user file when resolve --keep runs"
+fresh /tmp/f2
+o start --preset custom >/dev/null
+mkdir d; echo base > d/x.txt; echo y > y.txt
+o save First >/dev/null
+o line new side >/dev/null
+echo side > d/x.txt
+o save Side >/dev/null
+o goto main >/dev/null
+rm -r d
+o save Main >/dev/null
+o combine side >/dev/null
+mkdir d; echo mine > d/mine.txt
+o status
+o resolve --keep mine d/x.txt
+echo "d/mine.txt: $(cat d/mine.txt 2>&1)"
+o status
+o save Fin
+o history
+
+echo "=== S3: d replaced by a link to a folder outside, then resolve --keep"
+fresh /tmp/f3
+mkdir -p /tmp/f3out; echo outside > /tmp/f3out/keep.txt
+o start --preset custom >/dev/null
+mkdir d; echo base > d/x.txt; echo y > y.txt
+o save First >/dev/null
+o line new side >/dev/null
+echo side > d/x.txt
+o save Side >/dev/null
+o goto main >/dev/null
+rm -r d
+o save Main >/dev/null
+o combine side >/dev/null
+ln -s /tmp/f3out d
+o status
+o resolve --keep mine d/x.txt
+echo "outside: $(ls /tmp/f3out)"
+o status
+o goto side
+echo "outside after goto side: $(ls /tmp/f3out); d: $(ls -la d 2>&1 | head -2)"

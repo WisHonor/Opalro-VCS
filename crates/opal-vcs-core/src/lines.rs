@@ -459,7 +459,8 @@ pub enum Target {
 }
 
 /// Reads `text` in the same order as [`crate::history::resolve`]: a line's name, a server line
-/// `line@server`, a tag's name, the start of a change ID, or the start of a fingerprint.
+/// `line@server`, a tag's name, the start of a change ID (at least 4 letters), or the start of a
+/// fingerprint.
 pub fn resolve_target(repo: &Repository, text: &str) -> Result<Target, ResolveError> {
     find(repo, text).map(|(target, _)| target)
 }

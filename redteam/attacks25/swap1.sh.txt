@@ -1,0 +1,44 @@
+#!/bin/sh
+# RT25-2's fix put to other kinds of swap: what goto, undo, redo, discard and unshelf say they
+# wrote and removed, against what changed on disk. OPALRO_BIN picks the binary.
+op() { sh /work/rt26/op.sh "$@"; }
+show() { printf '%s: ' "$1"; shift; out=$(op "$@" 2>&1); printf '%s | ' "$(printf '%s' "$out" | grep -m1 -E 'written|removed|changing|Switched|Undid|Redid|Discarded|Nothing|error' | cut -c1-120)"; op "$@" --json >/dev/null 2>&1; }
+tree() { find . -path ./.opalro -prune -o -print | sort | tr '\n' ' '; echo; }
+case_() {
+  name=$1; main=$2; side=$3
+  d=/tmp/sw/$name; rm -rf $d; mkdir -p $d; cd $d
+  op start --preset custom >/dev/null
+  eval "$main"; printf 'keep\n' > k.txt; op save "main" >/dev/null 2>&1
+  op line new side >/dev/null
+  eval "$side"; op save "side" >/dev/null 2>&1
+  echo "== $name"
+  printf 'side:  '; tree
+  out=$(op goto main 2>&1 | tail -1); printf 'goto main -> %s\n  disk: ' "$out"; tree
+  out=$(op goto side --json 2>&1 | python3 -c 'import json,sys; d=json.load(sys.stdin); print("json written", d.get("written"), "removed", d.get("removed"))' 2>&1)
+  printf 'goto side --json -> %s\n  disk: ' "$out"; tree
+  out=$(op undo 2>&1 | tail -1); printf 'undo -> %s\n  disk: ' "$out"; tree
+  out=$(op redo 2>&1 | tail -1); printf 'redo -> %s\n  disk: ' "$out"; tree
+}
+case_ file-to-full-folder 'printf p > p' 'rm p; mkdir p; printf q > p/q'
+case_ link-to-empty-folder 'ln -s k.txt p' 'rm p; mkdir p'
+case_ empty-folder-to-link 'mkdir p' 'rmdir p; ln -s k.txt p'
+case_ file-to-link 'printf p > p' 'rm p; ln -s k.txt p'
+case_ deep-folder-to-file 'mkdir -p a/b; printf c > a/b/c' 'rm -rf a; printf a > a'
+case_ file-to-deep-folder 'printf a > a' 'rm a; mkdir -p a/b; printf c > a/b/c'
+case_ link-to-folder-to-file 'mkdir t; printf x > t/x; ln -s t p' 'rm p; printf p > p'
+# discard: the person puts a folder where a saved file is, and a file where a saved folder is.
+d=/tmp/sw/discard; rm -rf $d; mkdir -p $d; cd $d
+op start --preset custom >/dev/null
+printf p > p; mkdir e; printf f > e/f; op save "files" >/dev/null 2>&1
+rm p; mkdir p; printf n > p/n; rm -rf e; printf e > e
+echo "== discard"; printf 'before: '; tree
+out=$(op discard 2>&1 | tail -2 | tr '\n' ' '); printf 'discard -> %s\n  disk: ' "$out"; tree
+out=$(op undo 2>&1 | tail -1); printf 'undo -> %s\n  disk: ' "$out"; tree
+# shelf and unshelf of a kind swap.
+d=/tmp/sw/shelf; rm -rf $d; mkdir -p $d; cd $d
+op start --preset custom >/dev/null
+printf p > p; op save "file" >/dev/null 2>&1
+rm p; mkdir p
+echo "== shelf"; printf 'before: '; tree
+out=$(op shelf 2>&1 | tail -1); printf 'shelf -> %s\n  disk: ' "$out"; tree
+out=$(op unshelf 2>&1 | tail -1); printf 'unshelf -> %s\n  disk: ' "$out"; tree

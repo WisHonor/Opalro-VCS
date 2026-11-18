@@ -284,9 +284,9 @@ fn without_the_feature_the_combine_stops_and_names_setup_upgrade() {
         .map(|row| row.split("; ").next().unwrap())
         .collect::<Vec<_>>()
         .join("\n");
-    let hint = "opalro setup --upgrade lets this project keep conflicts (Opalro 0.1 can't open it \
-                afterwards). Or make the two lines agree on these files, save, and run opalro \
-                combine again.";
+    let hint = "opalro setup --upgrade lets this project keep conflicts (Opalro before 0.2 can't \
+                open it afterwards). Or make the two lines agree on these files, save, and run \
+                opalro combine again.";
     assert_eq!(
         said,
         format!(

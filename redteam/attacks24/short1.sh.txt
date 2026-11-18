@@ -1,0 +1,31 @@
+#!/bin/sh
+# Short names: 1 to 3 letters of k to z are lines or tags, never saves.
+o() { echo "\$ opalro $*"; sh /work/rt25/op.sh "$@" 2>&1 | sed 's/^/    /'; }
+fresh() { rm -rf "$1"; mkdir -p "$1"; cd "$1"; }
+fresh /tmp/sh1
+sh /work/rt25/op.sh start --preset custom >/dev/null 2>&1
+for i in 1 2 3 4 5 6 7 8; do echo $i > f$i.txt; sh /work/rt25/op.sh save "S$i" >/dev/null 2>&1; done
+ids=$(sh /work/rt25/op.sh history --json 2>/dev/null | python3 -c "import json,sys; d=json.load(sys.stdin); print(' '.join(s['change_id'] for s in d['saves']))")
+echo "change ids: $ids"
+first=$(echo $ids | cut -d' ' -f3)
+p1=$(echo $first | cut -c1); p2=$(echo $first | cut -c1-2); p3=$(echo $first | cut -c1-3); p4=$(echo $first | cut -c1-4)
+echo "third save's starts: $p1 $p2 $p3 $p4"
+for t in $p1 $p2 $p3; do o show $t; done
+o show $p4
+# A line named like the start, then deleted.
+o line new $p3
+o goto main
+o show $p3
+o line delete $p3 --yes
+o show $p3
+o goto $p3
+o who f1.txt --save $p2
+o history $p1
+o combine $p2
+o undo --to $p3
+o tag $p2
+o show $p2
+o tag --delete $p2 --yes
+o show $p2
+o show kkkk
+o show "$(printf 'k\033[31m')"

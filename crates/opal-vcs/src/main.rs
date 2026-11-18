@@ -1331,6 +1331,8 @@ fn status_command(json: bool, full: bool, opened: &mut Option<Repository>) -> Re
     let (id, save) = (&found.save_id, &found.save);
     let short = short_or_whole(repo, id, &save.change_id, &mut warnings);
     warnings.extend(repo.store().warnings());
+    // An empty folder added or removed is a change a save takes, as a file is.
+    let changed = !found.changes.is_empty() || !found.empty_folders.is_empty();
     let mut out = output::Stdout::new();
     // What stdout can't take is remembered, for `ended` to tell.
     let _ = (|| -> std::io::Result<()> {
@@ -1340,6 +1342,9 @@ fn status_command(json: bool, full: bool, opened: &mut Option<Repository>) -> Re
                 .iter()
                 .map(|c| output::change_json(&file_change(c)))
                 .collect();
+            let empty_folders: Vec<serde_json::Value> = (found.empty_folders.iter())
+                .map(output::empty_folder_json)
+                .collect();
             return writeln!(
                 out,
                 "{}",
@@ -1348,6 +1353,7 @@ fn status_command(json: bool, full: bool, opened: &mut Option<Repository>) -> Re
                     "position": output::position_json(&found.position),
                     "save": output::save_json(id, save, &short),
                     "changes": changes,
+                    "empty_folders": empty_folders,
                     "not_written": found.not_written_here,
                     "unfinished_switch": found.unfinished_switch.is_some(),
                     "conflicts": found.conflicts.iter().map(output::conflict_json).collect::<Vec<_>>(),
@@ -1370,7 +1376,7 @@ fn status_command(json: bool, full: bool, opened: &mut Option<Repository>) -> Re
             }
             Position::AtSave(_) => writeln!(out, "At save {at}, not on a line  {when}")?,
         }
-        if found.changes.is_empty() && found.conflicts.is_empty() {
+        if !changed && found.conflicts.is_empty() {
             writeln!(out, "Nothing changed since then.")?;
         }
         if !found.conflicts.is_empty() {
@@ -1381,15 +1387,24 @@ fn status_command(json: bool, full: bool, opened: &mut Option<Repository>) -> Re
                 writeln!(out, "{row}")?;
             }
         }
-        if !found.changes.is_empty() {
-            let count = output::files(found.changes.len());
+        if changed {
+            // Folders count only where no file does, as `discard` counts.
+            let count = match found.changes.len() {
+                0 => output::counted(found.empty_folders.len() as u64, "folder", "folders"),
+                n => output::files(n),
+            };
             let count = s.paint(style::Role::Dim, &format!("({count})"));
             writeln!(out, "\nChanged since then {count}:\n")?;
-            let rows: Vec<output::Row> = found
-                .changes
-                .iter()
-                .map(|c| output::Row::of(&file_change(c)))
+            let mut rows: Vec<(&str, ChangeKind, output::Row)> = (found.changes.iter())
+                .map(|c| (c.path.as_str(), c.change, output::Row::of(&file_change(c))))
+                .chain(
+                    (found.empty_folders.iter())
+                        .map(|f| (f.path.as_str(), f.change, output::Row::empty_folder(f))),
+                )
                 .collect();
+            // In path order; where a file and an empty folder share a path, what went comes first.
+            rows.sort_by_key(|(path, change, _)| (*path, *change != ChangeKind::Removed));
+            let rows: Vec<output::Row> = rows.into_iter().map(|(_, _, row)| row).collect();
             let mut columns = output::Columns::default();
             rows.iter().for_each(|row| columns.fit(row));
             columns.settle(s, &rows);
@@ -1417,7 +1432,7 @@ fn status_command(json: bool, full: bool, opened: &mut Option<Repository>) -> Re
     })();
     output::ended(None, String::new, &warnings, None)?;
     let next = output::conflicts_next(&found.conflicts).or_else(|| {
-        (!found.changes.is_empty()).then(|| {
+        changed.then(|| {
             let save = style::err().command("opalro save \"describe your change\"");
             format!("save them with: {save}")
         })
@@ -1580,9 +1595,9 @@ fn changes_command(
                     (Some(_), Some(_)) => {
                         writeln!(out, "Save {short} changed no files in those paths.")
                     }
-                    (None, None) => writeln!(out, "Nothing changed since {short}."),
+                    (None, None) => writeln!(out, "No file changed since {short}."),
                     (None, Some(_)) => {
-                        writeln!(out, "Nothing changed in those paths since {short}.")
+                        writeln!(out, "No file changed in those paths since {short}.")
                     }
                 };
                 said?;

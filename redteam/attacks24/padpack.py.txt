@@ -1,0 +1,92 @@
+#!/usr/bin/env python3
+"""A Git repository written as one pack: `commits` commits on `main` whose top tree flips between
+two one-file trees, T_A and T_B, each stored whole with `pad` bytes of empty deflate blocks before
+its data, so each read of either tree inflates `pad` bytes for its 29.
+Usage: padpack.py <dir> <commits> <pad> [fixed|stored|none]"""
+import hashlib, os, struct, subprocess, sys, zlib
+
+root, commits, pad = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+style = sys.argv[4] if len(sys.argv) > 4 else "fixed"
+TYPES = {"commit": 1, "tree": 2, "blob": 3}
+
+
+def oid(kind, data):
+    return hashlib.sha1(b"%s %d\0" % (kind.encode(), len(data)) + data).digest()
+
+
+def padded(data):
+    """A zlib stream of `data` with about `pad` bytes of empty blocks first."""
+    unit = {"fixed": b"\x02\x08\x20\x80\x00", "stored": b"\x00\x00\x00\xff\xff"}[style]
+    body = unit * (pad // len(unit))
+    final = b"\x01" + struct.pack("<HH", len(data), 0xFFFF ^ len(data)) + data
+    return b"\x78\x01" + body + final + struct.pack(">I", zlib.adler32(data) & 0xFFFFFFFF)
+
+
+def entry_header(kind, size):
+    first = (TYPES[kind] << 4) | (size & 0x0F)
+    size >>= 4
+    out = bytearray()
+    while size:
+        out.append(first | 0x80)
+        first = size & 0x7F
+        size >>= 7
+    out.append(first)
+    return bytes(out)
+
+
+objects = []  # (name, kind, data, compressed)
+blob_x, blob_y = b"X\n", b"Y\n"
+for b in (blob_x, blob_y):
+    objects.append((oid("blob", b), "blob", b, zlib.compress(b)))
+trees = []
+for b in (blob_x, blob_y):
+    t = b"100644 f\0" + oid("blob", b)
+    comp = zlib.compress(t) if style == "none" else padded(t)
+    assert zlib.decompress(comp) == t
+    trees.append(oid("tree", t))
+    objects.append((trees[-1], "tree", t, comp))
+parent = None
+for i in range(commits):
+    text = b"tree %s\n" % trees[i % 2].hex().encode()
+    if parent:
+        text += b"parent %s\n" % parent.hex().encode()
+    when = 1000000000 + i
+    text += b"author T <t@e> %d +0000\ncommitter T <t@e> %d +0000\n\nc%d\n" % (when, when, i)
+    parent = oid("commit", text)
+    objects.append((parent, "commit", text, zlib.compress(text)))
+
+os.makedirs(root, exist_ok=True)
+subprocess.run(["git", "init", "-q", "-b", "main", root], check=True)
+packdir = os.path.join(root, ".git", "objects", "pack")
+body = bytearray(b"PACK" + struct.pack(">II", 2, len(objects)))
+index = []
+for name, kind, data, comp in objects:
+    at = len(body)
+    raw = entry_header(kind, len(data)) + comp
+    body += raw
+    index.append((name, zlib.crc32(raw) & 0xFFFFFFFF, at))
+assert len(body) < 1 << 31
+pack_sum = hashlib.sha1(body).digest()
+body += pack_sum
+index.sort()
+fan = [0] * 256
+for name, _, _ in index:
+    fan[name[0]] += 1
+for b in range(1, 256):
+    fan[b] += fan[b - 1]
+idx = bytearray(b"\xfftOc" + struct.pack(">I", 2))
+idx += b"".join(struct.pack(">I", f) for f in fan)
+idx += b"".join(n for n, _, _ in index)
+idx += b"".join(struct.pack(">I", c) for _, c, _ in index)
+idx += b"".join(struct.pack(">I", a) for _, _, a in index)
+idx += pack_sum
+idx += hashlib.sha1(idx).digest()
+name = "pack-" + pack_sum.hex()
+with open(os.path.join(packdir, name + ".pack"), "wb") as f:
+    f.write(body)
+with open(os.path.join(packdir, name + ".idx"), "wb") as f:
+    f.write(idx)
+with open(os.path.join(root, ".git", "refs", "heads", "main"), "w") as f:
+    f.write(parent.hex() + "\n")
+print("made %s: %d commits, pack of %d bytes, %s padding of %d bytes per tree"
+      % (root, commits, len(body), style, pad))

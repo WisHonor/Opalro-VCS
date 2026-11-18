@@ -1,0 +1,64 @@
+$ opalro status
+    On line main at save qkpk "First"  (just now)$
+    $
+    Changed since then (1 file):$
+    $
+        added    L             empty folder$
+        added    M             empty folder$
+        added    R/S/T         empty folder$
+        added    b\u{202e}idi  empty folder$
+        added    e\x1b[31mred  empty folder$
+        added    n\x0al        empty folder$
+        removed  p                      2 B$
+        added    p             empty folder$
+        added    t\x09ab       empty folder$
+    warning: 2 folders hold a Git repository or Opalro project of their own, so saves take nothing new from them:$
+      N$
+      Q$
+    Git and Jujutsu leave such folders out too. To save a folder's files, remove its .git or .opalro; to leave it out without this warning, list it in .opalroignore.$
+$ opalro status --json
+    {"changes":[{"change":"removed","kind":"file","new_size":null,"old_size":2,"path":"p"}],"conflicts":[],"empty_folders":[{"change":"added","path":"L"},{"change":"added","path":"M"},{"change":"added","path":"R/S/T"},{"change":"added","path":"bM-bM-^@M-.idi"},{"change":"added","path":"e\u001b[31mred"},{"change":"added","path":"n\nl"},{"change":"added","path":"p"},{"change":"added","path":"t\tab"}],"not_written":[],"opalro_json":1,"position":{"line":"main"},"save":{"author":{"email":"test@example.com","name":"Test","time_ms":1794986371990,"tz_offset_min":0},"change_id":"qkpkvpkootxvpptvmukluyntlvynmwqw","change_id_short":"qkpk","id":"39d2a0ebb8359e5627378a9f7f106d6ad2f24db3b4c76ed511e17a8d3017b431","line":"main","message":"First","parents":["f69b14ca43bf762cdfb1f5aa7500fa75894b99608e36ab1ec6ce284c9ea3bf5e"],"saver":{"email":"test@example.com","name":"Test","time_ms":1794986371990,"tz_offset_min":0}},"unfinished_switch":false,"warnings":[{"kind":"nested_projects_left_out","message":"2 folders hold a Git repository or Opalro project of their own, so saves take nothing new from them:\n  N\n  Q\nGit and Jujutsu leave such folders out too. To save a folder's files, remove its .git or .opalro; to leave it out without this warning, list it in .opalroignore."}]}$
+    warning: 2 folders hold a Git repository or Opalro project of their own, so saves take nothing new from them:$
+      N$
+      Q$
+    Git and Jujutsu leave such folders out too. To save a folder's files, remove its .git or .opalro; to leave it out without this warning, list it in .opalroignore.$
+$ opalro save Second
+    error: Some new names would not work on every system:$
+      "e\x1b[31mred" contains '\u{1b}', which Windows does not allow in names$
+      "n\x0al" contains '\n', which Windows does not allow in names$
+      "t\x09ab" contains '\t', which Windows does not allow in names$
+    $
+    hint: Nothing was saved. Rename them, or list them in .opalroignore.$
+--- after save
+$ opalro status
+    On line main at save qkpk "First"  (just now)$
+    $
+    Changed since then (1 file):$
+    $
+        added    L             empty folder$
+        added    M             empty folder$
+        added    R/S/T         empty folder$
+        added    b\u{202e}idi  empty folder$
+        added    e\x1b[31mred  empty folder$
+        added    n\x0al        empty folder$
+        removed  p                      2 B$
+        added    p             empty folder$
+        added    t\x09ab       empty folder$
+    warning: 2 folders hold a Git repository or Opalro project of their own, so saves take nothing new from them:$
+      N$
+      Q$
+    Git and Jujutsu leave such folders out too. To save a folder's files, remove its .git or .opalro; to leave it out without this warning, list it in .opalroignore.$
+$ opalro show
+    Save qkpk "First"$
+    $
+        Author       Test <test@example.com>, 2026-11-18 07:19 +00:00  (just now)$
+        Saved by     Test <test@example.com>, 2026-11-18 07:19 +00:00  (just now)$
+        Line         main$
+        After        f69b14ca43bf "Start project"$
+        Fingerprint  39d2a0ebb8359e5627378a9f7f106d6ad2f24db3b4c76ed511e17a8d3017b431$
+    $
+    3 files changed:$
+    $
+        added  .opalroignore  13 B$
+        added  a.txt           2 B$
+        added  p               2 B$

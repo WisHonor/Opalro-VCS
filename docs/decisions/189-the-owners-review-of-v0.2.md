@@ -5,6 +5,7 @@
 - **Agenda topic:** none (the owner's review of what was decided while they were away, milestones 7 to 10)
 - **Decided by:** the owner. They confirmed the first item in person, and for the other 70 said to go with Claude's recommendations. The recommendations are Claude's and are written out here, so that each can still be reversed.
 - **Refines:** [decision 156](156-the-user-agreements-blanks-filled-by-the-owner.md) (one sentence of the agreement); [157](157-v0.2-in-four-milestones.md); [186](186-speed-before-v0.2.md) points 3 and 4; [187](187-v0.2s-package.md) points 4 and 6; [188](188-red-team-m10-rulings.md)
+- **Refined by:** [decision 193](193-the-next-version-starts-with-what-v0.2-left.md) (point 5's items are milestone 11, the first of the next version)
 
 ## Context
 

@@ -1,0 +1,43 @@
+#!/usr/bin/env python3
+"""The tree cache's real memory against its count: one commit whose top tree holds `n` folders,
+each a distinct Git tree holding only `.git` (a name the import leaves out, pointing at an object
+that needn't exist), so each converts to an empty folder and costs the cache its least, 64.
+Every object loose. Usage: cachemem.py <dir> <n>"""
+import hashlib, os, subprocess, sys, zlib
+
+root, n = sys.argv[1], int(sys.argv[2])
+git = os.path.join(root, ".git")
+subprocess.run(["git", "init", "-q", "-b", "main", root], check=True)
+objects = os.path.join(git, "objects")
+
+
+def put(kind, data):
+    raw = b"%s %d\0" % (kind, len(data)) + data
+    oid = hashlib.sha1(raw).digest()
+    hexid = oid.hex()
+    folder = os.path.join(objects, hexid[:2])
+    os.makedirs(folder, exist_ok=True)
+    with open(os.path.join(folder, hexid[2:]), "wb") as f:
+        f.write(zlib.compress(raw))
+    return oid
+
+
+def name36(i, width):
+    digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+    s = ""
+    for _ in range(width):
+        s = digits[i % 36] + s
+        i //= 36
+    return s.encode()
+
+
+entries = []
+for i in range(n):
+    t = put(b"tree", b"100644 .git\0" + hashlib.sha1(b"%d" % i).digest())
+    entries.append(b"40000 t" + name36(i, 4) + b"\0" + t)
+top = put(b"tree", b"".join(entries))
+text = b"tree %s\nauthor T <t@e> 1000000000 +0000\ncommitter T <t@e> 1000000000 +0000\n\nc\n" % top.hex().encode()
+c = put(b"commit", text)
+with open(os.path.join(git, "refs", "heads", "main"), "w") as f:
+    f.write(c.hex() + "\n")
+print("written", root)

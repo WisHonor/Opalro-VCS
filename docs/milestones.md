@@ -611,3 +611,48 @@ Planned on 2026-11-15 after decisions [184](decisions/184-opalro-who-the-save-be
 - **Red team, review and merge** ✅ (2026-11-16): two red-team sessions (RT23: nothing proved; RT24, after the fix wave: one Low finding, ruled in [decision 188](decisions/188-red-team-m10-rulings.md) and left for the owner), a whole-branch review by four readers (nothing Critical; what it found fixed in one wave), and the merge into `v0.2` on 2026-11-16.
 - **The package's run** ✅ (2026-11-16): the release workflow was started by hand on `v0.2` at `e4c0017` ([run 43915614285](https://github.com/WisHonor/Opalro-VCS/actions/runs/43915614285)); all thirteen jobs it runs passed (`prepare`, the four builds, `sums`, the five clean-machine checks and the two ordinary-computers checks), and its `release` job, the only one that can make a draft, was skipped, as it is on every branch but `main`. It was run there again the same day, with the same result, after the owner's review changed the user agreement's sentence ([run 43927685057](https://github.com/WisHonor/Opalro-VCS/actions/runs/43927685057), at `cedd38a`), and a third time, again with the same result, after the pages became a first release's ([run 43938713517](https://github.com/WisHonor/Opalro-VCS/actions/runs/43938713517), at `a56e065`; [decision 190](decisions/190-v0.2-is-the-first-published-version.md)): that last run is the one [the owner's page](releases/v0.2.0-before-you-publish.md) names. Nothing was tagged, drafted, merged into `main` or opened as a pull request by then; later that day the owner had Claude merge `v0.2` into `main` ([decision 192](decisions/192-the-owner-has-claude-merge-v0.2-into-main.md)), and still nothing is tagged or drafted.
 - *Done when:* every proven finding is fixed or ruled on, every document matches the code, the branch is merged into `v0.2`, and the workflow's run is green. Nothing is tagged, drafted, merged into `main` or opened as a pull request.
+
+## v0.3: what v0.2 left, then working together
+
+Planned from 2026-11-17 ([decision 193](decisions/193-the-next-version-starts-with-what-v0.2-left.md)). Claude decided 193 to 197 at the owner's request while the owner was away; each can be reversed ([the rulings](plans/2026-11-17-milestone-11-rulings.md)). v0.3 is built on the branch `v0.3`, made from `main` as v0.2 left it: each milestone on a branch of its own, merged into `v0.3` after its red-team session. `main` stays v0.2 until the owner publishes it, and `v0.3` reaches `main` after that, through a pull request whose checks pass. Sync, locks, big files on demand and `reverse` (decisions 001, 015, 017 and 021) are planned after their design pass, whose questions are the owner's first.
+
+| # | Milestone | Done when |
+|---|---|---|
+| 11 | **Loose ends** | The six things the owner's review of v0.2 put first ([decision 189](decisions/189-the-owners-review-of-v0.2.md) point 5): a change ID's start counts from four letters; the program names the version a feature came with; a switch makes no folder that only conflicts standing as nothing fill, and `status` shows empty folders; `opalro import` notes the renames it is sure of; the flush after the journal is removed is put to the crash tests; Git's rule for `who` at a combine is measured |
+
+## Milestone 11: Loose ends
+
+Planned on 2026-11-17 after decisions [193](decisions/193-the-next-version-starts-with-what-v0.2-left.md) to [196](decisions/196-empty-folders-in-a-switch-and-in-status.md). Plan: [plans/2026-11-17-milestone-11-loose-ends.md](plans/2026-11-17-milestone-11-loose-ends.md). Each step ends with tests passing on Windows, macOS and Linux; the plan's task numbers are in brackets. A ✅ marks a step that is done.
+
+**1. Short names** ✅ (2026-11-17; Task 1)
+- Text counts as the start of a change ID only from four letters on; 1 to 3 letters of k to z that name nothing get a hint saying so ([decision 194](decisions/194-a-change-ids-start-counts-from-four-letters.md)).
+- *Done when:* a line or tag named with 1 to 3 letters is always that line or tag, and a name of 4 letters still clashes as before.
+
+**2. The words about older versions** ✅ (2026-11-17; Task 2)
+- "Opalro before 0.2" where the program said "Opalro 0.1" (decision 193 point 2).
+- *Done when:* the tests and the pages hold the new words.
+
+**3. Empty folders** ✅ (2026-11-17; Tasks 3 and 4)
+- A switch makes no folder that only conflicts standing as nothing fill; `resolve --keep` takes out a folder it empties that is gone from disk; `status` shows empty folders, added and removed ([decision 196](decisions/196-empty-folders-in-a-switch-and-in-status.md)).
+- *Done when:* the red team's RT24-1 passes, and what `status` lists is what the next save records, folders included.
+
+**4. Renames in an import** ✅ (2026-11-17 and 2026-11-18; Tasks 5 and 6)
+- The pairing of moves takes its changes from any walk; an import notes the renames it is sure of ([decision 195](decisions/195-the-import-records-the-renames-it-is-sure-of.md)).
+- *Done when:* every note matches Git's exact renames on generated histories, the merges and lines compared with Git include renames, and the import's time on Git's own repository is measured.
+- Comparing each commit with its first parent may do at most the larger of 1 GiB of work and 32 times what reading the Git trees the import converted took, counted by what reading costs (a tree's bytes and each read; where a tree is read again, also each pack index searched and padding past what zlib needs); past that the import stops, committing nothing ([security.md](security.md) T7). The allowance doesn't depend on how Git packed the repository; what reading a tree again costs does, so packing can move where it stops, never the saves. Before the comparison had its cache of trees, on Git's own repository it read 2.05 times the trees converted and added 35 to 40 % to the import's time: 34.6 % with nothing else changed, and 38 % and 40.5 % against `main`'s import on two runners. With the cache, after the red team's fixes, the import took 12.8 % and 10.6 % longer than `main`'s on two runners, of which the comparison itself is about 5 s, and its peak memory was about 150 MB higher, the cache's ([benchmarks.md](benchmarks.md) §16).
+
+**5. The flush after the journal is removed** ✅ (2026-11-18; Task 7)
+- The journal a finished switch can leave is put to every command; the crash tests' page says what they do.
+- *Done when:* the tests pass on the code as it is and the write-up for the owner is in [benchmarks.md](benchmarks.md) and the follow-ups. No flush changes.
+- No fault was found: every command (all but `setup --upgrade`, which only turns on features) handles the journal a lost removal leaves, and the one state that dropping the flush could add, which only a drive that reorders could make, stops every change but that one until the journal is deleted ([benchmarks.md](benchmarks.md) §15; the [follow-ups](plans/2026-11-01-milestone-1-follow-ups.md), "For the owner to decide").
+
+**6. `who` at a combine** ✅ (2026-11-18; Task 8)
+- Git's rule measured on a throwaway branch against `who`'s.
+- *Done when:* the numbers are in [benchmarks.md](benchmarks.md).
+- On five files of Git's own history, Git's rule named another save for 49 of 13,385 lines (0.37 %) and was 4 to 13 % faster; whether to take it is the owner's call ([benchmarks.md](benchmarks.md) §16; the [follow-ups](plans/2026-11-01-milestone-1-follow-ups.md), "For the owner to decide").
+
+**7. Docs, red team, review and merge** ✅ (2026-11-18; Tasks 9 and 10)
+- The documents; a red-team session; a whole-branch review and one round of fixes; the merge into `v0.3`.
+- **Docs** ✅ (2026-11-18): the design, [security.md](security.md), [testing.md](testing.md), [benchmarks.md](benchmarks.md) §12 and §16 and the [follow-ups](plans/2026-11-01-milestone-1-follow-ups.md) say what is built, measured and left; [terminal.md](terminal.md), [json.md](json.md), [storage-format.md](storage-format.md) and the guide were written with the code; the calls made on the way are in [the rulings](plans/2026-11-17-milestone-11-rulings.md).
+- **Red team, review and merge** ✅ (2026-11-18): two red-team sessions (RT25: one Medium and one Low finding; RT26, after the fix wave: two Medium findings), all four fixed with their proofs, which now pass; a whole-branch review (one Important finding, fixed in one wave with the smaller ones) and a scoped re-review of the fixes, whose one estimated cost, not built, is left open in writing; all of it in [decision 197](decisions/197-red-team-m11-rulings.md). The import's time on Git's own repository was measured again on the last code ([benchmarks.md](benchmarks.md) §16), and the branch merged into `v0.3` on 2026-11-18.
+- *Done when:* every proven finding is fixed or ruled on, every document matches the code, and the branch is merged into `v0.3`.

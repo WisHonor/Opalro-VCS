@@ -5,7 +5,7 @@
 - **Agenda topic:** none (milestone 9 planning)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 007](007-conflicts.md) (a conflicted save is a normal save: it can be checked out, built on and combined, and its conflicts stay listed until fixed); [decision 017](017-commands-and-output.md) (what commands print)
-- **Refined by:** [decision 181](181-what-building-milestone-9-refined.md) (one `Next:` line; `goto` and a forward tell of a conflict; one row for a folder that became a conflict's place); [decision 184](184-opalro-who-the-save-behind-each-line.md) (`who` and a conflict: a place in conflict is read as what stands there)
+- **Refined by:** [decision 181](181-what-building-milestone-9-refined.md) (one `Next:` line; `goto` and a forward tell of a conflict; one row for a folder that became a conflict's place); [decision 184](184-opalro-who-the-save-behind-each-line.md) (`who` and a conflict: a place in conflict is read as what stands there); [decision 196](196-empty-folders-in-a-switch-and-in-status.md) (`status` shows empty folders)
 
 ## Context
 

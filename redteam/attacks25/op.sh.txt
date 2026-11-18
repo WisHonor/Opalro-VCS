@@ -1,0 +1,8 @@
+#!/bin/sh
+# Runs opalro as a test user with its own settings folder; OPALRO_BIN picks the binary
+# (default: milestone 11's release build in /tmp/t11).
+cfg=${OPCFG:-/tmp/rt26cfg}
+mkdir -p "$cfg"
+OPALRO_USER_NAME=Test OPALRO_USER_EMAIL=test@example.com OPALRO_PROGRESS_QUIET_MS=600000 \
+OPALRO_CONFIG_DIR="$cfg" HOME="$cfg" XDG_CONFIG_HOME="$cfg" \
+exec "${OPALRO_BIN:-/tmp/t11/release/opalro}" "$@"

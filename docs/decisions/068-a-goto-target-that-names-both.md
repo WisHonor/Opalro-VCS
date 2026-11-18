@@ -5,7 +5,7 @@
 - **Agenda topic:** none (milestone 3, its red-team session, RT5-3)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 055](055-lines-in-v0.1.md) (how `goto` reads its argument)
-- **Refined by:** [decision 159](159-tags.md) (a tag's name that is also the start of another save's ID is refused the same way); [decision 162](162-red-team-m7-rulings.md) (a name that is both a line and a tag, at two saves, is refused too)
+- **Refined by:** [decision 159](159-tags.md) (a tag's name that is also the start of another save's ID is refused the same way); [decision 162](162-red-team-m7-rulings.md) (a name that is both a line and a tag, at two saves, is refused too); [decision 194](194-a-change-ids-start-counts-from-four-letters.md) (text of 1 to 3 letters is never a change ID's start, so a line so named is never refused as meaning both)
 
 ## Context
 

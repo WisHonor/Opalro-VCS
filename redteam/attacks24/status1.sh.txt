@@ -1,0 +1,24 @@
+#!/bin/sh
+# Empty folders in status: hostile names, ignored contents, a folder in a file's place, and
+# whether a save then records exactly what status listed.
+o() { echo "\$ opalro $*"; sh /work/rt25/op.sh "$@" 2>&1 | cat -A | sed 's/^/    /'; }
+fresh() { rm -rf "$1"; mkdir -p "$1"; cd "$1"; }
+
+fresh /tmp/s1
+o start --preset custom >/dev/null
+echo a > a.txt; echo p > p
+printf '*.log\nbuild/\n' > .opalroignore
+o save First >/dev/null
+mkdir "$(printf 'e\033[31mred')" "$(printf 'n\nl')" "$(printf 'b\342\200\256idi')" "$(printf 't\tab')"
+mkdir L; echo x > L/a.log
+mkdir -p M/build; echo x > M/build/o.txt
+mkdir -p N/.git; echo x > N/.git/HEAD
+mkdir -p Q/.opalro; echo x > Q/.opalro/x
+mkdir -p R/S/T
+rm p; mkdir p
+o status
+o status --json
+o save Second
+echo "--- after save"
+o status
+o show

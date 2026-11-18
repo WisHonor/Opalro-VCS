@@ -5,7 +5,8 @@
 
 mod support;
 
-use std::collections::BTreeMap;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
 use std::path::Path;
 use std::time::Instant;
@@ -15,6 +16,9 @@ use opal_core::import::{ImportRequest, import_git};
 use opal_core::names::holdable_here;
 use opal_core::repo::Repository;
 use opal_core::save::Person;
+use proptest::prelude::*;
+use proptest::sample::Index;
+use proptest::test_runner::{Config, RngAlgorithm, TestRng, TestRunner};
 use support::{
     Env, assert_ancestry_matches_git, assert_matches_git, assert_matches_git_counting,
     assert_starts_match_git, copy_dir, git, git_commit, git_with_input, text, top_folder,
@@ -536,6 +540,375 @@ fn a_link_git_wrote_keeps_its_target_when_saved() {
     let mut saved = Vec::new();
     repo.store().copy_content(&link.id, &mut saved).unwrap();
     assert_eq!(text(&saved), "dir/target.txt");
+}
+
+// Renames, against the exact ones Git finds.
+
+/// The folders of a generated history, none named like a file. The last three hold no other, so
+/// each can be moved whole.
+const FOLDERS: [&str; 5] = ["", "src/", "src/deep/", "doc/", "lib/"];
+const LEAVES: [&str; 3] = ["src/deep/", "doc/", "lib/"];
+const NAMES: [&str; 6] = ["a.txt", "b.txt", "c.md", "d.sh", "e.png", "f.rs"];
+
+fn all_paths() -> Vec<String> {
+    FOLDERS
+        .iter()
+        .flat_map(|f| NAMES.iter().map(move |n| format!("{f}{n}")))
+        .collect()
+}
+
+/// One change in a commit; each `Index` picks among what is there when the commit is made.
+#[derive(Clone, Debug)]
+enum Change {
+    /// A file's contents replaced.
+    Edit(Index),
+    /// A new file at a free path, executable if `true`.
+    Add(Index, bool),
+    /// A new file at a free path holding what another holds.
+    Copy(Index, Index),
+    Remove(Index),
+    /// A file moved to a free path: its mark flipped if the first `bool`, its contents replaced
+    /// if the second.
+    Move(Index, Index, bool, bool),
+    /// Every file of a folder that holds no other, moved to another such folder holding nothing.
+    MoveFolder(Index, Index),
+}
+
+/// The first commit's files (path, executable), `main`'s commits, then maybe a branch forked from
+/// there, `main`'s commits after the fork, and a merge of the branch.
+#[derive(Clone, Debug)]
+struct Renames {
+    first: Vec<(String, bool)>,
+    main: Commits,
+    side: Option<(Commits, Commits)>,
+}
+
+/// Commits, each of its changes.
+type Commits = Vec<Vec<Change>>;
+
+/// Each file's contents and whether it is executable.
+type Tree = BTreeMap<String, (String, bool)>;
+
+fn change() -> impl Strategy<Value = Change> {
+    let flag = |p| prop::bool::weighted(p);
+    prop_oneof![
+        2 => any::<Index>().prop_map(Change::Edit),
+        2 => (any::<Index>(), flag(0.3)).prop_map(|(at, x)| Change::Add(at, x)),
+        1 => (any::<Index>(), any::<Index>()).prop_map(|(f, at)| Change::Copy(f, at)),
+        1 => any::<Index>().prop_map(Change::Remove),
+        4 => (any::<Index>(), any::<Index>(), flag(0.3), flag(0.2))
+            .prop_map(|(f, t, flip, edit)| Change::Move(f, t, flip, edit)),
+        2 => (any::<Index>(), any::<Index>()).prop_map(|(f, t)| Change::MoveFolder(f, t)),
+    ]
+}
+
+fn commits(n: impl Into<prop::collection::SizeRange>) -> impl Strategy<Value = Commits> {
+    prop::collection::vec(prop::collection::vec(change(), 1..=3), n)
+}
+
+fn renames() -> impl Strategy<Value = Renames> {
+    let marks = prop::collection::vec(prop::bool::weighted(0.3), 14);
+    let first = (prop::sample::subsequence(all_paths(), 4..=14), marks)
+        .prop_map(|(paths, marks)| paths.into_iter().zip(marks).collect());
+    let side = prop::option::weighted(0.4, (commits(1..=3), commits(0..=2)));
+    (first, commits(2..=6), side).prop_map(|(first, main, side)| Renames { first, main, side })
+}
+
+/// Makes `change` on `tree`, giving new contents numbers from `fresh`; returns the files a folder
+/// moved whole went from and to.
+fn make(tree: &mut Tree, change: &Change, fresh: &mut usize) -> Vec<(String, String)> {
+    let mut contents = || {
+        *fresh += 1;
+        format!("contents {fresh}\n")
+    };
+    let free: Vec<String> = (all_paths().into_iter())
+        .filter(|p| !tree.contains_key(p))
+        .collect();
+    let free_at = |at: &Index| (!free.is_empty()).then(|| free[at.index(free.len())].clone());
+    let nth = |tree: &Tree, at: &Index| {
+        (!tree.is_empty()).then(|| tree.keys().nth(at.index(tree.len())).unwrap().clone())
+    };
+    match change {
+        Change::Edit(at) => {
+            if let Some(path) = nth(tree, at) {
+                tree.get_mut(&path).unwrap().0 = contents();
+            }
+        }
+        Change::Add(at, exec) => {
+            if let Some(path) = free_at(at) {
+                tree.insert(path, (contents(), *exec));
+            }
+        }
+        Change::Copy(from, at) => {
+            if let (Some(from), Some(path)) = (nth(tree, from), free_at(at)) {
+                let file = tree[&from].clone();
+                tree.insert(path, file);
+            }
+        }
+        Change::Remove(at) => {
+            if let Some(path) = nth(tree, at) {
+                tree.remove(&path);
+            }
+        }
+        Change::Move(from, to, flip, edit) => {
+            if let (Some(from), Some(to)) = (nth(tree, from), free_at(to)) {
+                let (mut bytes, mut exec) = tree.remove(&from).unwrap();
+                exec ^= *flip;
+                if *edit {
+                    bytes = contents();
+                }
+                tree.insert(to, (bytes, exec));
+            }
+        }
+        Change::MoveFolder(from, to) => {
+            let holding = |leaf: &&str| tree.keys().any(|p| p.starts_with(*leaf));
+            let full: Vec<&str> = LEAVES.iter().copied().filter(holding).collect();
+            let empty: Vec<&str> = LEAVES.iter().copied().filter(|l| !holding(l)).collect();
+            if full.is_empty() || empty.is_empty() {
+                return Vec::new();
+            }
+            let (from, to) = (full[from.index(full.len())], empty[to.index(empty.len())]);
+            let moving: Vec<String> = (tree.keys())
+                .filter(|p| p.starts_with(from))
+                .cloned()
+                .collect();
+            let mut moved = Vec::new();
+            for path in moving {
+                let file = tree.remove(&path).unwrap();
+                let there = format!("{to}{}", &path[from.len()..]);
+                tree.insert(there.clone(), file);
+                moved.push((path, there));
+            }
+            return moved;
+        }
+    }
+    Vec::new()
+}
+
+/// A generated history written for `git fast-import`, and the folders each commit moved whole
+/// (as the files' moves), by the commit's message: its mark.
+struct Written {
+    stream: String,
+    marks: u32,
+    folders: BTreeMap<u32, Vec<Vec<(String, String)>>>,
+}
+
+impl Written {
+    /// Writes a commit on `branch` with `parents` from what changed between `before` (the first
+    /// parent's files) and `after`; returns its mark.
+    fn commit(&mut self, branch: &str, parents: &[u32], before: &Tree, after: &Tree) -> u32 {
+        self.marks += 1;
+        let mark = self.marks;
+        let message = format!("{mark}\n");
+        let _ = write!(
+            self.stream,
+            "commit refs/heads/{branch}\nmark :{mark}\ncommitter Ada <ada@example.com> {} +0000\n\
+             data {}\n{message}",
+            1_700_000_000 + mark,
+            message.len()
+        );
+        for (i, parent) in parents.iter().enumerate() {
+            let how = if i == 0 { "from" } else { "merge" };
+            let _ = writeln!(self.stream, "{how} :{parent}");
+        }
+        for path in before.keys().filter(|p| !after.contains_key(*p)) {
+            let _ = writeln!(self.stream, "D {path}");
+        }
+        for (path, file) in after {
+            if before.get(path) != Some(file) {
+                let mode = if file.1 { "100755" } else { "100644" };
+                let _ = write!(
+                    self.stream,
+                    "M {mode} inline {path}\ndata {}\n{}\n",
+                    file.0.len(),
+                    file.0
+                );
+            }
+        }
+        mark
+    }
+
+    /// Makes `changes` on `tree` and commits them on `branch` after `parent`; returns the mark.
+    fn changes(
+        &mut self,
+        branch: &str,
+        parent: u32,
+        tree: &mut Tree,
+        changes: &[Change],
+        fresh: &mut usize,
+    ) -> u32 {
+        let before = tree.clone();
+        let mut folders = Vec::new();
+        for change in changes {
+            let moved = make(tree, change, fresh);
+            if !moved.is_empty() {
+                folders.push(moved);
+            }
+        }
+        let mark = self.commit(branch, &[parent], &before, tree);
+        self.folders.insert(mark, folders);
+        mark
+    }
+}
+
+/// The history `h` written out. A merge holds the branch's files.
+fn written(h: &Renames) -> Written {
+    let mut fresh = 0;
+    let first: Tree = (h.first.iter())
+        .map(|(path, exec)| {
+            fresh += 1;
+            (path.clone(), (format!("contents {fresh}\n"), *exec))
+        })
+        .collect();
+    let mut out = Written {
+        stream: String::new(),
+        marks: 0,
+        folders: BTreeMap::new(),
+    };
+    let mut main_mark = out.commit("main", &[], &Tree::new(), &first);
+    let mut main = first;
+    for changes in &h.main {
+        main_mark = out.changes("main", main_mark, &mut main, changes, &mut fresh);
+    }
+    if let Some((branch, after)) = &h.side {
+        let (mut side, mut side_mark) = (main.clone(), main_mark);
+        for changes in branch {
+            side_mark = out.changes("side", side_mark, &mut side, changes, &mut fresh);
+        }
+        for changes in after {
+            main_mark = out.changes("main", main_mark, &mut main, changes, &mut fresh);
+        }
+        out.commit("main", &[main_mark, side_mark], &main, &side);
+    }
+    out
+}
+
+/// Each file of the commit `commit` in `dir`: its mode and blob ID.
+fn git_files(dir: &Path, commit: &str) -> BTreeMap<String, (String, String)> {
+    let listed = git(dir, &["ls-tree", "-r", "-z", commit]);
+    (listed.split(|&b| b == 0).filter(|r| !r.is_empty()))
+        .map(|row| {
+            let row = text(row);
+            let (head, path) = row.split_once('\t').unwrap();
+            let words: Vec<&str> = head.split(' ').collect();
+            (path.to_owned(), (words[0].to_owned(), words[2].to_owned()))
+        })
+        .collect()
+}
+
+/// The renames `git diff --name-status -M100%` finds from `from` to `to` in `dir`, all `R100`.
+fn exact_renames(dir: &Path, from: &str, to: &str) -> BTreeSet<(String, String)> {
+    let listed = git(dir, &["diff", "--name-status", "-z", "-M100%", from, to]);
+    let mut fields = (listed.split(|&b| b == 0).filter(|f| !f.is_empty())).map(text);
+    let mut found = BTreeSet::new();
+    while let Some(status) = fields.next() {
+        let first = fields.next().unwrap();
+        if status.starts_with('R') || status.starts_with('C') {
+            assert_eq!(status, "R100", "{from} to {to}");
+            found.insert((first, fields.next().unwrap()));
+        }
+    }
+    found
+}
+
+/// Generated histories, made with Git and imported: each save notes exactly the renames
+/// `git diff -M100%` finds between its commit and the commit's first parent, leaving out contents
+/// that more than one file holds on either side (Git picks one pairing there, and Opalro notes
+/// none, or only a file whose twin stayed where it was), and every note is one of those renames.
+/// Commits edit, add, copy and remove files and move them, some with their executable mark
+/// flipped or their contents replaced, move folders whole, and may merge a branch. The seed is
+/// fixed.
+#[test]
+fn notes_match_gits_exact_renames() {
+    const FLOORS: [&str; 3] = [
+        "a folder moved whole",
+        "a rename of an executable",
+        "contents held twice",
+    ];
+    let histories = RefCell::new(BTreeMap::<&str, usize>::new());
+    let compared = RefCell::new(0);
+    let config = Config {
+        cases: 32,
+        failure_persistence: None,
+        ..Config::default()
+    };
+    let rng = TestRng::deterministic_rng(RngAlgorithm::ChaCha);
+    TestRunner::new_with_rng(config, rng)
+        .run(&renames(), |h| {
+            let made = written(&h);
+            let env = Env::new();
+            let args = ["fast-import", "--quiet"];
+            let out = git_with_input(env.root(), &args, made.stream.as_bytes());
+            assert!(out.status.success(), "{}", text(&out.stderr));
+            env.git(&["reset", "-q", "--hard"]);
+            env.import();
+            let (repo, state) = env.state();
+            let mut todo: Vec<Id> = state.lines.values().copied().collect();
+            let (mut seen, mut met) = (BTreeSet::new(), BTreeSet::new());
+            while let Some(id) = todo.pop() {
+                if !seen.insert(id) {
+                    continue;
+                }
+                let save = repo.store().save(&id, false).unwrap();
+                todo.extend(save.parents.iter().copied());
+                let Some(first) = save.parents.first() else {
+                    continue;
+                };
+                let (commit, parent) = (git_commit(&repo, &id), git_commit(&repo, first));
+                let ours: BTreeSet<(String, String)> = (save.move_notes.iter())
+                    .map(|n| (n.from.clone(), n.to.clone()))
+                    .collect();
+                let theirs = exact_renames(env.root(), &parent, &commit);
+                prop_assert!(
+                    ours.is_subset(&theirs),
+                    "{}: Opalro noted {:?}, Git renamed {:?}\n{}",
+                    save.message,
+                    ours,
+                    theirs,
+                    made.stream
+                );
+                let (before, after) = (
+                    git_files(env.root(), &parent),
+                    git_files(env.root(), &commit),
+                );
+                let held = |files: &BTreeMap<String, (String, String)>, blob: &String| {
+                    files.values().filter(|(_, b)| b == blob).count()
+                };
+                let once = |(from, _): &&(String, String)| {
+                    let blob = &before[from].1;
+                    held(&before, blob) == 1 && held(&after, blob) == 1
+                };
+                let sure: BTreeSet<_> = theirs.iter().filter(once).cloned().collect();
+                let noted: BTreeSet<_> = ours.iter().filter(once).cloned().collect();
+                prop_assert_eq!(&noted, &sure, "{}\n{}", save.message, made.stream);
+                *compared.borrow_mut() += sure.len();
+                if sure.len() < theirs.len() {
+                    met.insert(FLOORS[2]);
+                }
+                if sure.iter().any(|(from, _)| before[from].0 == "100755") {
+                    met.insert(FLOORS[1]);
+                }
+                let mark: u32 = save.message.trim().parse().unwrap();
+                let whole = |moved: &Vec<(String, String)>| {
+                    moved.iter().filter(|m| sure.contains(*m)).count() >= 2
+                };
+                if made.folders.get(&mark).is_some_and(|f| f.iter().any(whole)) {
+                    met.insert(FLOORS[0]);
+                }
+            }
+            for kind in met {
+                *histories.borrow_mut().entry(kind).or_default() += 1;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let (histories, compared) = (histories.into_inner(), compared.into_inner());
+    println!("{compared} renames compared; histories with each: {histories:?}");
+    assert!(compared > 0, "compared no rename");
+    for kind in FLOORS {
+        let n = histories.get(kind).copied().unwrap_or(0);
+        assert!(n >= 3, "{kind} in {n} histories");
+    }
 }
 
 #[test]

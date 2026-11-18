@@ -210,11 +210,13 @@ impl Fx {
         out
     }
 
-    /// What `goto` writes for `save` into an empty folder: each conflict as what it stands as.
+    /// What `goto` writes for `save` into an empty folder: each conflict as what it stands as, and
+    /// no folder whose contents, all the way down, are places in conflict standing as nothing.
     fn goto_writes(&self, save: Id) -> BTreeMap<String, Option<Vec<u8>>> {
         let unstored = HashMap::new();
         let listings = Listings::standing(&self.repo, &unstored);
         let mut out = BTreeMap::new();
+        let mut saved_empty = Vec::new();
         let mut todo = vec![(String::new(), self.save_of(save).root)];
         while let Some((at, id)) = todo.pop() {
             for e in listings.read(&id).unwrap().entries() {
@@ -224,6 +226,10 @@ impl Fx {
                     format!("{at}/{}", e.name)
                 };
                 if e.kind == EntryKind::Folder {
+                    let stored = self.repo.store().listing(&e.id).unwrap();
+                    if stored.entries().is_empty() {
+                        saved_empty.push(path.clone());
+                    }
                     out.insert(path.clone(), None);
                     todo.push((path, e.id));
                 } else {
@@ -233,6 +239,12 @@ impl Fx {
                 }
             }
         }
+        // Any other folder is made only for a file or a folder saved empty below it.
+        let made: Vec<String> = (out.iter())
+            .filter(|(p, v)| v.is_some() || saved_empty.contains(p))
+            .map(|(p, _)| p.clone())
+            .collect();
+        out.retain(|p, v| v.is_some() || made.iter().any(|m| within(m, p)));
         out
     }
 

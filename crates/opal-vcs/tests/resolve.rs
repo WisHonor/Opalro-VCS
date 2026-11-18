@@ -957,8 +957,8 @@ fn copy_before_where_opalro_cant_tell_what_was_there_says_it_has_no_version() {
     assert!(!Path::new(to).exists());
 }
 
-/// `d/a.txt` changed on `side` and removed on `main`, combined on `main`: it stands as nothing,
-/// in a folder `d` that is empty; then the person deletes `d`.
+/// `d/a.txt` changed on `side` and removed with its folder on `main`, combined on `main`: it
+/// stands as nothing, and the combine makes no folder `d` that only it fills.
 fn in_a_deleted_folder(env: &Env) {
     std::fs::create_dir_all(env.root().join("d")).unwrap();
     env.overwrite("d/a.txt", "1\n2\n3\n");
@@ -970,14 +970,16 @@ fn in_a_deleted_folder(env: &Env) {
     std::fs::remove_dir_all(env.root().join("d")).unwrap();
     run(env, &["save", "Gone on main"], 0);
     run(env, &["combine", "side"], 0);
-    assert!(env.root().join("d").is_dir());
-    std::fs::remove_dir(env.root().join("d")).unwrap();
+    assert!(
+        !env.root().join("d").exists(),
+        "the combine made the folder d, which holds only a place standing as nothing"
+    );
 }
 
-/// A place in conflict below a folder the person deleted, kept on the side that holds nothing
-/// there: `resolve` takes only that place, so the folder stays deleted, as their other unsaved
-/// work stays unsaved; the step records only what changed, and `undo` gives back exactly what
-/// was there.
+/// A place in conflict below a folder the person's line deleted, kept on the side that holds
+/// nothing there: the folder stays deleted, on disk and in the new save, and `status` shows
+/// nothing for it; the step records only what changed, and `undo` gives back exactly what was
+/// there.
 #[test]
 fn keeping_nothing_below_a_deleted_folder_leaves_the_folder_deleted() {
     let env = project();
@@ -989,12 +991,53 @@ fn keeping_nothing_below_a_deleted_folder_leaves_the_folder_deleted() {
         "resolve made again the folder d, which only holds the place it was asked about"
     );
     support::assert_step_records(&env, &before);
-    // The new save still holds the folder, as the combined save did: only the place changed.
+    let saved = support::saved_paths(&env, support::main_tip(&env));
+    assert!(!saved.contains_key("d"), "{saved:?}");
+    let (status, _) = run(&env, &["status"], 0);
+    assert!(
+        status.ends_with("\nNothing changed since then.\n"),
+        "{status}"
+    );
+    run(&env, &["undo"], 0);
+    assert_eq!(support::entries(env.root()), before);
+}
+
+/// The same, where the person made the folder again first: the new save holds it, empty.
+#[test]
+fn keeping_nothing_where_the_folder_is_on_disk_keeps_it_empty() {
+    let env = project();
+    in_a_deleted_folder(&env);
+    std::fs::create_dir(env.root().join("d")).unwrap();
+    let before = support::entries(env.root());
+    run(&env, &["resolve", "d/a.txt", "--keep", "mine"], 0);
+    assert!(env.root().join("d").is_dir());
+    support::assert_step_records(&env, &before);
     let saved = support::saved_paths(&env, support::main_tip(&env));
     assert_eq!(saved.get("d").map(|e| e.0), Some('d'));
     assert!(!saved.contains_key("d/a.txt"));
     run(&env, &["undo"], 0);
     assert_eq!(support::entries(env.root()), before);
+}
+
+/// The same, where a link to a folder outside stands where the folder was: a link is never
+/// followed, so the folder counts as gone, and what the link leads to is left as it is.
+#[test]
+fn keeping_nothing_where_a_link_stands_for_the_folder_leaves_it_out() {
+    let env = project();
+    in_a_deleted_folder(&env);
+    let outside = env.config().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("theirs.txt"), "theirs\n").unwrap();
+    support::link_folder(&outside, &env.root().join("d"));
+    run(&env, &["resolve", "d/a.txt", "--keep", "mine"], 0);
+    let saved = support::saved_paths(&env, support::main_tip(&env));
+    assert!(!saved.contains_key("d"), "{saved:?}");
+    let left: Vec<_> = std::fs::read_dir(&outside).unwrap().collect();
+    assert_eq!(left.len(), 1);
+    assert_eq!(
+        std::fs::read_to_string(outside.join("theirs.txt")).unwrap(),
+        "theirs\n"
+    );
 }
 
 /// The same, kept on the side that holds a file there: the folder is made, to hold it.

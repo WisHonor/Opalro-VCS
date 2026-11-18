@@ -1,0 +1,7 @@
+#!/bin/sh
+# Runs the sandbox's opalro as a test user with its own settings folder.
+cfg=${OPCFG:-/tmp/rt25cfg}
+mkdir -p "$cfg"
+OPALRO_USER_NAME=Test OPALRO_USER_EMAIL=test@example.com OPALRO_PROGRESS_QUIET_MS=600000 \
+OPALRO_CONFIG_DIR="$cfg" HOME="$cfg" XDG_CONFIG_HOME="$cfg" \
+exec "${OPALRO_BIN:-/work/target/debug/opalro}" "$@"

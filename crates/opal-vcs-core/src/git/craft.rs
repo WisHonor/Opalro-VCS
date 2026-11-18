@@ -387,6 +387,71 @@ pub fn zlib(bytes: &[u8]) -> Vec<u8> {
     miniz_oxide::deflate::compress_to_vec_zlib(bytes, 6)
 }
 
+/// `bytes` (not empty) as a zlib stream of stored blocks, after `stored` empty stored blocks (5
+/// bytes each, quick to inflate) and `fixed` empty fixed-Huffman ones (10 bits each, about a
+/// thousand times slower): padding that inflates to nothing.
+#[must_use]
+pub fn zlib_padded(bytes: &[u8], stored: usize, fixed: usize) -> Vec<u8> {
+    let mut z = Bits {
+        out: vec![0x78, 0x01],
+        bits: 0,
+        held: 0,
+    };
+    for _ in 0..stored {
+        z.stored(false, &[]);
+    }
+    for _ in 0..fixed {
+        // Not the last, fixed codes, then the end of the block: code 256, seven zero bits.
+        z.put(0b010, 3);
+        z.put(0, 7);
+    }
+    let chunks: Vec<&[u8]> = bytes.chunks(0xffff).collect();
+    for (i, chunk) in chunks.iter().enumerate() {
+        z.stored(i.wrapping_add(1) == chunks.len(), chunk);
+    }
+    z.out.extend(adler32(bytes).to_be_bytes());
+    z.out
+}
+
+/// Bits as deflate writes them, the first in each byte's lowest bit.
+struct Bits {
+    out: Vec<u8>,
+    bits: u32,
+    held: u32,
+}
+
+impl Bits {
+    fn put(&mut self, value: u32, count: u32) {
+        self.bits |= value.wrapping_shl(self.held);
+        self.held = self.held.wrapping_add(count);
+        while self.held >= 8 {
+            self.out.push(self.bits as u8);
+            self.bits = self.bits.wrapping_shr(8);
+            self.held = self.held.wrapping_sub(8);
+        }
+    }
+
+    /// A stored block of `chunk`: its 3 header bits, the rest of the byte, then its length.
+    fn stored(&mut self, last: bool, chunk: &[u8]) {
+        self.put(u32::from(last), 3);
+        self.put(0, 8u32.wrapping_sub(self.held) & 7);
+        let len = u16::try_from(chunk.len()).expect("a stored block of at most 65,535 bytes");
+        self.out.extend(len.to_le_bytes());
+        self.out.extend((!len).to_le_bytes());
+        self.out.extend_from_slice(chunk);
+    }
+}
+
+/// zlib's checksum.
+fn adler32(bytes: &[u8]) -> u32 {
+    let (mut a, mut b) = (1u32, 0u32);
+    for &byte in bytes {
+        a = a.wrapping_add(u32::from(byte)).wrapping_rem(65521);
+        b = b.wrapping_add(a).wrapping_rem(65521);
+    }
+    b.wrapping_shl(16) | a
+}
+
 /// The repository's hash of `bytes`, as packs and indexes end with.
 #[must_use]
 pub fn digest(hash: HashKind, bytes: &[u8]) -> Vec<u8> {

@@ -7,7 +7,7 @@ use std::fmt;
 use std::io;
 use std::path::{Component, Path, PathBuf};
 
-use opal_platform::dir::Dir;
+use opal_platform::dir::{Dir, is_link_refusal};
 
 use crate::changeids::ChangeIds;
 use crate::conflict::{self, Listings, Record, Recording, Seen, Term};
@@ -697,12 +697,25 @@ impl Built<'_> {
         let listings = Listings::stored(store, &unstored);
         let mut packs = repo.new_packs()?;
         let mut held = HashMap::new();
+        // A folder the kept sides empty stays only while it is on disk, as `save <paths>` keeps
+        // one. The disk is asked, as a read brings a gone folder back for its conflicts. One that
+        // is there but can't be opened stays.
+        let gone = |path: &str| {
+            let entered = writeout::Folders::open(repo.root()).and_then(|mut d| d.enter(path));
+            entered.is_err_and(|e| {
+                is_link_refusal(&e)
+                    || matches!(
+                        e.kind(),
+                        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+                    )
+            })
+        };
         let root = overlay_whole(
             &listings,
             self.parent.root,
             &changes,
             &whole,
-            false,
+            &gone,
             &mut |l| {
                 let id = store_listing(store, &mut packs, l)?;
                 held.insert(id, l.clone());

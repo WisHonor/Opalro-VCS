@@ -431,7 +431,9 @@ Changed since then (1 file):
 Next: save them with: opalro save "describe your change"
 ```
 
-Each row is the kind of change (`added`, `removed`, `modified`, or `kind changed` when a file became a folder or the other way round), the path, and the size: before and after for a modified file. If you are at an older save rather than on a line, the first line says `At save <id> "<message>", not on a line` instead.
+Each row is the kind of change (`added`, `removed`, `modified`, or `kind changed` when a file became another kind of file, such as executable or a link), the path, and the size: before and after for a modified file. If you are at an older save rather than on a line, the first line says `At save <id> "<message>", not on a line` instead.
+
+Empty folders count too, since a save keeps them: a new empty folder is `added`, and a saved one you deleted is `removed`, with `empty folder` where the size goes. A file that became a folder shows as the file removed and what the folder holds added. When only folders changed, the count says so: `Changed since then (1 folder):`.
 
 When a combine left places in conflict, `status` lists them first, each with what it still needs, and every one of them, however many:
 
@@ -545,7 +547,7 @@ Name files or folders to look only there:
 opalro changes todo.txt
 ```
 
-`--save` shows what a save changed instead, compared with the save before it. Name the save by its line (for the line's newest save), a tag, its change ID, or 8 or more digits of its fingerprint. Here it shows the save made with `--amend` above, which added both files:
+`--save` shows what a save changed instead, compared with the save before it. Name the save by its line (for the line's newest save), a tag, 4 or more letters of its change ID, or 8 or more digits of its fingerprint. Here it shows the save made with `--amend` above, which added both files:
 
 ```sh
 opalro changes --save main
@@ -618,11 +620,11 @@ Each row is the save's change ID (type it into `opalro show` to see the whole sa
 opalro who todo.txt --save main
 ```
 
-Through a combined save, each line is named for the save on the line it came from; what the combine wrote itself, such as your fix of a conflict, is the combined save's. A file a save moved is followed back to where it was, when the save recorded the move. A project imported from Git has no moves recorded, so there `opalro who` follows no rename, where `git blame` does. Where a combine took the other line's version of a file whole, a line both lines wrote is still named for the save on your line, where `git blame` names the other line's. A file that isn't text, or is over 64 MiB or 1,000,000 lines, is refused, as `opalro changes` shows no lines for it. `opalro who` changes nothing in the project, but to work out the path it makes an empty file in `.opalro/tmp` and removes it again, to learn how the drive compares names; in a project where that file can't be made, it stops with `error: Opalro couldn't make a file in <folder>: <why>`, `<folder>` being the project's `.opalro/tmp` in full, and a hint that says why.
+Through a combined save, each line is named for the save on the line it came from; what the combine wrote itself, such as your fix of a conflict, is the combined save's. A file a save moved is followed back to where it was, when the save recorded the move. An import records the renames in Git's history that left the file unchanged, so `opalro who` follows those too; where Git renamed a file and changed it in one commit, nothing is recorded, and `opalro who` stops there while `git blame` follows the file by likeness. Where a combine took the other line's version of a file whole, a line both lines wrote is still named for the save on your line, where `git blame` names the other line's. A file that isn't text, or is over 64 MiB or 1,000,000 lines, is refused, as `opalro changes` shows no lines for it. `opalro who` changes nothing in the project, but to work out the path it makes an empty file in `.opalro/tmp` and removes it again, to learn how the drive compares names; in a project where that file can't be made, it stops with `error: Opalro couldn't make a file in <folder>: <why>`, `<folder>` being the project's `.opalro/tmp` in full, and a hint that says why.
 
 ### `opalro goto`
 
-Go to another line or save. Name, in the order Opalro tries them, a line, a server line (`main@origin`), a tag, a save's change ID as `opalro history` shows it (Opalro looks for change IDs among the saves of the line you're on), or 8 or more digits of a save's fingerprint (any save your lines, server lines or tags lead back to). A tag or a server line takes you to its save, not onto a line. `opalro show`, `opalro changes --save` and `opalro tag --save` take a save named the same way. If a line and a tag share a name but sit at two different saves, Opalro picks neither and shows both saves' IDs: type the one you mean, or end the double meaning: rename the line, or delete the tag.
+Go to another line or save. Name, in the order Opalro tries them, a line, a server line (`main@origin`), a tag, a save's change ID as `opalro history` shows it (Opalro looks for change IDs among the saves of the line you're on), or 8 or more digits of a save's fingerprint (any save your lines, server lines or tags lead back to). A change ID is typed with at least 4 letters, the fewest `opalro history` shows, so a line or tag named with 1 to 3 letters, such as `x` or `tmp`, is always that line or tag. A tag or a server line takes you to its save, not onto a line. `opalro show`, `opalro changes --save` and `opalro tag --save` take a save named the same way. If a line and a tag share a name but sit at two different saves, Opalro picks neither and shows both saves' IDs: type the one you mean, or end the double meaning: rename the line, or delete the tag.
 
 ```sh
 opalro goto main
@@ -1597,9 +1599,9 @@ The `--json` reference, published on https://opalro.com, describes every documen
 
 - **No server, no sharing.** v0.2 is one person on one computer. Opalro can't yet copy a project from a server, or send and get changes (syncing is planned for v0.3).
 - **No moving saves between lines.** Opalro can't yet copy a save from one line onto another, or replay a line's saves on top of another (Git's `cherry-pick` and `rebase`).
-- **No guessed moves.** A save records that a file moved only when the file arrived unchanged; a file moved and changed in the same save is recorded as one file removed and another added, and a combine and `opalro who` don't follow it.
+- **No guessed moves.** A save records that a file moved only when the file arrived unchanged, and an import records a Git commit's renames the same way; a file moved and changed in the same save or commit is recorded as one file removed and another added, and a combine and `opalro who` don't follow it.
 - **Conflicts, as far as they go.** A combine keeps its conflicts and `opalro resolve` records your fixes ([`opalro combine`](#opalro-combine)), but Opalro can't yet: mark in `opalro history` a save that holds conflicts (`opalro status` and `opalro show` say so); combine two lines that both changed a place one of them holds in conflict (fix it on that line first); merge line by line a file that the saves the two lines started from disagree about (you get both lines' versions whole); start a merge program (copy a version out with `opalro resolve <file> --copy theirs --to <somewhere>` and open it in yours); or take one file out of any save.
-- **`opalro who` follows a moved file only where a save recorded the move,** on the line it was moved on: lines changed under the file's old name on another line, then combined in, are named as the combined save's. In a project imported from Git it follows no rename, since the import records no moves.
+- **`opalro who` follows a moved file only where a save recorded the move,** on the line it was moved on: lines changed under the file's old name on another line, then combined in, are named as the combined save's. In a project imported from Git it follows the renames the import recorded, those that left the file unchanged, but not a rename Git made together with changes to the file, which `git blame` follows by likeness; and a project an earlier version of Opalro imported has none recorded, until the repository is imported again.
 - **No locking.** Rules can mark files lockable, but nothing locks them until syncing arrives (v0.3).
 - **No repair.** `opalro verify` finds damage but can't fix it.
 - **No export to Git yet,** and an import happens once: bringing in Git's newer commits later comes after v0.2.

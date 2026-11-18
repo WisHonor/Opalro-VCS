@@ -1,0 +1,107 @@
+=== S1: combine leaves d only conflicts fill; mkdir d; goto away; undo
+$ opalro combine side
+    Combined side into main: save nvmo "Combine side into main".
+    
+        1 file written.
+d after combine: absent
+$ opalro status
+    On line main at save nvmo "Combine side into main"  (just now)
+    Nothing changed since then.
+mkdir d
+$ opalro status
+    On line main at save nvmo "Combine side into main"  (just now)
+    
+    Changed since then (1 folder):
+    
+        added  d  empty folder
+$ opalro goto side
+    Switched to line side at save znln "Side".
+    
+        1 file written, 2 removed.
+d after goto side: exists; ls d: x.txt
+$ opalro undo
+    Undid goto: back on main at nvmo, 1 file written, 1 removed.
+d after undo: exists
+$ opalro status
+    On line main at save nvmo "Combine side into main"  (just now)
+    
+    Changed since then (1 folder):
+    
+        added  d  empty folder
+$ opalro redo
+    Redid goto: on side at znln again, 1 file written, 2 removed.
+d after redo: exists
+$ opalro undo
+    Undid goto: back on main at nvmo, 1 file written, 1 removed.
+$ opalro resolve --keep mine d/x.txt
+    Nothing to resolve: save nvmo "Combine side into main" holds no conflict.
+d after resolve --keep mine: exists
+$ opalro status
+    On line main at save nvmo "Combine side into main"  (just now)
+    
+    Changed since then (1 folder):
+    
+        added  d  empty folder
+=== S2: same, but d holds a user file when resolve --keep runs
+$ opalro status
+    On line main at save xmnq "Combine side into main"  (just now)
+    
+    In conflict (1 place):
+    
+        d/x.txt  not in your folder, still to decide
+    
+    Changed since then (1 file):
+    
+        added  d/mine.txt  5 B
+$ opalro resolve --keep mine d/x.txt
+    Recorded 1 fix in save xmnq "Combine side into main" on main.
+    
+        The combined save now holds it; its ID stays the same.
+        Took yours for 1 place.
+d/mine.txt: mine
+$ opalro status
+    On line main at save xmnq "Combine side into main"  (just now)
+    
+    Changed since then (1 file):
+    
+        added  d/mine.txt  5 B
+$ opalro save Fin
+    Saved nvvn "Fin" on main  (1 file)
+$ opalro history
+    Saves on line main, newest first:
+    
+    > nvvn  just now  Test  Fin  [main]
+      xmnq  just now  Test  Combine side into main  [combined d4397a02eb3c]
+      orzq  just now  Test  Main
+      kqpu  just now  Test  First
+      sqqs  just now  Test  Start project
+=== S3: d replaced by a link to a folder outside, then resolve --keep
+$ opalro status
+    On line main at save kqrl "Combine side into main"  (just now)
+    
+    In conflict (1 place):
+    
+        d/x.txt  not in your folder, still to decide
+    
+    Changed since then (1 file):
+    
+        added  d  10 B
+$ opalro resolve --keep mine d/x.txt
+    Recorded 1 fix in save kqrl "Combine side into main" on main.
+    
+        The combined save now holds it; its ID stays the same.
+        Took yours for 1 place.
+outside: keep.txt
+$ opalro status
+    On line main at save kqrl "Combine side into main"  (just now)
+    
+    Changed since then (1 file):
+    
+        added  d  10 B
+$ opalro goto side
+    error: Your unsaved changes, or files Opalro ignores, are in the way, so nothing was changed:
+      d
+      d/x.txt
+    
+    hint: Save them first (opalro save "describe your change"), shelve them (opalro shelf) or discard them (opalro discard), and move ignored files somewhere else, then run opalro goto again.
+outside after goto side: keep.txt; d: lrwxrwxrwx 1 attacker attacker 10 Nov 18 07:19 d -> /tmp/f3out

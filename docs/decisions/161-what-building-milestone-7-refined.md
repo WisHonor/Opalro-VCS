@@ -5,7 +5,7 @@
 - **Agenda topic:** none (milestone 7 build)
 - **Decided by:** Claude, at the owner's request while the owner was away. The owner can reverse any part.
 - **Refines:** [decision 158](158-making-renaming-and-deleting-lines.md) (lines made, renamed and deleted); [decision 159](159-tags.md) (tags); [decision 160](160-whether-a-save-is-in-anothers-history.md) (the walk through every parent); [decision 116](116-gits-words-as-shortcuts.md) (Git's words)
-- **Refined by:** [decision 186](186-speed-before-v0.2.md) (the speed pass before v0.2)
+- **Refined by:** [decision 186](186-speed-before-v0.2.md) (the speed pass before v0.2); [decision 194](194-a-change-ids-start-counts-from-four-letters.md) (its first open item: names of 1 to 3 letters)
 
 ## Context
 

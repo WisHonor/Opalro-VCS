@@ -661,9 +661,49 @@ fn differences(a: &Tree, b: &Tree) -> BTreeSet<String> {
     paths
 }
 
-/// What a switch of `folder` from the save `from` to `into` leaves, as `goto` makes it, or the
-/// paths where unsaved work is in its way.
+/// Whether `t` holds anything below the folder `up`.
+fn holds_below(t: &Tree, up: &str) -> bool {
+    let mut all = t.files.keys().chain(&t.folders).chain(t.kept.keys());
+    all.any(|p| p != up && within(p, up))
+}
+
+/// Whether everything the save `stored` holds in the folder `folder`, all the way down, is places
+/// in conflict that stand as nothing, and there is one: no switch makes such a folder where the
+/// folder has nothing.
+fn only_conflicts_fill(stored: &Tree, folder: &str) -> bool {
+    let below = |p: &str, f: &str| p != f && within(p, f);
+    let holds_a_place = |f: &str| stored.kept.keys().any(|p| below(p, f));
+    let places = stored.kept.iter().filter(|(p, _)| below(p, folder));
+    holds_a_place(folder)
+        && !stored.files.keys().any(|p| below(p, folder))
+        && places.into_iter().all(|(_, k)| k.stands().is_none())
+        // A folder below with no such place in it is a folder saved empty.
+        && (stored.folders.iter())
+            .filter(|f| below(f, folder))
+            .all(|f| holds_a_place(f))
+}
+
+/// The save `stored` as a switch that puts everything back to it leaves `folder`: as it stands,
+/// but for the folders only places in conflict standing as nothing fill where the folder has
+/// nothing.
+fn put_back(stored: &Tree, folder: &Tree) -> Tree {
+    let mut tree = stored.standing();
+    let has = |f: &String| folder.folders.contains(f) || folder.files.contains_key(f);
+    tree.folders.retain(|f| {
+        let left_out = !has(f) && only_conflicts_fill(stored, f);
+        if left_out {
+            met("put back: a folder only conflicts fill left out");
+        }
+        !left_out
+    });
+    tree
+}
+
+/// What a switch of `folder` from the save `from` to the save `into`, as stored, leaves, as
+/// `goto` makes it, or the paths where unsaved work is in its way.
 fn switch(folder: &Tree, from: &Tree, into: &Tree) -> Result<Tree, BTreeSet<String>> {
+    let stored = into;
+    let into = &stored.standing();
     let unsaved = changed_files(folder, from);
     let unlike_target: BTreeSet<String> = unsaved
         .intersection(&changed_files(folder, into))
@@ -694,14 +734,23 @@ fn switch(folder: &Tree, from: &Tree, into: &Tree) -> Result<Tree, BTreeSet<Stri
             None => drop(after.files.remove(&p)),
         }
     }
+    // Not one only places standing as nothing fill, unless a file of the folder's is in its way.
     for p in into.folders.difference(&from.folders) {
-        after.add_folder(p);
+        match (only_conflicts_fill(stored, p), folder.files.contains_key(p)) {
+            (false, _) => after.add_folder(p),
+            (true, true) => {
+                met("a switch made a folder only conflicts fill, in a file's place");
+                after.add_folder(p);
+            }
+            (true, false) => met("a switch left out a folder only conflicts fill"),
+        }
     }
     Ok(after)
 }
 
 /// [`switch`], with the unsaved work in its way set aside first if `shelve` says so: the folder
-/// after and the shelf made on `tip`, the save the project is on, or the paths still in the way.
+/// after and the shelf made on `tip`, the save the project is on, as stored, or the paths still
+/// in the way.
 fn switch_or_shelve(
     folder: &Tree,
     from: &Tree,
@@ -714,7 +763,7 @@ fn switch_or_shelve(
         Err(paths) if !shelve => return Err(paths),
         Err(paths) => paths,
     };
-    let aside = set_aside(folder, tip, &paths);
+    let aside = set_aside(folder, &put_back(tip, folder), &paths);
     // One with nothing set aside at, above or below it is still in the way.
     let left: BTreeSet<String> = paths
         .into_iter()
@@ -723,7 +772,7 @@ fn switch_or_shelve(
     if !left.is_empty() {
         return Err(left);
     }
-    let (mut shelf, mut from) = (tip.clone(), from.clone());
+    let (mut shelf, mut from) = (tip.standing(), from.clone());
     for p in &aside {
         shelf.set(p, folder);
         from.set(p, folder);
@@ -732,8 +781,9 @@ fn switch_or_shelve(
     Ok((after, Some(shelf)))
 }
 
-/// What `--shelve` sets aside of the work at and below `paths`, on a shelf on `tip`: each path
-/// where a discard of those paths changes the folder, folders above them that `tip` holds included.
+/// What `--shelve` sets aside of the work at and below `paths`, on a shelf on `tip`, which is
+/// what a discard puts back: each path where a discard of those paths changes the folder, folders
+/// above them that `tip` holds included.
 fn set_aside(folder: &Tree, tip: &Tree, paths: &BTreeSet<String>) -> Vec<String> {
     let discarded = |p: &String| {
         paths
@@ -1176,7 +1226,7 @@ fn apply(repo: &mut Repository, m: &mut Model, root: &Path, a: &Act) -> Option<S
                 (Target::Save(m.saves[to].id), to, None)
             };
             let done = goto(repo, &target, &who, "goto", None, &mut |_| {});
-            match switch(&m.folder, m.tip(), &m.saves[to].tree) {
+            match switch(&m.folder, m.tip(), &m.saves[to].stored) {
                 Err(_) => {
                     assert!(
                         matches!(done, Err(SwitchError::Collisions { .. })),
@@ -1212,7 +1262,8 @@ fn apply(repo: &mut Repository, m: &mut Model, root: &Path, a: &Act) -> Option<S
             }
             done.unwrap();
             let (was, held) = (m.state.clone(), m.folder.clone());
-            m.folder.take(path, &saved);
+            m.folder
+                .take(path, &put_back(&m.saves[m.state.on].stored, &held));
             stepped(repo, m, "discard", was, held);
             None
         }
@@ -2043,10 +2094,6 @@ fn save_only(repo: &mut Repository, m: &mut Model, path: &str) {
     let tip = m.saves[m.state.on].stored.clone();
     let mut stored = tip.clone();
     stored.take(path, &settled(&m.folder, &tip));
-    let holds_below = |t: &Tree, up: &str| {
-        let mut all = t.files.keys().chain(&t.folders).chain(t.kept.keys());
-        all.any(|p| p != up && within(p, up))
-    };
     let mut up = path;
     while let Some((above, _)) = up.rsplit_once('/') {
         let gone = !m.folder.folders.contains(above);
@@ -2516,7 +2563,7 @@ fn delete_tag(repo: &mut Repository, m: &mut Model, name: &str, yes: bool) {
 /// Throws every unsaved change away.
 fn discard_all(repo: &mut Repository, m: &mut Model) {
     discard(repo, None, &who(), "discard", None, &mut |_| {}).unwrap();
-    let saved = m.tip().clone();
+    let saved = put_back(&m.saves[m.state.on].stored, &m.folder);
     let (was, held) = (m.state.clone(), std::mem::replace(&mut m.folder, saved));
     stepped(repo, m, "discard", was, held);
 }
@@ -2524,7 +2571,8 @@ fn discard_all(repo: &mut Repository, m: &mut Model) {
 /// `shelf`: sets every unsaved change aside, then puts the folder back to its save.
 fn shelve(repo: &mut Repository, m: &mut Model) {
     let done = shelf(repo, None, &who(), None, &mut |_| {}).unwrap();
-    if m.folder == *m.tip() {
+    let back = put_back(&m.saves[m.state.on].stored, &m.folder);
+    if m.folder == back {
         assert!(
             matches!(
                 done,
@@ -2545,11 +2593,14 @@ fn shelve(repo: &mut Repository, m: &mut Model) {
     let label = free_label(&m.state.shelves);
     let was = m.state.clone();
     let mut made = std::iter::once((made.label, made.save));
-    let (store, tree) = (repo.store(), m.folder.clone());
-    let save = new_shelf(store, m, &mut made, &label, tree, "Shelved");
+    // The save, with the folder's work where putting it back changes the folder.
+    let mut tree = m.tip().clone();
+    for p in differences(&m.folder, &back) {
+        tree.take(&p, &m.folder);
+    }
+    let save = new_shelf(repo.store(), m, &mut made, &label, tree, "Shelved");
     m.state.shelves.insert(0, (label, save));
-    let saved = m.tip().clone();
-    let held = std::mem::replace(&mut m.folder, saved);
+    let held = std::mem::replace(&mut m.folder, back);
     stepped(repo, m, "shelf", was, held);
 }
 
@@ -2568,7 +2619,7 @@ fn bring_back(repo: &mut Repository, m: &mut Model, label: Option<&str>) {
     };
     let (name, save) = m.state.shelves[k].clone();
     let base = m.saves[save].parent.unwrap();
-    match switch(&m.folder, &m.saves[base].tree, &m.saves[save].tree) {
+    match switch(&m.folder, &m.saves[base].tree, &m.saves[save].stored) {
         Err(_) => {
             assert!(
                 matches!(done, Err(SwitchError::ShelfInTheWay(_))),
@@ -2697,7 +2748,8 @@ fn take(
     let (held, wrote) = &step.folder;
     let (from, into) = if again { (held, wrote) } else { (wrote, held) };
     if held != wrote {
-        let (folder, shelf) = match switch_or_shelve(&m.folder, from, into, m.tip(), shelve) {
+        let tip = &m.saves[m.state.on].stored;
+        let (folder, shelf) = match switch_or_shelve(&m.folder, from, into, tip, shelve) {
             Ok(done) => done,
             Err(paths) => return Next::Stopped(paths),
         };
@@ -2853,8 +2905,9 @@ fn jump(
         ..target
     };
     let there = recorded(m, &state) == recorded(m, &was);
-    let into = m.saves[state.on].tree.clone();
-    match switch_or_shelve(&m.folder, m.tip(), &into, m.tip(), shelve) {
+    let into = m.saves[state.on].stored.clone();
+    let tip = &m.saves[m.state.on].stored;
+    match switch_or_shelve(&m.folder, m.tip(), &into, tip, shelve) {
         _ if there => {
             assert!(taken == 0 && error.is_none(), "{error:?}");
             settle(repo, m, Vec::new());
@@ -3142,7 +3195,7 @@ fn combine_into(
         }
     };
     let standing = into.standing();
-    let Ok(folder) = switch(&m.folder, m.tip(), &standing) else {
+    let Ok(folder) = switch(&m.folder, m.tip(), &into) else {
         let stopped = matches!(done, Err(CombineError::Collisions { .. }));
         assert!(stopped, "{done:?}");
         settle(repo, m, Vec::new());
@@ -4562,6 +4615,18 @@ fn resolve_at(
             None => stored.place(p, part_at(&m.folder, p).as_ref()),
         }
     }
+    // A side kept whole that empties a folder gone from the folder takes the folder out too.
+    if keep.is_some() {
+        for p in &places {
+            let mut up = p.as_str();
+            while let Some((above, _)) = up.rsplit_once('/') {
+                if !m.folder.folders.contains(above) && !holds_below(&stored, above) {
+                    stored.remove(above);
+                }
+                up = above;
+            }
+        }
+    }
     assert_eq!(
         saved_tree(repo.store(), save_id),
         stored,
@@ -4816,6 +4881,28 @@ fn changes(folder: &Tree, saved: &Tree) -> Vec<(String, ChangeKind)> {
         .collect()
 }
 
+/// The empty folders `status` should list, by path: a folder the save holds empty where the
+/// folder has no folder, and an empty folder in the folder where the save has none.
+fn empty_folders(folder: &Tree, stored: &Tree) -> Vec<(String, ChangeKind)> {
+    let empty = |t: &Tree| -> Vec<String> {
+        (t.folders.iter())
+            .filter(|f| !holds_below(t, f))
+            .cloned()
+            .collect()
+    };
+    let mut found: Vec<(String, ChangeKind)> = (empty(stored).into_iter())
+        .filter(|f| !folder.folders.contains(f))
+        .map(|f| (f, ChangeKind::Removed))
+        .chain(
+            (empty(folder).into_iter())
+                .filter(|f| !stored.folders.contains(f))
+                .map(|f| (f, ChangeKind::Added)),
+        )
+        .collect();
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    found
+}
+
 /// What the folder, `status`, the state and undo's lists say, against the model. `missable` is
 /// a change the file cache may miss: status that trusts it may say either, and a full one must
 /// see it.
@@ -4834,6 +4921,14 @@ fn check(
     let in_conflict = |p: &str| m.kept().keys().any(|k| within(p, k));
     let mut want = changes(&m.folder, m.tip());
     want.retain(|(p, _)| !in_conflict(p));
+    let mut want_empty = empty_folders(&m.folder, &m.saves[m.state.on].stored);
+    want_empty.retain(|(p, _)| !in_conflict(p));
+    for (_, change) in &want_empty {
+        met(match change {
+            ChangeKind::Added => "status: an empty folder added",
+            _ => "status: an empty folder removed",
+        });
+    }
     let conflicts = conflicts_listed(m);
     for (_, standing) in &conflicts {
         met(match standing {
@@ -4845,7 +4940,9 @@ fn check(
             Standing::NotHere => "status: not here",
         });
     }
-    let listed = |full: bool| -> Result<Vec<(String, ChangeKind)>, String> {
+    type Listed = Vec<(String, ChangeKind)>;
+    // The changes, then the empty folders.
+    let listed = |full: bool| -> Result<(Listed, Listed), String> {
         let st = status(repo, full, None).map_err(|e| e.to_string())?;
         if st.save_id != m.saves[m.state.on].id {
             return Err("status compared with the wrong save".into());
@@ -4862,13 +4959,21 @@ fn check(
         if got != wanted {
             return Err(format!("status lists in conflict {got:?}, not {wanted:?}"));
         }
-        Ok(st
-            .changes
-            .iter()
-            .map(|c| (c.path.clone(), c.change))
-            .collect())
+        Ok((
+            (st.changes.iter())
+                .map(|c| (c.path.clone(), c.change))
+                .collect(),
+            (st.empty_folders.iter())
+                .map(|f| (f.path.clone(), f.change))
+                .collect(),
+        ))
     };
-    let got = listed(full)?;
+    let (got, got_empty) = listed(full)?;
+    if got_empty != want_empty {
+        return Err(format!(
+            "status lists the empty folders {got_empty:?}, not {want_empty:?}"
+        ));
+    }
     let other = |l: &[(String, ChangeKind)]| -> Vec<(String, ChangeKind)> {
         l.iter()
             .filter(|(p, _)| Some(p.as_str()) != missable)
@@ -4879,7 +4984,7 @@ fn check(
         return Err(format!("status says {got:?}, not {want:?}"));
     }
     if missable.is_some() {
-        let got = listed(true)?;
+        let got = listed(true)?.0;
         if got != want {
             return Err(format!(
                 "status reading every file says {got:?}, not {want:?}"
@@ -5125,8 +5230,10 @@ fn cases() -> u32 {
 /// The kinds of case the fixed pass must meet at least 3 times each: every clash a combine keeps
 /// that the model's files can make (two kinds at one place, a link, a rule against markers and
 /// files past the text limits they can't), the starting points that disagree, a line's conflict
-/// that stops a combine, and each way the other commands meet a conflict.
-const MUST_MEET: [&str; 40] = [
+/// that stops a combine, each way the other commands meet a conflict, and an empty folder
+/// `status` lists as added (one removed is met too seldom here: the folders' own pass needs it).
+const MUST_MEET: [&str; 41] = [
+    "status: an empty folder added",
     "changed on both, in the same place",
     "changed on both, not text",
     "changed, removed",
@@ -5267,6 +5374,69 @@ fn a_start_in_conflict_that_both_lines_fixed_is_unknown() {
 #[test]
 fn a_start_in_conflict_that_both_lines_fixed_is_unknown_when_asked_for_a_clean_line() {
     run(&parted_in_conflict(true));
+}
+
+/// Acts on folders, files, saves and switches only, so that empty folders come and go often.
+fn folder_act() -> impl Strategy<Value = Act> {
+    let folder = || prop::sample::select(&FOLDERS[..]);
+    let file = || prop::sample::select(&FILES[..]);
+    prop_oneof![
+        3 => folder().prop_map(Act::MakeFolder),
+        3 => folder().prop_map(Act::DeleteFolder),
+        3 => Just(Act::Save),
+        2 => (file(), any::<u8>()).prop_map(|(p, b)| Act::Write(p, b, 1, When::Now)),
+        1 => file().prop_map(Act::Delete),
+        2 => (any::<usize>(), any::<bool>()).prop_map(|(pick, by_line)| Act::Goto {
+            pick,
+            by_line,
+            unsaved: Unsaved::Save
+        }),
+        1 => Just(Act::Discard(None)),
+    ]
+}
+
+/// Folders made, deleted and saved among files and switches, from a fixed seed: the main pass
+/// meets an empty folder removed too seldom to require it, so this one requires both kinds.
+#[test]
+fn a_fixed_pass_of_folders_meets_both_kinds_of_empty_folder() {
+    let config = ProptestConfig {
+        cases: 32,
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    };
+    let rng = TestRng::deterministic_rng(RngAlgorithm::ChaCha);
+    let acts = prop::collection::vec(folder_act(), 1..=20);
+    let done = TestRunner::new_with_rng(config, rng).run(&acts, |acts| {
+        run(&acts);
+        Ok(())
+    });
+    if let Err(e) = done {
+        panic!("{e}");
+    }
+    let met = MET.with(|m| m.borrow().clone());
+    println!("met on the folders' pass: {met:#?}");
+    for kind in [
+        "status: an empty folder added",
+        "status: an empty folder removed",
+    ] {
+        let n = met.get(kind).copied().unwrap_or(0);
+        assert!(n >= 3, "{kind}: met {n} times");
+    }
+}
+
+/// A saved empty folder deleted, then a new one made in a folder that holds a file.
+#[test]
+fn status_lists_empty_folders_added_and_removed() {
+    run(&[
+        Act::MakeFolder("e"),
+        Act::Save,
+        Act::DeleteFolder("e"),
+        Act::Write("d/a", 0, 1, When::Now),
+        Act::MakeFolder("d/e"),
+    ]);
+    let met = |kind| MET.with(|m| m.borrow().get(kind).copied());
+    assert_eq!(met("status: an empty folder added"), Some(2));
+    assert_eq!(met("status: an empty folder removed"), Some(3));
 }
 
 /// The seed's history: a file moved to two places where both lines hold it alike at one of them.

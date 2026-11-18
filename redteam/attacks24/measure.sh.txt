@@ -1,0 +1,21 @@
+#!/bin/sh
+# Times `opalro import` (the binary in $OPALRO_BIN) on a repository: measure.sh <dir> <label>.
+# The project made is removed after, so the same repository can be imported again.
+dir=$1; label=$2
+cd "$dir" || exit 1
+rm -rf .opalro
+s=$(date +%s.%N)
+sh /work/rt25/op.sh import > /tmp/measure.out 2>&1 &
+pid=$!
+peak=0
+while kill -0 $pid 2>/dev/null; do
+    # op.sh execs opalro, so the process is opalro itself.
+    r=$(grep rchar /proc/$pid/io 2>/dev/null | cut -d' ' -f2)
+    [ -n "$r" ] && peak=$r
+    sleep 0.2
+done
+wait $pid; code=$?
+e=$(date +%s.%N)
+python3 -c "print('$label: exit $code, %.2f s, read %.1f MB' % ($e-$s, $peak/1e6))"
+tail -2 /tmp/measure.out | head -1
+rm -rf .opalro

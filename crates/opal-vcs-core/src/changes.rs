@@ -236,6 +236,8 @@ pub fn unsaved_changes<E: From<SaveError> + From<StoreError>>(
     let mut records = std::mem::take(&mut now.records);
     let walked = each_difference(repo, &now, &mut records, save.root, |d| match d {
         Difference::File(c) => emit(PathChange::from(c)),
+        // This shows what changed inside files, and an empty folder holds none.
+        Difference::EmptyFolder { .. } => Ok(()),
         Difference::Conflict {
             path,
             id,

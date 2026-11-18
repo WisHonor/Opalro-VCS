@@ -15,10 +15,10 @@ fn ok(env: &Env, args: &[&str]) -> String {
     text(&out.stdout)
 }
 
-/// RT24-1: `main` moved the folder `d` away; `side` changed `d/x.txt`. The combine says no file
-/// needed changing, yet makes an empty folder `d`, which stays once the removal is kept.
+/// RT24-1: `main` moved the folder `d` away; `side` changed `d/x.txt`. The combine writes nothing
+/// and makes no folder `d` for the conflict, and keeping the removal leaves none, in the folder
+/// or in the new save.
 #[test]
-#[ignore = "RT24-1: left as it is for now; a combine makes an empty folder for a conflict in a folder the line moved away"]
 fn a_combine_that_writes_nothing_makes_no_folder_a_moved_away_conflict_sits_in() {
     let env = Env::empty();
     ok(&env, &["start", "--preset", "custom"]);
@@ -40,8 +40,10 @@ fn a_combine_that_writes_nothing_makes_no_folder_a_moved_away_conflict_sits_in()
     let made = env.root().join("d").exists();
     ok(&env, &["resolve", "--keep", "mine", "d/x.txt"]);
     let left = env.root().join("d").exists();
+    let saved = support::saved_paths(&env, support::main_tip(&env)).contains_key("d");
     assert!(
-        !made && !left,
-        "an empty folder d: after the combine {made}, after resolve --keep mine {left}\n{said}"
+        !made && !left && !saved,
+        "a folder d: after the combine {made}, after resolve --keep mine {left}, in the new save \
+         {saved}\n{said}"
     );
 }

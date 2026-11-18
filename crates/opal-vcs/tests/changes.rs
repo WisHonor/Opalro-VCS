@@ -134,11 +134,15 @@ fn nothing_matching_is_said_plainly() {
     );
     env.overwrite("a.txt", "a\n");
     env.opalro().args(["save", "A"]).assert().success();
-    assert!(changes(&env, &[]).starts_with("Nothing changed since "));
+    assert!(changes(&env, &[]).starts_with("No file changed since "));
+    // An empty folder `status` lists is no file.
+    std::fs::create_dir(env.root().join("logs")).unwrap();
+    assert!(changes(&env, &[]).starts_with("No file changed since "));
+    std::fs::remove_dir(env.root().join("logs")).unwrap();
     env.overwrite("a.txt", "b\n");
     let none = changes(&env, &["nothere.txt"]);
     assert!(
-        none.starts_with("Nothing changed in those paths since "),
+        none.starts_with("No file changed in those paths since "),
         "{none}"
     );
     let saved = changes(&env, &["--save", &first, "nothere.txt"]);

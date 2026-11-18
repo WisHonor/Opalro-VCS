@@ -880,7 +880,8 @@ fn v01_project() -> Env {
 /// What `opalro setup --upgrade` says before it asks, in a project v0.1 made.
 const OFFER: &str = "This version of Opalro can turn on 1 feature in this project:\n  conflicts: a \
                      combine can keep conflicts, and you fix them when you choose.\nOnce it is on, \
-                     Opalro 0.1 can't open this project, and opalro undo can't turn it off.\n";
+                     Opalro before 0.2 can't open this project, and opalro undo can't turn it \
+                     off.\n";
 
 #[test]
 fn setup_upgrade_without_a_terminal_changes_nothing() {
