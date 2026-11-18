@@ -194,10 +194,10 @@ pub enum GitError {
     /// More packs than Opalro reads; `what` names the limit.
     #[error("Opalro can't import this Git repository: {}.", escape(what, false))]
     TooManyPacks { what: String },
-    /// More work than the import's budget: rebuilding objects through deltas when `deltas`, else
-    /// comparing commits for their renames; `what` says how much.
+    /// More work rebuilding objects through deltas than the import's budget; `what` says how
+    /// much.
     #[error("Opalro can't import this Git repository: {}.", escape(what, false))]
-    TooMuchWork { what: String, deltas: bool },
+    TooMuchWork { what: String },
     /// What only a bug in Opalro's reader causes; `what` says what went wrong.
     #[error(
         "Opalro can't import this Git repository: {}; please report this.",
@@ -264,14 +264,12 @@ impl GitError {
                     "Nothing was changed. Merge them into one with `git repack -a -d`, then run \
                      opalro import again."
                 }
-                GitError::TooMuchWork { deltas: true, .. } => {
+                GitError::TooMuchWork { .. } => {
                     "Nothing was changed. If you trust this repository, have Git store its files \
                      over 1 MiB whole and make its other deltas anew, with `git -c \
                      core.bigFileThreshold=1m repack -a -d -f`, then run opalro import again. Git's \
                      packs stay bigger until its next `git gc`."
                 }
-                // No repack makes the comparison cheaper.
-                GitError::TooMuchWork { deltas: false, .. } => "Nothing was changed.",
                 GitError::Bug { .. } => {
                     "Nothing was changed. This is a bug in Opalro, not a problem with the \
                      repository."
@@ -1184,7 +1182,6 @@ mod tests {
             },
             GitError::TooMuchWork {
                 what: HOSTILE.into(),
-                deltas: true,
             },
             GitError::Bug {
                 what: HOSTILE.into(),

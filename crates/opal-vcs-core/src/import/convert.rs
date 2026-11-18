@@ -60,6 +60,29 @@ const MAX_LOOKALIKES_LISTED: usize = 5;
 /// About the most bytes of a path a list or message holds.
 const MAX_SHOWN_PATH: usize = 1024;
 
+/// The least the comparison of commits for their renames may read of Git's trees: 1 GiB.
+const MIN_COMPARE_WORK: u64 = 1 << 30;
+
+/// What that comparison may read for each byte of the Git trees the import converted.
+const COMPARE_WORK_PER_TREE_BYTE: u64 = 32;
+
+#[cfg(test)]
+thread_local! {
+    /// The least the comparison may read on this thread, in place of `MIN_COMPARE_WORK`.
+    static LEAST_COMPARED: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+}
+
+/// What comparing commits for their renames may read of Git's trees once the import has converted
+/// `trees` bytes of them, each tree once: a history that changes big folders pays for its own
+/// comparisons, while trees reused to make them costly are converted only once.
+fn compare_allowance(trees: u64) -> u64 {
+    #[cfg(test)]
+    let least = LEAST_COMPARED.get().unwrap_or(MIN_COMPARE_WORK);
+    #[cfg(not(test))]
+    let least = MIN_COMPARE_WORK;
+    least.max(COMPARE_WORK_PER_TREE_BYTE.saturating_mul(trees))
+}
+
 const BUG_HINT: &str = "Nothing was changed. This is a bug in Opalro, not a problem with the \
                         repository.";
 
@@ -88,9 +111,8 @@ pub(super) fn at(e: GitError, place: impl FnOnce() -> String) -> ImportError {
             what: format!("{what}, in {}", place()),
         },
         // Where the import stopped, which needn't be where the fault is.
-        GitError::TooMuchWork { what, deltas } => GitError::TooMuchWork {
+        GitError::TooMuchWork { what } => GitError::TooMuchWork {
             what: format!("{what}; the import stopped while reading {}", place()),
-            deltas,
         },
         other => other,
     }
@@ -510,6 +532,10 @@ pub struct Converter<'r> {
     /// Change IDs no `change-id` header may give: those a header gave already, and those that
     /// commits' own IDs give (decision 043).
     change_ids: HashSet<ChangeId>,
+    /// Bytes of the Git trees converted, each read once, and of those read to compare commits for
+    /// their renames, which `compare_allowance` holds to the first.
+    converted_trees: u64,
+    compared_trees: u64,
 }
 
 impl<'r> Converter<'r> {
@@ -543,6 +569,8 @@ impl<'r> Converter<'r> {
             chains: HashMap::new(),
             tags: TagBudget::new(),
             change_ids: own_change_ids,
+            converted_trees: 0,
+            compared_trees: 0,
         }
     }
 
@@ -753,9 +781,10 @@ impl<'r> Converter<'r> {
     }
 
     /// The entries of the converted tree `id`, the folder `folder` of the commit `commit` (hex),
-    /// whose names the import keeps, in order of their names; none without a tree.
+    /// whose names the import keeps, in order of their names; none without a tree. Stops the
+    /// import once the comparison has read more than its allowance.
     fn kept(
-        &self,
+        &mut self,
         id: Option<GitId>,
         commit: &str,
         folder: &str,
@@ -773,7 +802,20 @@ impl<'r> Converter<'r> {
         let object = self.git.read(&id).map_err(|e| at(e, place))?;
         // Every tree counts, however cheaply it was read: the walk costs by its entries.
         let read = object.data.len() as u64;
-        self.git.spend_comparing(read).map_err(|e| at(e, place))?;
+        self.compared_trees = self.compared_trees.saturating_add(read);
+        let allowance = compare_allowance(self.converted_trees);
+        if self.compared_trees > allowance {
+            return Err(ImportError::Stop {
+                what: format!(
+                    "Opalro can't import this Git repository: comparing its commits to find their \
+                     renames would take more than the {} GiB of work Opalro allows: the \
+                     repository's history goes back and forth between the same big folders many \
+                     times, or it was built to make importing slow.",
+                    allowance >> 30
+                ),
+                hint: Some("Nothing was changed.".to_owned()),
+            });
+        }
         expect_kind(object.kind, ObjectType::Tree, &id, place)?;
         let entries = parse_tree(&object.data, self.git.hash()).map_err(|e| at(e, place))?;
         let mut items: Vec<Item> = (entries.into_iter())
@@ -1003,6 +1045,8 @@ impl<'r> Converter<'r> {
         let commit = walk.commit;
         let place = || folder_place(&path_of(stack, &[]), &id, commit);
         let object = self.git.read(&id).map_err(|e| at(e, place))?;
+        let read = object.data.len() as u64;
+        self.converted_trees = self.converted_trees.saturating_add(read);
         expect_kind(object.kind, ObjectType::Tree, &id, place)?;
         let entries = parse_tree(&object.data, self.git.hash()).map_err(|e| at(e, place))?;
         let mut items = Vec::new();
@@ -3561,10 +3605,36 @@ mod tests {
         }
     }
 
+    /// Imports the history `tip` ends, as `main`, from the repository at `dir`, the comparison's
+    /// allowance lowered to what the trees converted give, without its least.
+    fn import_compared_by_trees(
+        dir: &Path,
+        git: &Craft,
+        tip: GitId,
+    ) -> Result<crate::import::ImportReport, ImportError> {
+        git.loose_ref("refs/heads/main", &format!("{}\n", tip.to_hex()));
+        let who = Person {
+            name: "Ada".into(),
+            email: "ada@example.com".into(),
+            time_ms: 0,
+            tz_offset_min: 0,
+        };
+        let mut req = crate::import::ImportRequest {
+            who: &who,
+            command: "import",
+            git_settings: None,
+            progress: &mut |_, _, _| {},
+        };
+        LEAST_COMPARED.set(Some(0));
+        let imported = crate::import::import_git(dir, &mut req, &mut None);
+        LEAST_COMPARED.set(None);
+        imported
+    }
+
     /// A history cheap to convert and costly to compare: each commit holds one of two wide
     /// folders, under a name of its own, so the converter reads each tree once while the
     /// comparison reads two wide folders again for every commit. Past its allowance the import
-    /// stops in words of its own, not the rebuilding allowance's, and commits nothing.
+    /// stops in words of its own, and commits nothing.
     #[test]
     fn comparing_commits_past_its_allowance_stops_the_import() {
         let (dir, git) = repo(Sha1);
@@ -3577,58 +3647,35 @@ mod tests {
             git.tree(&entries)
         };
         let folders = [wide(b"one\n"), wide(b"two\n")];
+        // Converted, the two come to about 30 KB, which allows about 1 MB of comparing; each
+        // commit's comparison reads both, about 30 KB, so the 35th or so goes past it.
         let mut tip: Option<GitId> = None;
-        for i in 0..20 {
+        for i in 0..60 {
             let tree = git.tree(&[(b"40000", format!("d{i:03}").as_bytes(), folders[i % 2])]);
             let parents: Vec<GitId> = tip.into_iter().collect();
             let message = format!("{i}\n");
             tip = Some(git.commit(&commit_bytes(&tree, &parents, "", message.as_bytes())));
         }
-        git.loose_ref("refs/heads/main", &format!("{}\n", tip.unwrap().to_hex()));
-        // A wide folder is about 15 KB: the converter reads each once, and the comparison two for
-        // each commit, so only the comparison passes this.
-        let limit = 256 << 10;
-        let import = || {
-            let who = Person {
-                name: "Ada".into(),
-                email: "ada@example.com".into(),
-                time_ms: 0,
-                tz_offset_min: 0,
-            };
-            let mut req = crate::import::ImportRequest {
-                who: &who,
-                command: "import",
-                git_settings: None,
-                progress: &mut |_, _, _| {},
-            };
-            crate::git::set_test_delta_limits(Some((limit, crate::git::DELTA_BASE_CACHE)));
-            let imported = crate::import::import_git(dir.path(), &mut req, &mut None);
-            crate::git::set_test_delta_limits(None);
-            imported
-        };
         // Run again, it stops the same way.
         for _ in 0..2 {
-            let Err(stopped) = import() else {
+            let Err(stopped) = import_compared_by_trees(dir.path(), &git, tip.unwrap()) else {
                 panic!("imported past the comparison's allowance")
             };
             let said = stopped.to_string();
             let words = [
-                "comparing its commits to find their renames would take more than the ",
-                " of work Opalro allows: the repository changes a folder of very many files in a \
-                 long history, or it was built to make importing slow",
+                "Opalro can't import this Git repository: comparing its commits to find their \
+                 renames would take more than the ",
+                " of work Opalro allows: the repository's history goes back and forth between the \
+                 same big folders many times, or it was built to make importing slow.",
             ];
             for part in words {
                 assert!(said.contains(part), "{said}");
             }
-            assert!(!said.contains("deltas"), "{said}");
             assert!(
                 matches!(
                     &stopped,
                     ImportError::Unfinished { stop, committed: false }
-                        if matches!(
-                            **stop,
-                            ImportError::Git(GitError::TooMuchWork { deltas: false, .. })
-                        )
+                        if matches!(**stop, ImportError::Stop { .. })
                 ),
                 "{stopped:?}"
             );
@@ -3640,6 +3687,35 @@ mod tests {
             assert_eq!(hint, kept);
             assert!(!dir.path().join(".opalro/format").exists());
         }
+    }
+
+    /// A history that changes a big folder in every commit, and renames a file in it now and
+    /// then, pays for its own comparisons: each new version of the folder is converted once and
+    /// read two to four times to compare.
+    #[test]
+    fn a_big_folder_changed_in_many_commits_stays_within_the_allowance() {
+        let (dir, git) = repo(Sha1);
+        let same = blob(&git, b"the same\n");
+        let mut big: BTreeMap<String, GitId> =
+            (0..400).map(|i| (format!("f{i:04}.txt"), same)).collect();
+        let mut tip: Option<GitId> = None;
+        for i in 0..40 {
+            let edited = blob(&git, format!("edited {i}\n").as_bytes());
+            big.insert(format!("f{i:04}.txt"), edited);
+            if i % 4 == 3 {
+                let file = big.remove(&format!("f{:04}.txt", i + 200)).unwrap();
+                big.insert(format!("g{i:04}.txt"), file);
+            }
+            let entries: Vec<(&[u8], &[u8], GitId)> = (big.iter())
+                .map(|(name, id)| (&b"100644"[..], name.as_bytes(), *id))
+                .collect();
+            let tree = git.tree(&[(b"40000", b"big", git.tree(&entries))]);
+            let parents: Vec<GitId> = tip.into_iter().collect();
+            let message = format!("{i}\n");
+            tip = Some(git.commit(&commit_bytes(&tree, &parents, "", message.as_bytes())));
+        }
+        let imported = import_compared_by_trees(dir.path(), &git, tip.unwrap());
+        assert!(imported.is_ok(), "{:?}", imported.err());
     }
 
     #[test]

@@ -65,9 +65,8 @@ thread_local! {
 
 /// Sets this thread's limits for rebuilding through deltas to `(work, cache)`, so a test can
 /// reach them with small data; `None` goes back. The work allowed, `work` bytes however much was
-/// inflated, holds from the next step on, in repositories already open too, and for comparing
-/// commits for their renames as well. The cache's `cache` bytes hold for the repositories opened
-/// from then on.
+/// inflated, holds from the next step on, in repositories already open too. The cache's
+/// `cache` bytes hold for the repositories opened from then on.
 #[cfg(any(test, feature = "test-support"))]
 pub fn set_test_delta_limits(limits: Option<(u64, u64)>) {
     TEST_LIMITS.set(limits);
@@ -95,8 +94,6 @@ pub(super) struct Objects {
     last_pack: Cell<usize>,
     /// Bytes inflated and built so far to rebuild objects through deltas.
     work: Cell<u64>,
-    /// Bytes of trees read so far to compare commits for their renames.
-    compared: Cell<u64>,
     /// Compressed bytes of the pack entries inflated so far, each entry counted once.
     inflated: Cell<u64>,
     /// The delta families rebuilt, by pack number and the number of the entry at the bottom.
@@ -407,7 +404,7 @@ impl Repo {
         let bytes = bytes.min(MAX_IN_MEMORY_OBJECT);
         let work = self.objects.work.get().saturating_add(bytes);
         self.objects.work.set(work);
-        let allowance = work_allowance(self.objects.inflated.get());
+        let allowance = delta_work_allowance(self.objects.inflated.get());
         if work <= allowance {
             return Ok(());
         }
@@ -418,29 +415,6 @@ impl Repo {
                  was built to make importing slow",
                 allowance >> 30
             ),
-            deltas: true,
-        })
-    }
-
-    /// Counts `bytes` more of Git's trees read to compare commits with their first parents for
-    /// their renames, stopping past an allowance as big as the rebuilding one but counted apart:
-    /// a history can make that comparison read millions of entries a commit while converting it
-    /// costs little.
-    pub(crate) fn spend_comparing(&self, bytes: u64) -> Result<(), GitError> {
-        let compared = self.objects.compared.get().saturating_add(bytes);
-        self.objects.compared.set(compared);
-        let allowance = work_allowance(self.objects.inflated.get());
-        if compared <= allowance {
-            return Ok(());
-        }
-        Err(GitError::TooMuchWork {
-            what: format!(
-                "comparing its commits to find their renames would take more than the {} GiB of \
-                 work Opalro allows: the repository changes a folder of very many files in a long \
-                 history, or it was built to make importing slow",
-                allowance >> 30
-            ),
-            deltas: false,
         })
     }
 
@@ -640,10 +614,9 @@ impl Repo {
     }
 }
 
-/// The most work of each kind an import may do once it has inflated `inflated` compressed bytes
-/// of pack entries: inflating and building through deltas, and, counted apart, reading trees to
-/// compare commits for their renames.
-fn work_allowance(inflated: u64) -> u64 {
+/// The most an import may inflate and build through deltas once it has inflated `inflated`
+/// compressed bytes of pack entries.
+fn delta_work_allowance(inflated: u64) -> u64 {
     #[cfg(any(test, feature = "test-support"))]
     if let Some((work, _)) = TEST_LIMITS.get() {
         return work;
@@ -1488,8 +1461,11 @@ mod tests {
         let more = deflate(tree).len() + deflate(b"streamed").len();
         assert_eq!(repo.objects.inflated.get(), (chain + more) as u64);
         // So a small repository has the least allowance, and only data read raises it.
-        assert_eq!(work_allowance(repo.objects.inflated.get()), MIN_DELTA_WORK);
-        assert!(work_allowance(10 << 30) > MIN_DELTA_WORK);
+        assert_eq!(
+            delta_work_allowance(repo.objects.inflated.get()),
+            MIN_DELTA_WORK
+        );
+        assert!(delta_work_allowance(10 << 30) > MIN_DELTA_WORK);
     }
 
     #[test]
@@ -1528,28 +1504,6 @@ mod tests {
         }
         // The inflating fit exactly; building is what was refused.
         assert_eq!(repo.objects.work.get(), budget + second.len() as u64);
-    }
-
-    /// Comparing commits for their renames has an allowance of its own, as big: what rebuilding
-    /// spent doesn't stop it, and it spends nothing of rebuilding's.
-    #[test]
-    fn comparing_commits_is_counted_apart_from_rebuilding() {
-        let (dir, _) = craft(Sha1);
-        let repo = open(&dir);
-        repo.objects.work.set(MIN_DELTA_WORK - 1);
-        repo.spend_comparing(MIN_DELTA_WORK).unwrap();
-        match repo.spend_comparing(1) {
-            Err(e @ GitError::TooMuchWork { deltas: false, .. }) => {
-                let says = "comparing its commits to find their renames would take more than the \
-                            4 GiB of work Opalro allows: the repository changes a folder of very \
-                            many files in a long history, or it was built to make importing slow";
-                assert!(e.to_string().contains(says), "{e}");
-                assert_eq!(e.hint().unwrap(), "Nothing was changed.");
-            }
-            other => panic!("{other:?}"),
-        }
-        assert_eq!(repo.objects.work.get(), MIN_DELTA_WORK - 1);
-        assert_eq!(repo.objects.compared.get(), MIN_DELTA_WORK + 1);
     }
 
     #[test]
