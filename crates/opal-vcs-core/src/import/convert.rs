@@ -88,8 +88,9 @@ pub(super) fn at(e: GitError, place: impl FnOnce() -> String) -> ImportError {
             what: format!("{what}, in {}", place()),
         },
         // Where the import stopped, which needn't be where the fault is.
-        GitError::TooMuchWork { what } => GitError::TooMuchWork {
+        GitError::TooMuchWork { what, deltas } => GitError::TooMuchWork {
             what: format!("{what}; the import stopped while reading {}", place()),
+            deltas,
         },
         other => other,
     }
@@ -770,6 +771,9 @@ impl<'r> Converter<'r> {
             )
         };
         let object = self.git.read(&id).map_err(|e| at(e, place))?;
+        // Every tree counts, however cheaply it was read: the walk costs by its entries.
+        let read = object.data.len() as u64;
+        self.git.spend_comparing(read).map_err(|e| at(e, place))?;
         expect_kind(object.kind, ObjectType::Tree, &id, place)?;
         let entries = parse_tree(&object.data, self.git.hash()).map_err(|e| at(e, place))?;
         let mut items: Vec<Item> = (entries.into_iter())
@@ -3554,6 +3558,87 @@ mod tests {
         });
         for save in &saves {
             assert!(store.save(save, false).unwrap().move_notes.is_empty());
+        }
+    }
+
+    /// A history cheap to convert and costly to compare: each commit holds one of two wide
+    /// folders, under a name of its own, so the converter reads each tree once while the
+    /// comparison reads two wide folders again for every commit. Past its allowance the import
+    /// stops in words of its own, not the rebuilding allowance's, and commits nothing.
+    #[test]
+    fn comparing_commits_past_its_allowance_stops_the_import() {
+        let (dir, git) = repo(Sha1);
+        let names: Vec<String> = (0..400).map(|i| format!("f{i:04}.txt")).collect();
+        let wide = |bytes: &[u8]| {
+            let file = blob(&git, bytes);
+            let entries: Vec<(&[u8], &[u8], GitId)> = (names.iter())
+                .map(|name| (&b"100644"[..], name.as_bytes(), file))
+                .collect();
+            git.tree(&entries)
+        };
+        let folders = [wide(b"one\n"), wide(b"two\n")];
+        let mut tip: Option<GitId> = None;
+        for i in 0..20 {
+            let tree = git.tree(&[(b"40000", format!("d{i:03}").as_bytes(), folders[i % 2])]);
+            let parents: Vec<GitId> = tip.into_iter().collect();
+            let message = format!("{i}\n");
+            tip = Some(git.commit(&commit_bytes(&tree, &parents, "", message.as_bytes())));
+        }
+        git.loose_ref("refs/heads/main", &format!("{}\n", tip.unwrap().to_hex()));
+        // A wide folder is about 15 KB: the converter reads each once, and the comparison two for
+        // each commit, so only the comparison passes this.
+        let limit = 256 << 10;
+        let import = || {
+            let who = Person {
+                name: "Ada".into(),
+                email: "ada@example.com".into(),
+                time_ms: 0,
+                tz_offset_min: 0,
+            };
+            let mut req = crate::import::ImportRequest {
+                who: &who,
+                command: "import",
+                git_settings: None,
+                progress: &mut |_, _, _| {},
+            };
+            crate::git::set_test_delta_limits(Some((limit, crate::git::DELTA_BASE_CACHE)));
+            let imported = crate::import::import_git(dir.path(), &mut req, &mut None);
+            crate::git::set_test_delta_limits(None);
+            imported
+        };
+        // Run again, it stops the same way.
+        for _ in 0..2 {
+            let Err(stopped) = import() else {
+                panic!("imported past the comparison's allowance")
+            };
+            let said = stopped.to_string();
+            let words = [
+                "comparing its commits to find their renames would take more than the ",
+                " of work Opalro allows: the repository changes a folder of very many files in a \
+                 long history, or it was built to make importing slow",
+            ];
+            for part in words {
+                assert!(said.contains(part), "{said}");
+            }
+            assert!(!said.contains("deltas"), "{said}");
+            assert!(
+                matches!(
+                    &stopped,
+                    ImportError::Unfinished { stop, committed: false }
+                        if matches!(
+                            **stop,
+                            ImportError::Git(GitError::TooMuchWork { deltas: false, .. })
+                        )
+                ),
+                "{stopped:?}"
+            );
+            // Nothing to advise but that nothing was committed: a repack wouldn't help.
+            let hint = stopped.hint().unwrap();
+            let kept = "Nothing was committed. Opalro kept the .opalro folder it began here: opalro \
+                        import stops the same way until the cause is fixed, then finishes from \
+                        what it stored. Or delete that folder.";
+            assert_eq!(hint, kept);
+            assert!(!dir.path().join(".opalro/format").exists());
         }
     }
 

@@ -254,34 +254,53 @@ mod tests {
     use crate::output::{Failure, failure_lines};
     use crate::style::Screen;
 
-    /// The import's stop past its work allowance can't be reached from a test's repository in
-    /// reasonable time, so its error is made here and laid out as `opalro import` lays it out.
+    /// The import's stops past its work allowances can't be reached from a test's repository in
+    /// reasonable time, so their errors are made here and laid out as `opalro import` lays them
+    /// out: rebuilding through deltas, with its way out, and comparing commits for their renames,
+    /// which has none.
     #[test]
-    fn the_work_stop_is_laid_out_like_every_other_error() {
-        let what = "rebuilding objects from Git's deltas would take more than the 4 GiB of work \
-                    Opalro allows: the repository holds a long history of small edits to a big \
-                    file, or it was built to make importing slow";
+    fn the_work_stops_are_laid_out_like_every_other_error() {
+        let rebuilding = "rebuilding objects from Git's deltas would take more than the 4 GiB of \
+                          work Opalro allows: the repository holds a long history of small edits \
+                          to a big file, or it was built to make importing slow";
         let way_out = "If you trust this repository, have Git store its files over 1 MiB whole \
                        and make its other deltas anew, with `git -c core.bigFileThreshold=1m \
                        repack -a -d -f`, then run opalro import again. Git's packs stay bigger \
                        until its next `git gc`.";
-        let stop = || ImportError::Git(GitError::TooMuchWork { what: what.into() });
-        // Before the import began its .opalro folder, and after.
-        let after = ImportError::Unfinished {
-            stop: Box::new(stop()),
-            committed: false,
-        };
-        for (stop, hint) in [
-            (stop(), format!("Nothing was changed. {way_out}")),
+        let comparing = "comparing its commits to find their renames would take more than the 4 \
+                         GiB of work Opalro allows: the repository changes a folder of very many \
+                         files in a long history, or it was built to make importing slow";
+        let kept = "Nothing was committed. Opalro kept the .opalro folder it began here: opalro \
+                    import stops the same way until the cause is fixed, then finishes from what \
+                    it stored. Or delete that folder.";
+        // Each before the import began its .opalro folder, and after.
+        let stops = [
             (
-                after,
-                format!(
-                    "{way_out}\nNothing was committed. Opalro kept the .opalro folder it began here: \
-                     opalro import stops the same way until the cause is fixed, then finishes from \
-                     what it stored. Or delete that folder."
-                ),
+                rebuilding,
+                true,
+                [
+                    format!("Nothing was changed. {way_out}"),
+                    format!("{way_out}\n{kept}"),
+                ],
             ),
-        ] {
+            (
+                comparing,
+                false,
+                ["Nothing was changed.".to_owned(), kept.to_owned()],
+            ),
+        ];
+        let made = stops.into_iter().flat_map(|(what, deltas, hints)| {
+            let stop = || {
+                let what = what.to_owned();
+                ImportError::Git(GitError::TooMuchWork { what, deltas })
+            };
+            let after = ImportError::Unfinished {
+                stop: Box::new(stop()),
+                committed: false,
+            };
+            [(what, stop()), (what, after)].into_iter().zip(hints)
+        });
+        for ((what, stop), hint) in made {
             let failure = Failure::from(stop);
             assert_eq!(failure.hint.as_deref(), Some(&hint[..]));
             let error = format!("Opalro can't import this Git repository: {what}.");
