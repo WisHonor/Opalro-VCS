@@ -622,32 +622,36 @@ Planned from 2026-11-17 ([decision 193](decisions/193-the-next-version-starts-wi
 
 ## Milestone 11: Loose ends
 
-Planned on 2026-11-17 after decisions [193](decisions/193-the-next-version-starts-with-what-v0.2-left.md) to [196](decisions/196-empty-folders-in-a-switch-and-in-status.md). Plan: [plans/2026-11-17-milestone-11-loose-ends.md](plans/2026-11-17-milestone-11-loose-ends.md). Each step ends with tests passing on Windows, macOS and Linux; the plan's task numbers are in brackets.
+Planned on 2026-11-17 after decisions [193](decisions/193-the-next-version-starts-with-what-v0.2-left.md) to [196](decisions/196-empty-folders-in-a-switch-and-in-status.md). Plan: [plans/2026-11-17-milestone-11-loose-ends.md](plans/2026-11-17-milestone-11-loose-ends.md). Each step ends with tests passing on Windows, macOS and Linux; the plan's task numbers are in brackets. A ✅ marks a step that is done.
 
-**1. Short names** (Task 1)
+**1. Short names** ✅ (2026-11-17; Task 1)
 - Text counts as the start of a change ID only from four letters on; 1 to 3 letters of k to z that name nothing get a hint saying so ([decision 194](decisions/194-a-change-ids-start-counts-from-four-letters.md)).
 - *Done when:* a line or tag named with 1 to 3 letters is always that line or tag, and a name of 4 letters still clashes as before.
 
-**2. The words about older versions** (Task 2)
+**2. The words about older versions** ✅ (2026-11-17; Task 2)
 - "Opalro before 0.2" where the program said "Opalro 0.1" (decision 193 point 2).
 - *Done when:* the tests and the pages hold the new words.
 
-**3. Empty folders** (Tasks 3 and 4)
+**3. Empty folders** ✅ (2026-11-17; Tasks 3 and 4)
 - A switch makes no folder that only conflicts standing as nothing fill; `resolve --keep` takes out a folder it empties that is gone from disk; `status` shows empty folders, added and removed ([decision 196](decisions/196-empty-folders-in-a-switch-and-in-status.md)).
 - *Done when:* the red team's RT24-1 passes, and what `status` lists is what the next save records, folders included.
 
-**4. Renames in an import** (Tasks 5 and 6)
+**4. Renames in an import** ✅ (2026-11-17 and 2026-11-18; Tasks 5 and 6)
 - The pairing of moves takes its changes from any walk; an import notes the renames it is sure of ([decision 195](decisions/195-the-import-records-the-renames-it-is-sure-of.md)).
 - *Done when:* every note matches Git's exact renames on generated histories, the merges and lines compared with Git include renames, and the import's time on Git's own repository is measured.
+- Comparing each commit with its first parent may read at most the larger of 1 GiB and 32 times the Git trees the import converted; past that the import stops, committing nothing ([security.md](security.md) T7). On Git's own repository it read 2.05 times, and it adds 35 to 40 % to the import's time: 34.6 % with nothing else changed, and 38 % and 40.5 % against `main`'s import on two runners ([benchmarks.md](benchmarks.md) §16).
 
-**5. The flush after the journal is removed** (Task 7)
+**5. The flush after the journal is removed** ✅ (2026-11-18; Task 7)
 - The journal a finished switch can leave is put to every command; the crash tests' page says what they do.
 - *Done when:* the tests pass on the code as it is and the write-up for the owner is in [benchmarks.md](benchmarks.md) and the follow-ups. No flush changes.
+- No fault was found: every command handles the journal a lost removal leaves, and the one state that dropping the flush could add, which only a drive that reorders could make, stops every change until the journal is deleted ([benchmarks.md](benchmarks.md) §15; the [follow-ups](plans/2026-11-01-milestone-1-follow-ups.md), "For the owner to decide").
 
-**6. `who` at a combine** (Task 8)
+**6. `who` at a combine** ✅ (2026-11-18; Task 8)
 - Git's rule measured on a throwaway branch against `who`'s.
 - *Done when:* the numbers are in [benchmarks.md](benchmarks.md).
+- On five files of Git's own history, Git's rule named another save for 49 of 13,385 lines (0.37 %) and was 4 to 13 % faster; whether to take it is the owner's call ([benchmarks.md](benchmarks.md) §16; the [follow-ups](plans/2026-11-01-milestone-1-follow-ups.md), "For the owner to decide").
 
 **7. Docs, red team, review and merge** (Tasks 9 and 10)
 - The documents; a red-team session; a whole-branch review and one round of fixes; the merge into `v0.3`.
+- **Docs** ✅ (2026-11-18): the design, [security.md](security.md), [testing.md](testing.md), [benchmarks.md](benchmarks.md) §12 and §16 and the [follow-ups](plans/2026-11-01-milestone-1-follow-ups.md) say what is built, measured and left; [terminal.md](terminal.md), [json.md](json.md), [storage-format.md](storage-format.md) and the guide were written with the code; the calls made on the way are in [the rulings](plans/2026-11-17-milestone-11-rulings.md).
 - *Done when:* every proven finding is fixed or ruled on, every document matches the code, and the branch is merged into `v0.3`.
