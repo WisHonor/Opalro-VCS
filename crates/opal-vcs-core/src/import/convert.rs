@@ -1164,10 +1164,13 @@ impl<'r> Converter<'r> {
         }
         let total = items.len() as u64;
         walk.add(total)?;
-        // This commit's comparison reads the tree again, and so may the next one's.
-        let mut sorted = items.clone();
-        sorted.sort_unstable_by(|a, b| a.name.cmp(&b.name));
-        self.cache.put(id, bytes, sorted.into());
+        // This commit's comparison reads the tree again, and so may the next one's. A tree too big
+        // for the cache isn't copied for it.
+        if self.cache.holds(cache_cost(&items)) {
+            let mut sorted = items.clone();
+            sorted.sort_unstable_by(|a, b| a.name.cmp(&b.name));
+            self.cache.put(id, bytes, sorted.into());
+        }
         if let Some(top) = stack.last_mut() {
             top.entries = Vec::with_capacity(items.len());
             top.left = items.into_iter();
@@ -1634,11 +1637,16 @@ impl TreeCache {
         Some((tree.bytes, Rc::clone(&tree.items)))
     }
 
-    /// Holds the tree `id`, dropping the least recently used ones to make room. One that costs
-    /// more than the whole cache isn't held.
+    /// Whether a tree `cache_cost` counts at `cost` can be held: one that costs more than the
+    /// whole cache can't.
+    fn holds(&self, cost: u64) -> bool {
+        cost <= self.most
+    }
+
+    /// Holds the tree `id`, if it can, dropping the least recently used ones to make room.
     fn put(&mut self, id: GitId, bytes: u64, items: Rc<[Item]>) {
         let cost = cache_cost(&items);
-        if cost > self.most {
+        if !self.holds(cost) {
             return;
         }
         if let Some(was) = self.trees.remove(&id) {
@@ -4187,6 +4195,7 @@ mod tests {
         let held = cache.get(&id(3)).map(|(bytes, items)| (bytes, items.len()));
         assert_eq!(held, Some((3, 2)));
         // One costing more than the whole cache isn't held, and drops nothing.
+        assert!(cache.holds(400) && !cache.holds(401));
         cache.put(id(4), 4, tree(&["a", "b", "c", "d", "e", "f"]));
         assert!(cache.get(&id(4)).is_none());
         assert!(cache.get(&id(0)).is_some() && cache.get(&id(3)).is_some());

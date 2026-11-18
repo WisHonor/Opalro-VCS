@@ -964,10 +964,7 @@ fn combine_matches_git_merge() {
     );
 }
 
-/// The old and new paths of every move Git's rename detection finds on either branch since where
-/// they parted, in the stopped merge in `clone`: the moves Git follows.
-/// Every path a move note names, as where a file was or where it went, in the saves the
-/// project's lines reach.
+/// Every path a move note names, from or to, in the saves the project's lines reach.
 fn noted_paths(env: &Env) -> BTreeSet<String> {
     let (repo, state) = env.state();
     let mut todo: Vec<_> = state.lines.values().copied().collect();
@@ -985,6 +982,8 @@ fn noted_paths(env: &Env) -> BTreeSet<String> {
     paths
 }
 
+/// The old and new paths of every move Git's rename detection finds on either branch since where
+/// they parted, in the stopped merge in `clone`: the moves Git follows.
 fn git_renames(clone: &Path) -> BTreeSet<String> {
     let base = text(&git(clone, &["merge-base", "HEAD", "origin/side"]));
     let mut found = BTreeSet::new();
