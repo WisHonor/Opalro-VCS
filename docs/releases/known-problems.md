@@ -38,12 +38,6 @@ With nothing changed, `opalro status` is held to twice Git's time. In the nine r
 
 **What to do:** nothing; it is only slower.
 
-## An empty folder can appear after a combine
-
-If your line moved a folder away and the line you combine changed a file in it, Opalro keeps that as a conflict with nothing in your folder for it, and still leaves the old folder there, empty. `opalro status` does not list it. Nothing is lost.
-
-**What to do:** fix the conflict as you would any other (`opalro resolve`), and delete the empty folder; that is safe.
-
 ## Files another program has open, on Windows
 
 On Windows, a program that holds a file open (an editor, a game engine, a preview) stops Opalro from writing over it. The commands that write files in your folder (`opalro goto`, `opalro combine`, `opalro discard`, `opalro shelf`, `opalro unshelf`, `opalro undo`, `opalro redo` and `opalro setup --preset`) write everything else, name the file, and stop.

@@ -697,12 +697,19 @@ impl Built<'_> {
         let listings = Listings::stored(store, &unstored);
         let mut packs = repo.new_packs()?;
         let mut held = HashMap::new();
+        // A folder the kept sides empty stays only while it is on disk, as `save <paths>` keeps
+        // one. The disk is asked, as a read brings a gone folder back for its conflicts.
+        let gone = |path: &str| {
+            writeout::Folders::open(repo.root())
+                .and_then(|mut disk| disk.enter(path))
+                .is_err()
+        };
         let root = overlay_whole(
             &listings,
             self.parent.root,
             &changes,
             &whole,
-            false,
+            &gone,
             &mut |l| {
                 let id = store_listing(store, &mut packs, l)?;
                 held.insert(id, l.clone());

@@ -192,6 +192,10 @@ fn planned(
     let mut target = Tree::new(&there, to_root, drive);
     let mut folder = Tree::new(&here, now.root, drive);
     let mut refused = BTreeSet::new();
+    // What a folder is made for though nothing is written into it: the target holds it as the
+    // empty listing, or the switch leaves something below it as it is.
+    let (empty, mut held_empty, mut passed_over) =
+        (Listing::empty().id(), BTreeSet::new(), BTreeSet::new());
     let mut plan = Plan {
         carried,
         warnings: now.warnings,
@@ -206,12 +210,14 @@ fn planned(
         }
         if let Some(at) = refused_at(path, &mut target, &mut folder)? {
             refused.insert(at);
+            passed_over.insert(path.to_owned());
             return Ok(());
         }
         // Project links and what their folders hold are never touched (decision 050).
         if [n, t].into_iter().flatten().any(not_ours)
             || below_project_link(path, &mut target, &mut folder)?
         {
+            passed_over.insert(path.to_owned());
             return Ok(());
         }
         if !remove_new {
@@ -240,7 +246,12 @@ fn planned(
                     size: e.size,
                 };
                 match e.kind {
-                    EntryKind::Folder => Change::MakeFolder,
+                    EntryKind::Folder => {
+                        if e.id == empty {
+                            held_empty.insert(path.to_owned());
+                        }
+                        Change::MakeFolder
+                    }
                     EntryKind::Executable => Change::Executable(c),
                     EntryKind::Symlink => {
                         let shape = match link_target(store, c)? {
@@ -277,9 +288,7 @@ fn planned(
         .map(|p| (*p).to_owned())
         .collect();
     plan.actions.sort_by(|a, b| a.path.cmp(&b.path));
-    if let Some(only) = &only {
-        made_on_the_way(&mut plan.actions, only);
-    }
+    made_on_the_way(&mut plan.actions, only.as_ref(), &held_empty, &passed_over);
     if drive.ignores_case || drive.composes_unicode {
         take_over_renamed(&mut plan.actions, drive);
     }
@@ -1568,15 +1577,26 @@ fn named_as_typed<'l>(listing: &'l Listing, name: &str, drive: Drive) -> Option<
     })
 }
 
-/// Drops from `actions`, sorted by path, each folder made only because a path of `only` lies
-/// below it, where nothing is written into it or below it: such a folder stays as the person has
-/// it.
-fn made_on_the_way(actions: &mut Vec<Action>, only: &Scope) {
+/// Drops from `actions`, sorted by path, each folder made for nothing, which stays as the person
+/// has it: one made only because a path of `only` lies below it, and one where the folder has
+/// nothing, neither held empty (`held_empty`) nor holding anything left as it is (`passed_over`),
+/// such as one only places in conflict standing as nothing fill. Either is kept when something
+/// is written below it.
+fn made_on_the_way(
+    actions: &mut Vec<Action>,
+    only: Option<&Scope>,
+    held_empty: &BTreeSet<String>,
+    passed_over: &BTreeSet<String>,
+) {
     let mut kept = BTreeSet::new();
     // Deepest first: what is below a path comes after it in path order.
     for a in actions.iter().rev() {
-        let on_the_way = a.change == Change::MakeFolder && !only.holds(&a.path);
-        if !on_the_way || any_below(&a.path, &kept) {
+        let needs_below = a.change == Change::MakeFolder
+            && (only.is_some_and(|only| !only.holds(&a.path))
+                || (a.expected.is_none()
+                    && !held_empty.contains(&a.path)
+                    && !any_below(&a.path, passed_over)));
+        if !needs_below || any_below(&a.path, &kept) {
             kept.insert(a.path.clone());
         }
     }

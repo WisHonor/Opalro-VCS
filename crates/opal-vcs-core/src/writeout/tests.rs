@@ -2151,3 +2151,86 @@ fn a_typed_path_finds_the_stored_spelling_as_the_drive_takes_names() {
     assert_eq!(found("Docs/gone", blind), None);
     assert_eq!(found("", blind), None);
 }
+
+/// The paths a switch from the save `from` to `to` acts on, in order.
+fn plan_paths(repo: &mut Repository, from: Id, to: Id) -> Vec<String> {
+    let plan = planned(repo, from, to, false);
+    plan.actions.into_iter().map(|a| a.path).collect()
+}
+
+/// A combined save holding `t` and a place in conflict at `place` with the record `r`.
+fn combined_with(repo: &mut Repository, place: &str, r: Record) -> Id {
+    let t = [("t", EntryKind::File, &b"theirs"[..])];
+    crate::test_support::plant_with(repo, &t, &[(place, r)]);
+    current_save(repo).unwrap()
+}
+
+#[test]
+fn a_folder_only_conflicts_standing_as_nothing_fill_is_not_made() {
+    let (_dir, mut repo) = project();
+    let first = current_save(&repo).unwrap();
+    // Your line removed `d/x.txt`, which the other changed: it stands as nothing.
+    let combined = combined_with(&mut repo, "d/x.txt", record(None));
+    assert_eq!(plan_paths(&mut repo, first, combined), ["t"]);
+}
+
+#[test]
+fn nested_folders_only_conflicts_fill_are_not_made() {
+    let (_dir, mut repo) = project();
+    let first = current_save(&repo).unwrap();
+    let combined = combined_with(&mut repo, "d/e/x.txt", record(None));
+    assert_eq!(plan_paths(&mut repo, first, combined), ["t"]);
+}
+
+#[test]
+fn a_folder_with_a_conflict_standing_as_a_version_is_made() {
+    let (_dir, mut repo) = project();
+    let first = current_save(&repo).unwrap();
+    let combined = combined_with(&mut repo, "d/x.txt", record(Some(file_of(b"mine"))));
+    let plan = planned(&mut repo, first, combined, false);
+    let paths: Vec<&str> = plan.actions.iter().map(|a| a.path.as_str()).collect();
+    assert_eq!(paths, ["d", "d/x.txt", "t"]);
+    assert_eq!(plan.actions[1].change, Change::File(content(b"mine")));
+}
+
+#[test]
+fn a_folder_saved_empty_is_still_made() {
+    let (_dir, mut repo) = project();
+    let first = current_save(&repo).unwrap();
+    crate::test_support::plant_root(&mut repo, |packs| {
+        let (empty, _) = crate::test_support::add_listing(packs, Vec::new());
+        let e = Entry {
+            name: "e".into(),
+            kind: EntryKind::Folder,
+            id: empty,
+            size: 0,
+        };
+        crate::test_support::add_listing(packs, vec![e]).0
+    });
+    let saved = current_save(&repo).unwrap();
+    assert_eq!(plan_paths(&mut repo, first, saved), ["e"]);
+}
+
+#[test]
+fn a_folder_holding_only_a_project_link_is_still_made() {
+    let (_dir, mut repo) = project();
+    let first = current_save(&repo).unwrap();
+    let (linked, _) = planted(&mut repo, &[("ext/lib", EntryKind::ProjectLink, &[7; 20])]);
+    assert_eq!(plan_paths(&mut repo, first, linked), ["ext"]);
+}
+
+#[test]
+fn a_folder_holding_only_a_name_this_computer_cant_write_is_still_made() {
+    let (_dir, mut repo) = project();
+    let first = current_save(&repo).unwrap();
+    let (to, _) = planted(&mut repo, &files(&[("p/x:y", b"1")]));
+    let plan = planned(&mut repo, first, to, false);
+    let paths: Vec<&str> = plan.actions.iter().map(|a| a.path.as_str()).collect();
+    // Left unwritten on Windows, written elsewhere: the folder is made either way.
+    if cfg!(windows) {
+        assert_eq!(paths, ["p"]);
+        assert_eq!(plan.not_written, ["p/x:y"]);
+    } else {
+        assert_eq!(paths, ["p", "p/x:y"]);
+    }
+}

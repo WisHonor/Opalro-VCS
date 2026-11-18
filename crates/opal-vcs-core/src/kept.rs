@@ -298,17 +298,25 @@ pub(crate) fn overlay_with(
     keep: &mut dyn FnMut(&Listing) -> Result<Id, SaveError>,
 ) -> Result<Id, SaveError> {
     let whole = HashSet::new();
-    overlay_whole(listings, base_root, changes, &whole, drop_emptied, keep)
+    overlay_whole(
+        listings,
+        base_root,
+        changes,
+        &whole,
+        &|_| drop_emptied,
+        keep,
+    )
 }
 
 /// [`overlay_with`], where a folder put at a path in `whole` goes in as it is, by its listing's
-/// ID, not built from the changes below it.
+/// ID, not built from the changes below it, and a folder the changes leave empty goes too where
+/// `drop_emptied` says so of its path.
 pub(crate) fn overlay_whole(
     listings: &Listings,
     base_root: Id,
     changes: &BTreeMap<String, Option<Put>>,
     whole: &HashSet<String>,
-    drop_emptied: bool,
+    drop_emptied: &dyn Fn(&str) -> bool,
     keep: &mut dyn FnMut(&Listing) -> Result<Id, SaveError>,
 ) -> Result<Id, SaveError> {
     let is_folder = |path: &str, c: &Option<Put>| {
@@ -350,7 +358,10 @@ pub(crate) fn overlay_whole(
         let listing = changed(folder.map(|f| &f.listing), here)?;
         // Made only on the way to changes that put nothing in it, it doesn't come to be.
         let (up, name) = path.rsplit_once('/').unwrap_or(("", &path));
-        if (!had || drop_emptied) && listing.entries().is_empty() && !changes.contains_key(&path) {
+        if listing.entries().is_empty()
+            && !changes.contains_key(&path)
+            && (!had || drop_emptied(&path))
+        {
             if had {
                 todo.entry(up.to_owned())
                     .or_default()
