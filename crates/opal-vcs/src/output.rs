@@ -12,7 +12,7 @@ use opal_core::id::Id;
 use opal_core::listing::EntryKind;
 use opal_core::save::{Person, Save};
 use opal_core::shelf::{ShelfInfo, Shelved};
-use opal_core::status::{ConflictAt, Standing};
+use opal_core::status::{ConflictAt, EmptyFolder, Standing};
 use opal_core::switch::DiscardOutcome;
 use opal_core::text::{bytes, escape, thousands};
 use opal_core::tidy::TidyReport;
@@ -58,19 +58,29 @@ pub fn position_json(position: &Position) -> Value {
     }
 }
 
+/// A change's code in JSON (docs/json.md, "A change").
+fn change_code(change: ChangeKind) -> &'static str {
+    match change {
+        ChangeKind::Added => "added",
+        ChangeKind::Removed => "removed",
+        ChangeKind::Modified => "modified",
+        ChangeKind::KindChanged => "kind_changed",
+        ChangeKind::InConflict => "in_conflict",
+        ChangeKind::StillInConflict => "still_in_conflict",
+        ChangeKind::ConflictFixed => "conflict_fixed",
+    }
+}
+
+/// An empty folder added or removed, as `opalro status --json` lists it.
+pub fn empty_folder_json(f: &EmptyFolder) -> Value {
+    json!({ "path": f.path, "change": change_code(f.change) })
+}
+
 /// A file's change as JSON (docs/json.md, "A change").
 pub fn change_json(c: &FileChange) -> Value {
     json!({
         "path": c.path,
-        "change": match c.change {
-            ChangeKind::Added => "added",
-            ChangeKind::Removed => "removed",
-            ChangeKind::Modified => "modified",
-            ChangeKind::KindChanged => "kind_changed",
-            ChangeKind::InConflict => "in_conflict",
-            ChangeKind::StillInConflict => "still_in_conflict",
-            ChangeKind::ConflictFixed => "conflict_fixed",
-        },
+        "change": change_code(c.change),
         // Named here, not by `as_str`, which gives people `project-link`: JSON values use underscores.
         "kind": match c.kind {
             EntryKind::File => "file",
@@ -538,6 +548,21 @@ impl Row {
             role,
             path: escape(c.path, false),
             held,
+        }
+    }
+
+    /// An empty folder added or removed: `empty folder` where a file's size goes.
+    pub fn empty_folder(f: &EmptyFolder) -> Row {
+        let (word, role) = if f.change == ChangeKind::Removed {
+            ("removed", Role::Removed)
+        } else {
+            ("added", Role::Added)
+        };
+        Row {
+            word,
+            role,
+            path: escape(&f.path, false),
+            held: "empty folder".to_owned(),
         }
     }
 }

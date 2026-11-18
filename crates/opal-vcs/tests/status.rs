@@ -6,12 +6,13 @@ use std::fs;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 
+use opal_core::id::Id;
 use opal_core::link::ProjectLink;
 use opal_core::listing::{Entry, EntryKind, Listing};
 use opal_core::pack::ObjectKind;
 
 mod support;
-use support::{Env, plant_save, text};
+use support::{Env, main_tip, plant_save, saved_paths, text};
 
 /// A project with `files` saved, each last changed an hour ago so the cache can vouch for it.
 fn project(files: &[(&str, &str)]) -> Env {
@@ -512,6 +513,7 @@ fn status_json_matches_its_snapshot() {
     fs::write(env.root().join("a.txt"), "changed").unwrap();
     fs::remove_file(env.root().join("b.txt")).unwrap();
     fs::write(env.root().join("c.txt"), "c").unwrap();
+    fs::create_dir(env.root().join("d")).unwrap();
     let mut doc = status_json(&env, &[]);
     let redact = |v: &mut serde_json::Value| *v = "[redacted]".into();
     let save = &mut doc["save"];
@@ -527,6 +529,183 @@ fn status_json_matches_its_snapshot() {
         }
     }
     insta::assert_json_snapshot!(doc);
+}
+
+/// Each entry of a document's list `key` as `(path, change)`.
+fn listed(doc: &serde_json::Value, key: &str) -> Vec<(String, String)> {
+    let s = |v: &serde_json::Value| v.as_str().unwrap().to_owned();
+    (doc[key].as_array().unwrap().iter())
+        .map(|c| (s(&c["path"]), s(&c["change"])))
+        .collect()
+}
+
+fn pair(path: &str, change: &str) -> (String, String) {
+    (path.into(), change.into())
+}
+
+#[test]
+fn status_shows_an_empty_folder_added_and_removed() {
+    let env = project(&[("a.txt", "a")]);
+    fs::create_dir(env.root().join("old")).unwrap();
+    env.opalro().args(["save", "Old"]).assert().success();
+    let status = || {
+        let out = env.opalro().arg("status").output().unwrap();
+        assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+        text(&out.stdout)
+    };
+    // Only a folder changed, so the folder is counted.
+    fs::create_dir_all(env.root().join("new/deep")).unwrap();
+    let said = status();
+    assert!(
+        said.ends_with("\nChanged since then (1 folder):\n\n    added  new/deep  empty folder\n"),
+        "{said}"
+    );
+    #[cfg(feature = "fault-injection")]
+    {
+        let out = (env.opalro())
+            .env("OPALRO_FAKE_TERMINAL", "80")
+            .env("NO_COLOR", "1")
+            .arg("status")
+            .output()
+            .unwrap();
+        let next = text(&out.stderr);
+        assert!(
+            next.contains("Next: save them with: opalro save \"describe your change\""),
+            "{next}"
+        );
+    }
+    // With a file changed too, only the file is counted, and both rows are listed.
+    fs::remove_dir_all(env.root().join("new")).unwrap();
+    fs::remove_dir(env.root().join("old")).unwrap();
+    fs::write(env.root().join("b.txt"), "bb").unwrap();
+    let said = status();
+    assert!(
+        said.ends_with(
+            "\nChanged since then (1 file):\n\n    added    b.txt           2 B\n    removed  old    \
+             empty folder\n"
+        ),
+        "{said}"
+    );
+}
+
+#[test]
+fn status_json_lists_empty_folders() {
+    let env = project(&[("a.txt", "a")]);
+    fs::create_dir(env.root().join("old")).unwrap();
+    env.opalro().args(["save", "Old"]).assert().success();
+    let doc = status_json(&env, &[]);
+    assert_eq!(doc["empty_folders"], serde_json::json!([]), "{doc}");
+    fs::remove_dir(env.root().join("old")).unwrap();
+    fs::create_dir_all(env.root().join("new/deep")).unwrap();
+    fs::write(env.root().join("a.txt"), "changed").unwrap();
+    let doc = status_json(&env, &[]);
+    assert_eq!(
+        doc["empty_folders"],
+        serde_json::json!([
+            {"path": "new/deep", "change": "added"},
+            {"path": "old", "change": "removed"},
+        ]),
+        "{doc}"
+    );
+    // The changes are still files only.
+    assert_eq!(
+        changes(&doc),
+        [change("a.txt", "modified", "file")],
+        "{doc}"
+    );
+}
+
+#[test]
+fn status_says_nothing_changed_only_without_folders_either() {
+    let env = project(&[("a.txt", "a")]);
+    let said = || text(&env.opalro().arg("status").output().unwrap().stdout);
+    let nothing = "Nothing changed since then.";
+    assert!(said().contains(nothing));
+    fs::create_dir(env.root().join("new")).unwrap();
+    let now = said();
+    assert!(!now.contains(nothing), "{now}");
+    // Saved, it is the save's; deleted again, it is a change again.
+    env.opalro().args(["save", "New folder"]).assert().success();
+    assert!(said().contains(nothing));
+    fs::remove_dir(env.root().join("new")).unwrap();
+    let now = said();
+    assert!(!now.contains(nothing), "{now}");
+}
+
+/// The folders among a save's paths, as `saved_paths` gives them, with nothing below them.
+fn empty_in(paths: &BTreeMap<String, (char, Id)>) -> Vec<String> {
+    let below = |p: &str| paths.keys().any(|q| q.starts_with(&format!("{p}/")));
+    (paths.iter())
+        .filter(|(p, (kind, _))| *kind == 'd' && !below(p))
+        .map(|(p, _)| p.clone())
+        .collect()
+}
+
+#[test]
+fn what_status_lists_is_what_save_records() {
+    let env = project(&[
+        (".opalroignore", "*.log\n"),
+        ("full/f.txt", "f"),
+        ("x", "x"),
+    ]);
+    let root = env.root();
+    for folder in ["gone", "y"] {
+        fs::create_dir(root.join(folder)).unwrap();
+    }
+    env.opalro().args(["save", "Folders"]).assert().success();
+    let before = main_tip(&env);
+    // A folder of only ignored files, one emptied of its files, a saved empty folder deleted, a
+    // new one, and an empty folder and a file each taking the other's place.
+    write_old(&root.join("logs/today.log"), b"noise");
+    fs::remove_file(root.join("full/f.txt")).unwrap();
+    fs::remove_dir(root.join("gone")).unwrap();
+    fs::create_dir_all(root.join("new/deep")).unwrap();
+    fs::remove_file(root.join("x")).unwrap();
+    fs::create_dir(root.join("x")).unwrap();
+    fs::remove_dir(root.join("y")).unwrap();
+    fs::write(root.join("y"), "y").unwrap();
+    let status = status_json(&env, &[]);
+    let files = vec![
+        pair("full/f.txt", "removed"),
+        pair("x", "removed"),
+        pair("y", "added"),
+    ];
+    let folders = vec![
+        pair("gone", "removed"),
+        pair("logs", "added"),
+        pair("new/deep", "added"),
+        pair("x", "added"),
+        pair("y", "removed"),
+    ];
+    assert_eq!(listed(&status, "changes"), files, "{status}");
+    assert_eq!(listed(&status, "empty_folders"), folders, "{status}");
+    env.opalro().args(["save", "Everything"]).assert().success();
+    // The files are what the save changed.
+    let out = env.opalro().args(["--json", "show"]).output().unwrap();
+    let show: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(listed(&show, "changes"), files, "{show}");
+    // The empty folders are those one side holds empty where the other holds no folder.
+    let (old, new) = (saved_paths(&env, before), saved_paths(&env, main_tip(&env)));
+    let folder = |paths: &BTreeMap<String, (char, Id)>, p: &str| {
+        paths.get(p).is_some_and(|(kind, _)| *kind == 'd')
+    };
+    let mut recorded: Vec<(String, String)> = (empty_in(&new).into_iter())
+        .filter(|p| !folder(&old, p))
+        .map(|p| (p, "added".to_owned()))
+        .chain(
+            (empty_in(&old).into_iter())
+                .filter(|p| !folder(&new, p))
+                .map(|p| (p, "removed".to_owned())),
+        )
+        .collect();
+    recorded.sort();
+    assert_eq!(recorded, folders);
+    // And the folder is now as the save holds it.
+    let doc = status_json(&env, &[]);
+    assert!(listed(&doc, "changes").is_empty(), "{doc}");
+    assert!(listed(&doc, "empty_folders").is_empty(), "{doc}");
+    let said = text(&env.opalro().arg("status").output().unwrap().stdout);
+    assert!(said.contains("Nothing changed since then."), "{said}");
 }
 
 #[test]

@@ -4871,6 +4871,28 @@ fn changes(folder: &Tree, saved: &Tree) -> Vec<(String, ChangeKind)> {
         .collect()
 }
 
+/// The empty folders `status` should list, by path: a folder the save holds empty where the
+/// folder has no folder, and an empty folder in the folder where the save has none.
+fn empty_folders(folder: &Tree, stored: &Tree) -> Vec<(String, ChangeKind)> {
+    let empty = |t: &Tree| -> Vec<String> {
+        (t.folders.iter())
+            .filter(|f| !holds_below(t, f))
+            .cloned()
+            .collect()
+    };
+    let mut found: Vec<(String, ChangeKind)> = (empty(stored).into_iter())
+        .filter(|f| !folder.folders.contains(f))
+        .map(|f| (f, ChangeKind::Removed))
+        .chain(
+            (empty(folder).into_iter())
+                .filter(|f| !stored.folders.contains(f))
+                .map(|f| (f, ChangeKind::Added)),
+        )
+        .collect();
+    found.sort_by(|a, b| a.0.cmp(&b.0));
+    found
+}
+
 /// What the folder, `status`, the state and undo's lists say, against the model. `missable` is
 /// a change the file cache may miss: status that trusts it may say either, and a full one must
 /// see it.
@@ -4889,6 +4911,14 @@ fn check(
     let in_conflict = |p: &str| m.kept().keys().any(|k| within(p, k));
     let mut want = changes(&m.folder, m.tip());
     want.retain(|(p, _)| !in_conflict(p));
+    let mut want_empty = empty_folders(&m.folder, &m.saves[m.state.on].stored);
+    want_empty.retain(|(p, _)| !in_conflict(p));
+    for (_, change) in &want_empty {
+        met(match change {
+            ChangeKind::Added => "status: an empty folder added",
+            _ => "status: an empty folder removed",
+        });
+    }
     let conflicts = conflicts_listed(m);
     for (_, standing) in &conflicts {
         met(match standing {
@@ -4900,7 +4930,9 @@ fn check(
             Standing::NotHere => "status: not here",
         });
     }
-    let listed = |full: bool| -> Result<Vec<(String, ChangeKind)>, String> {
+    type Listed = Vec<(String, ChangeKind)>;
+    // The changes, then the empty folders.
+    let listed = |full: bool| -> Result<(Listed, Listed), String> {
         let st = status(repo, full, None).map_err(|e| e.to_string())?;
         if st.save_id != m.saves[m.state.on].id {
             return Err("status compared with the wrong save".into());
@@ -4917,13 +4949,21 @@ fn check(
         if got != wanted {
             return Err(format!("status lists in conflict {got:?}, not {wanted:?}"));
         }
-        Ok(st
-            .changes
-            .iter()
-            .map(|c| (c.path.clone(), c.change))
-            .collect())
+        Ok((
+            (st.changes.iter())
+                .map(|c| (c.path.clone(), c.change))
+                .collect(),
+            (st.empty_folders.iter())
+                .map(|f| (f.path.clone(), f.change))
+                .collect(),
+        ))
     };
-    let got = listed(full)?;
+    let (got, got_empty) = listed(full)?;
+    if got_empty != want_empty {
+        return Err(format!(
+            "status lists the empty folders {got_empty:?}, not {want_empty:?}"
+        ));
+    }
     let other = |l: &[(String, ChangeKind)]| -> Vec<(String, ChangeKind)> {
         l.iter()
             .filter(|(p, _)| Some(p.as_str()) != missable)
@@ -4934,7 +4974,7 @@ fn check(
         return Err(format!("status says {got:?}, not {want:?}"));
     }
     if missable.is_some() {
-        let got = listed(true)?;
+        let got = listed(true)?.0;
         if got != want {
             return Err(format!(
                 "status reading every file says {got:?}, not {want:?}"
@@ -5322,6 +5362,21 @@ fn a_start_in_conflict_that_both_lines_fixed_is_unknown() {
 #[test]
 fn a_start_in_conflict_that_both_lines_fixed_is_unknown_when_asked_for_a_clean_line() {
     run(&parted_in_conflict(true));
+}
+
+/// A saved empty folder deleted, then a new one made in a folder that holds a file.
+#[test]
+fn status_lists_empty_folders_added_and_removed() {
+    run(&[
+        Act::MakeFolder("e"),
+        Act::Save,
+        Act::DeleteFolder("e"),
+        Act::Write("d/a", 0, 1, When::Now),
+        Act::MakeFolder("d/e"),
+    ]);
+    let met = |kind| MET.with(|m| m.borrow().get(kind).copied());
+    assert_eq!(met("status: an empty folder added"), Some(2));
+    assert_eq!(met("status: an empty folder removed"), Some(3));
 }
 
 /// The seed's history: a file moved to two places where both lines hold it alike at one of them.

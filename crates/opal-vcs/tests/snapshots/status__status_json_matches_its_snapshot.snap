@@ -27,6 +27,12 @@ expression: doc
     }
   ],
   "conflicts": [],
+  "empty_folders": [
+    {
+      "change": "added",
+      "path": "d"
+    }
+  ],
   "not_written": [],
   "opalro_json": 1,
   "position": {

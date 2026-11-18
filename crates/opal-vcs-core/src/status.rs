@@ -10,7 +10,7 @@ use crate::diary::Position;
 use crate::diff::{ChangeKind, FileChange, change_at, for_each_entry_change_in};
 use crate::history::tip_of;
 use crate::id::Id;
-use crate::listing::{Entry, EntryKind};
+use crate::listing::{Entry, EntryKind, Listing};
 use crate::repo::Repository;
 use crate::save::Save;
 use crate::snapshot::{FolderNow, SaveError, kept_in_the_way, read_folder, scan_hashed};
@@ -28,6 +28,8 @@ pub struct Status {
     pub save: Save,
     /// The files that differ from it, in path order.
     pub changes: Vec<PathChange>,
+    /// The empty folders that differ from it, in path order.
+    pub empty_folders: Vec<EmptyFolder>,
     /// Entries of the save this computer can't hold as they are, by path: saves keep them as
     /// they were.
     pub not_written_here: Vec<String>,
@@ -89,6 +91,14 @@ pub struct PathChange {
     pub in_conflict: bool,
 }
 
+/// An empty folder the save holds and the folder doesn't (`Removed`), or the other way round
+/// (`Added`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmptyFolder {
+    pub path: String,
+    pub change: ChangeKind,
+}
+
 impl From<FileChange<'_>> for PathChange {
     fn from(c: FileChange<'_>) -> PathChange {
         PathChange {
@@ -108,6 +118,11 @@ impl From<FileChange<'_>> for PathChange {
 /// What differs between a save and the folder at one path.
 pub(crate) enum Difference<'a> {
     File(FileChange<'a>),
+    /// An empty folder on one side, and no folder on the other.
+    EmptyFolder {
+        path: &'a str,
+        change: ChangeKind,
+    },
     /// A place in conflict: its record's ID and what is kept of it, and the folder's entry there.
     Conflict {
         path: &'a str,
@@ -117,10 +132,10 @@ pub(crate) enum Difference<'a> {
     },
 }
 
-/// Hands `each` every file that differs between the save whose top listing is `root` and the
-/// folder as `now` read it, and every place in conflict met on the way, in path order. What is
-/// below a place standing as a folder is that place's, so it comes with it and not on its own.
-/// A record is read once, and what is used of it kept in `records`.
+/// Hands `each` every file and empty folder that differs between the save whose top listing is
+/// `root` and the folder as `now` read it, and every place in conflict met on the way, in path
+/// order. What is below a place standing as a folder is that place's, so it comes with it and not
+/// on its own. A record is read once, and what is used of it kept in `records`.
 pub(crate) fn each_difference<E: From<StoreError>>(
     repo: &Repository,
     now: &FolderNow,
@@ -129,6 +144,11 @@ pub(crate) fn each_difference<E: From<StoreError>>(
     mut each: impl FnMut(Difference<'_>) -> Result<(), E>,
 ) -> Result<(), E> {
     let (store, keeps) = (repo.store(), repo.keeps_conflicts());
+    // A folder holding anything, a place in conflict included, isn't the empty listing, so of new
+    // folders only the innermost is one.
+    let empty = Listing::empty().id();
+    let held_empty =
+        |e: Option<&Entry>| e.is_some_and(|e| e.kind == EntryKind::Folder && e.id == empty);
     // The places with a folder on either side whose paths may still come, each with a `/` after
     // it: what is below them is theirs.
     let mut folders: Vec<String> = Vec::new();
@@ -138,7 +158,16 @@ pub(crate) fn each_difference<E: From<StoreError>>(
             return Ok(());
         }
         let Some(o) = o.filter(|o| keeps && o.kind == EntryKind::Conflict) else {
-            return change_at(path, o, n).map_or(Ok(()), |c| each(Difference::File(c)));
+            if let Some(c) = change_at(path, o, n) {
+                each(Difference::File(c))?;
+            }
+            // The walk never hands out a folder on both sides, so the other side is no folder.
+            let change = match (held_empty(o), held_empty(n)) {
+                (true, _) => ChangeKind::Removed,
+                (_, true) => ChangeKind::Added,
+                _ => return Ok(()),
+            };
+            return each(Difference::EmptyFolder { path, change });
         };
         let record = conflict::record_at(store, records, path, &o.id)?;
         let folder = |kind: Option<EntryKind>| kind == Some(EntryKind::Folder);
@@ -263,12 +292,17 @@ pub fn status(
     let unfinished_switch = unfinished.as_ref().map(|w| w.message.clone());
     warnings.extend(unfinished);
     let mut changes = Vec::new();
+    let mut empty_folders = Vec::new();
     let mut conflicts = Vec::new();
     let mut records = std::mem::take(&mut now.records);
     let mut disk = None;
     each_difference(repo, &now, &mut records, save.root, |d| {
         match d {
             Difference::File(c) => changes.push(PathChange::from(c)),
+            Difference::EmptyFolder { path, change } => empty_folders.push(EmptyFolder {
+                path: path.to_owned(),
+                change,
+            }),
             Difference::Conflict {
                 path,
                 id,
@@ -302,6 +336,7 @@ pub fn status(
         save_id,
         save,
         changes,
+        empty_folders,
         not_written_here: now.not_written_here,
         unfinished_switch,
         warnings,
@@ -891,5 +926,140 @@ pub(crate) mod tests {
             path: "a.txt".into(),
         };
         assert_eq!(why_stopped(&changing), changing.to_string());
+    }
+
+    /// Saves everything in the folder, as `opalro save` does.
+    fn save_now(repo: &mut Repository) {
+        let who = Person {
+            name: "Ada".into(),
+            email: "ada@example.com".into(),
+            time_ms: 1_700_000_000_000,
+            tz_offset_min: 0,
+        };
+        let req = crate::snapshot::SaveRequest {
+            message: Some("Saved"),
+            who: &who,
+            command: "save",
+            accept_crlf: false,
+            git_excludes: None,
+            new_line: None,
+            only: None,
+            amend: false,
+        };
+        crate::snapshot::save_folder(repo, &req, &mut |_| {}, &mut |_| true).unwrap();
+    }
+
+    fn empty(s: &Status) -> Vec<(&str, ChangeKind)> {
+        (s.empty_folders.iter())
+            .map(|f| (f.path.as_str(), f.change))
+            .collect()
+    }
+
+    #[test]
+    fn a_saved_empty_folder_gone_from_disk_is_removed() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, "a.txt", b"a");
+        std::fs::create_dir_all(root.join("art/empty")).unwrap();
+        save_now(&mut repo);
+        assert!(status_of(&repo).empty_folders.is_empty());
+        // The folder above it goes too, and only the empty one is named.
+        std::fs::remove_dir_all(root.join("art")).unwrap();
+        let s = status_of(&repo);
+        assert_eq!(empty(&s), [("art/empty", ChangeKind::Removed)]);
+        assert!(s.changes.is_empty(), "{:?}", s.changes);
+    }
+
+    #[test]
+    fn a_new_empty_folder_is_added() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, "a.txt", b"a");
+        save_now(&mut repo);
+        std::fs::create_dir(root.join("new")).unwrap();
+        let s = status_of(&repo);
+        assert_eq!(empty(&s), [("new", ChangeKind::Added)]);
+        assert!(s.changes.is_empty(), "{:?}", s.changes);
+    }
+
+    #[test]
+    fn only_the_innermost_new_empty_folder_is_named() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, "x.txt", b"x");
+        save_now(&mut repo);
+        std::fs::create_dir_all(root.join("a/b")).unwrap();
+        assert_eq!(empty(&status_of(&repo)), [("a/b", ChangeKind::Added)]);
+    }
+
+    #[test]
+    fn a_folder_holding_only_ignored_files_is_an_added_empty_folder() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, ".opalroignore", b"*.log\n");
+        save_now(&mut repo);
+        write(root, "logs/today.log", b"noise");
+        let s = status_of(&repo);
+        assert_eq!(empty(&s), [("logs", ChangeKind::Added)]);
+        assert!(s.changes.is_empty(), "{:?}", s.changes);
+    }
+
+    #[test]
+    fn a_folder_emptied_of_its_files_shows_the_files_not_the_folder() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, "kept/a.txt", b"a");
+        write(root, "gone/b.txt", b"b");
+        save_now(&mut repo);
+        // One stays on disk, empty; the other goes with its file.
+        std::fs::remove_file(root.join("kept/a.txt")).unwrap();
+        std::fs::remove_dir_all(root.join("gone")).unwrap();
+        let s = status_of(&repo);
+        assert_eq!(changed(&s), ["gone/b.txt", "kept/a.txt"]);
+        assert!(s.empty_folders.is_empty(), "{:?}", s.empty_folders);
+    }
+
+    #[test]
+    fn a_folder_only_conflicts_fill_is_never_an_empty_folder() {
+        let (dir, mut repo) = project();
+        keep(&mut repo, &[b"base", b"theirs"]);
+        plant_conflicted(&mut repo, &[], &[("d/x.txt", versions(None))]);
+        // Gone from disk, as a switch leaves it, then made again by hand, empty.
+        for made in [false, true] {
+            if made {
+                std::fs::create_dir(dir.path().join("d")).unwrap();
+            }
+            let s = status_of(&repo);
+            assert_eq!(rows(&s), [("d/x.txt", Standing::NotInFolder)]);
+            assert!(s.empty_folders.is_empty(), "{:?}", s.empty_folders);
+            assert!(s.changes.is_empty(), "{:?}", s.changes);
+        }
+    }
+
+    #[test]
+    fn an_empty_folder_in_place_of_a_file_is_shown_beside_it() {
+        let (dir, mut repo) = project();
+        let root = dir.path();
+        write(root, "x", b"x");
+        std::fs::create_dir(root.join("y")).unwrap();
+        save_now(&mut repo);
+        std::fs::remove_file(root.join("x")).unwrap();
+        std::fs::create_dir(root.join("x")).unwrap();
+        std::fs::remove_dir(root.join("y")).unwrap();
+        write(root, "y", b"y");
+        let s = status_of(&repo);
+        let files: Vec<(&str, ChangeKind)> = s
+            .changes
+            .iter()
+            .map(|c| (c.path.as_str(), c.change))
+            .collect();
+        assert_eq!(
+            files,
+            [("x", ChangeKind::Removed), ("y", ChangeKind::Added)]
+        );
+        assert_eq!(
+            empty(&s),
+            [("x", ChangeKind::Added), ("y", ChangeKind::Removed)]
+        );
     }
 }
