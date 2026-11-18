@@ -21,17 +21,17 @@ opal-vcs-platform = { path = "../opal-vcs-platform" }
 directories = "6.0.0"
 encoding_rs = "0.8.44"
 getrandom = "0.4.3"
-jiff = "0.2.38"
+jiff = "0.2.43"
 miniz_oxide = "0.9.1"
 serde = { version = "1", features = ["derive"] }
 sha1-checked = { version = "0.10.0", default-features = false }
 sha2 = { version = "0.10.9", default-features = false }
 similar = { version = "2.7.0", default-features = false }
 thiserror = "2.0.21"
-toml = "1.1.8"
+toml = "1.2.1"
 unicode-normalization = "0.1.26"
 # Without the legacy decoders: format 1 holds only frames from zstd 1.0 on.
-zstd = { version = "0.14.3", default-features = false }
+zstd = { version = "0.14.4", default-features = false }
 
 [dev-dependencies]
 opal-vcs-platform = { path = "../opal-vcs-platform", features = ["test-support"] }
