@@ -57,6 +57,9 @@ const CHUNK: usize = 16 << 10;
 /// Packs kept open between reads, the last ones used: few enough for any system's limit on open
 /// files.
 const MAX_OPEN_PACKS: usize = 16;
+/// What zlib may need beyond a stream's bytes and 1 for each 1,024 of them (stored blocks take 5
+/// in 64 KiB): its header and checksum, and a loose object's own header.
+const ZLIB_SLACK: u64 = 64;
 
 #[cfg(any(test, feature = "test-support"))]
 thread_local! {
@@ -96,6 +99,11 @@ pub(super) struct Objects {
     work: Cell<u64>,
     /// Compressed bytes of the pack entries inflated so far, each entry counted once.
     inflated: Cell<u64>,
+    /// Pack indexes searched so far to find objects.
+    searched: Cell<u64>,
+    /// Compressed bytes the streams inflated whole took past what zlib could need for what they
+    /// gave, each time.
+    excess: Cell<u64>,
     /// The delta families rebuilt, by pack number and the number of the entry at the bottom.
     families: RefCell<HashSet<(usize, usize)>>,
     /// Objects built through deltas so far.
@@ -144,7 +152,7 @@ impl Repo {
     /// An object whole, at most `MAX_IN_MEMORY_OBJECT` bytes, checked against its ID.
     pub fn read(&self, id: &GitId) -> Result<Object, GitError> {
         let object = match self.find(id)? {
-            Place::Loose(loose) => loose.read()?,
+            Place::Loose(loose) => loose.read(&self.objects.excess)?,
             Place::Packed(n, pack, at) => {
                 let file = self.open_pack(n, pack)?;
                 let object = self.unpack(n, pack, &file, at);
@@ -154,6 +162,20 @@ impl Repo {
         };
         self.check(id, object.kind, &object.data)?;
         Ok(object)
+    }
+
+    /// Pack indexes searched so far to find objects, the packs a loose object isn't in included.
+    #[must_use]
+    pub fn searched(&self) -> u64 {
+        self.objects.searched.get()
+    }
+
+    /// Compressed bytes that the streams read whole so far (each object `read` gives, and each
+    /// base and delta behind it) took past what zlib could need for what they gave: a stream
+    /// padded with empty blocks is costly to read, whatever it holds.
+    #[must_use]
+    pub fn excess(&self) -> u64 {
+        self.objects.excess.get()
     }
 
     /// A blob's bytes. A blob Git stored whole is inflated as it is read and checked against its
@@ -232,7 +254,9 @@ impl Repo {
         let folder = self.packs()?;
         let last = self.objects.last_pack.get();
         let last = folder.packs.get(last).map(|pack| (last, pack));
+        let searched = &self.objects.searched;
         for (n, pack) in last.into_iter().chain(folder.packs.iter().enumerate()) {
+            searched.set(searched.get().saturating_add(1));
             if let Some(at) = pack.find(id) {
                 self.objects.last_pack.set(n);
                 return Ok(Place::Packed(n, pack, at));
@@ -372,6 +396,7 @@ impl Repo {
         let built = build_delta(base, size, &mut delta).map_err(failed)?;
         let taken = delta.into_inner().inflater.taken;
         count_inflated(&self.objects.inflated, pack, at, taken);
+        count_excess(&self.objects.excess, taken, entry.size);
         #[cfg(test)]
         self.objects
             .built
@@ -392,6 +417,7 @@ impl Repo {
         let mut stream = Inflater::new(input, Some(at));
         let data = stream.read_all(entry.size)?;
         count_inflated(&self.objects.inflated, pack, at, stream.taken);
+        count_excess(&self.objects.excess, stream.taken, entry.size);
         Ok(data)
     }
 
@@ -632,6 +658,13 @@ fn count_inflated(total: &Cell<u64>, pack: &Pack, at: u64, taken: u64) {
     }
 }
 
+/// Adds to `total` the compressed bytes a stream took past what zlib could need for the `size`
+/// bytes it gave, every time it is read.
+fn count_excess(total: &Cell<u64>, taken: u64, size: u64) {
+    let need = size.saturating_add(size >> 10).saturating_add(ZLIB_SLACK);
+    total.set(total.get().saturating_add(taken.saturating_sub(need)));
+}
+
 /// Checks that what `hasher` took is the object `id` names.
 fn verify(id: &GitId, hasher: Hasher) -> Result<(), GitError> {
     let actual = hasher.finish(|| format!("object `{}`", id.to_hex()))?;
@@ -755,8 +788,10 @@ impl Loose {
         Ok(Some(Loose { stream, kind, size }))
     }
 
-    fn read(mut self) -> Result<Object, GitError> {
+    /// Its data, counting in `excess` what its stream took past what zlib could need.
+    fn read(mut self, excess: &Cell<u64>) -> Result<Object, GitError> {
         let data = self.stream.read_all(self.size)?;
+        count_excess(excess, self.stream.taken, self.size);
         Ok(Object {
             kind: self.kind,
             data,
@@ -1401,6 +1436,28 @@ mod tests {
         assert_eq!(repo.objects.last_pack.get(), later);
         // Packs of no objects are listed, so a change to them is noticed, but never searched.
         assert_eq!((folder.listed.len(), folder.packs.len()), (203, 102));
+    }
+
+    #[test]
+    fn a_read_counts_the_indexes_it_searched_and_what_its_stream_took_past_zlibs_need() {
+        let (dir, git) = craft(Sha1);
+        let packed = id(Blob, b"packed\n", Sha1);
+        git.pack(&[PackEntry::Whole(Blob, b"packed\n".to_vec())]);
+        let loose = id(Blob, b"loose\n", Sha1);
+        let padded = crate::git::craft::zlib_padded(b"blob 6\0loose\n", 100, 0);
+        git.raw_loose(&loose.to_hex(), &padded);
+        let repo = open(&dir);
+        repo.read(&packed).unwrap();
+        assert_eq!((repo.searched(), repo.excess()), (1, 0));
+        // The pack is searched twice, the one that found the last object first, before the loose
+        // file is looked for. Its stream: zlib's header, 100 empty blocks of 5 bytes, a block of
+        // 13 bytes and the checksum, past the 6 it gives and 64.
+        repo.read(&loose).unwrap();
+        assert_eq!(repo.searched(), 3);
+        assert_eq!(repo.excess(), 2 + 100 * 5 + 5 + 13 + 4 - (6 + 64));
+        // Read again, it counts again.
+        repo.read(&loose).unwrap();
+        assert_eq!(repo.excess(), 2 * (2 + 100 * 5 + 5 + 13 + 4 - (6 + 64)));
     }
 
     #[test]

@@ -62,13 +62,12 @@ fn read_so_far(pid: u32) -> Option<u64> {
         .ok()
 }
 
-/// RT25-1: the comparison's allowance counts the bytes a Git tree holds, not what reading it
+/// RT25-1: the comparison's allowance counted the bytes a Git tree holds, not what reading it
 /// takes. Two one-file trees, each stored loose with 32 MiB of empty deflate blocks before its 29
-/// bytes, and 60 commits that switch between them: each comparison inflates 64 MiB and counts
+/// bytes, and 60 commits that switch between them: each comparison inflated 64 MiB and counted
 /// 58 bytes. The import should read the repository a few times and its allowance, 1 GiB, at
-/// most; it reads 64 MiB more for every commit.
+/// most; it read 64 MiB more for every commit.
 #[test]
-#[ignore = "RT25-1: the comparison's allowance doesn't count what inflating a tree takes"]
 fn an_import_reads_no_more_than_its_allowance_past_the_repository() {
     const PAD: usize = 32 << 20;
     const COMMITS: usize = 60;
