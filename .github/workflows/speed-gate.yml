@@ -1,75 +1,58 @@
 name: Speed gate
 
+# Throwaway, on a gate/ branch only: who on Git's own history with Opalro's rule at a combine and
+# with Git's (OPALRO_WHO_RULE=git), timed in turns on one runner.
 on:
-  workflow_call:
-  workflow_dispatch:
   push:
-    # A gate/ branch runs this job alone, to measure a change.
     branches: ["gate/**"]
 
 permissions:
   contents: read
 
 jobs:
-  # On Git's source, Opalro's status and small save may take at most twice Git's time, and goto
-  # three and a half times, twice being its goal for v0.2 (bench/README.md). The bench and nightly
-  # workflows both call this job.
-  speed-gate:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+  who-rule:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
     defaults:
       run:
         shell: bash
+    env:
+      GIT_SOURCE: 7fb6055e678f800320d8ab8cd8f201d9493d1ba0
+      OPALRO_USER_NAME: Bench
+      OPALRO_USER_EMAIL: bench@example.com
     steps:
-      - name: Choose the folders
+      - name: Settings folder
         run: |
-          data=$RUNNER_TEMP/bench results=$RUNNER_TEMP/results
-          if [ "$RUNNER_OS" = Windows ]; then
-            # Paths both Git's bash and Windows programs read.
-            results=$(cygpath -m "$RUNNER_TEMP")/results
-            data=$(cygpath -m "$RUNNER_TEMP")/bench
-          fi
-          echo "BENCH_DATA=$data" >>"$GITHUB_ENV"
-          echo "BENCH_RESULTS=$results" >>"$GITHUB_ENV"
-          echo "Data in $data"
+          echo "OPALRO_CONFIG_DIR=$RUNNER_TEMP/config" >>"$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/config"
       - name: Describe the machine
         run: |
           echo "$ImageOS $ImageVersion"
-          if [ "$RUNNER_OS" = Linux ]; then lscpu | grep -E '^(Model name|CPU\(s\)):'; free -h; fi
-      - name: Describe the machine (Windows)
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: |
-          Get-CimInstance Win32_Processor | Format-List Name, NumberOfLogicalProcessors
-          Get-CimInstance Win32_OperatingSystem | Format-List Caption, Version, TotalVisibleMemorySize
-          Get-PhysicalDisk | Format-Table FriendlyName, MediaType, Size
-          try { "Defender real-time protection: $((Get-MpComputerStatus).RealTimeProtectionEnabled)" } catch { "Defender: not found" }
+          lscpu | grep -E '^(Model name|CPU\(s\)):'
+          free -h
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - name: Install hyperfine
-        run: cargo install --locked hyperfine --version 1.20.0
       - name: Build opalro
-        run: cargo build --release -p opal-vcs
-      - name: Versions
         run: |
+          cargo build --release -p opal-vcs
           echo "opalro at $GITHUB_SHA"
-          git --version && hyperfine --version && jq --version
-      - name: Opalro against Git
+      - name: Clone git/git with its whole history, master at the Nightly's commit
         run: |
-          export PATH="$PWD/target/release:$PATH"
-          bash bench/run.sh gate "$BENCH_DATA" "$BENCH_RESULTS"
-      - name: Results
-        if: always()
-        run: bash bench/run.sh summary "$BENCH_RESULTS"
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        if: always()
-        with:
-          name: gate-${{ runner.os }}
-          path: ${{ env.BENCH_RESULTS }}
-          if-no-files-found: ignore
+          git clone --quiet --no-checkout https://github.com/git/git "$RUNNER_TEMP/git"
+          cd "$RUNNER_TEMP/git"
+          git --version
+          git update-ref refs/heads/master "$GIT_SOURCE"
+          echo "master is $(git rev-parse master)"
+          git commit-graph write --reachable
+      - name: Import it
+        run: |
+          cd "$RUNNER_TEMP/git"
+          /usr/bin/time -f "import: %e s, peak %M KiB" "$GITHUB_WORKSPACE/target/release/opalro" import
+      - name: who with each rule, in turns
+        run: |
+          cd "$RUNNER_TEMP/git"
+          python3 "$GITHUB_WORKSPACE/.github/workflows/who-rule.py" \
+            "$GITHUB_WORKSPACE/target/release/opalro" master 9 \
+            Makefile diff.c git-compat-util.h README.md t/t8002-blame.sh

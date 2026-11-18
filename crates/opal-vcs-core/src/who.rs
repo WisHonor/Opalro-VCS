@@ -2,6 +2,7 @@
 
 use std::borrow::Cow;
 use std::collections::{BinaryHeap, HashMap, VecDeque};
+use std::io::Write;
 use std::rc::Rc;
 
 use similar::DiffOp;
@@ -213,9 +214,25 @@ thread_local! {
         std::cell::RefCell::new(HashMap::new());
 }
 
+// What this thread's last `who` did, printed to stderr when OPALRO_WHO_RULE is set.
+thread_local! {
+    static COMPARISONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static VERSIONS_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    static LATER_PARENT_TOOK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// A parent's save, the path the file had there, and the file there if it is one.
+type Looked = (Save, Rc<str>, Option<Entry>);
+
 /// Names the save behind each line of the file at `req.path`, through every parent, the first
 /// first, and through the moves saves recorded. Reads only.
 pub fn who(repo: &Repository, req: &WhoRequest<'_>) -> Result<Whose, WhoError> {
+    // A measurement: `git` asks the parents as git blame does, and any value prints the counts.
+    let rule = std::env::var("OPALRO_WHO_RULE").ok();
+    let git_rule = rule.as_deref() == Some("git");
+    for counter in [&COMPARISONS, &VERSIONS_READ, &LATER_PARENT_TOOK] {
+        counter.set(0);
+    }
     let typed = req.path;
     names::validate_path(typed).map_err(|reason| WhoError::NotAPath {
         path: typed.to_owned(),
@@ -251,6 +268,7 @@ pub fn who(repo: &Repository, req: &WhoRequest<'_>) -> Result<Whose, WhoError> {
                     kind: entry.kind,
                 });
             }
+            VERSIONS_READ.set(VERSIONS_READ.get() + 1);
             let side = changes::stored(store, Some(entry.kind), Some(entry.id), Some(entry.size))?;
             let text = asked_text(side, &path)?;
             let lines = (0..changes::line_count(&text)).map(|i| (i, i)).collect();
@@ -330,24 +348,37 @@ pub fn who(repo: &Repository, req: &WhoRequest<'_>) -> Result<Whose, WhoError> {
         let save = read_save(repo, id)?;
         // Read only when a parent holds other contents than this version's.
         let mut here: Option<Option<Cow<'_, [u8]>>> = None;
+        // Git's rule looks the parents up before comparing any.
+        let mut ahead = if git_rule && !lines.is_empty() {
+            Some(looked_ahead(
+                repo, &standing, &stored, &save, &at_path, entry.id,
+            )?)
+        } else {
+            None
+        };
         for (i, parent_id) in save.parents.iter().enumerate() {
             if lines.is_empty() {
                 break;
             }
-            let parent = read_save(repo, *parent_id)?;
-            let mut there = Rc::clone(&at_path);
-            if i == 0
-                && let Some(from) = moved_from(&stored, &save, &parent, &at_path)?
-            {
-                there = from.into();
-            }
-            let Some(e) = Tree::new(&standing, parent.root, kept::EXACT).entry(&there)? else {
+            let looked = match &mut ahead {
+                Some(ahead) => ahead.get_mut(i).and_then(Option::take),
+                None => Some(parent_file(
+                    repo,
+                    &standing,
+                    &stored,
+                    &save,
+                    *parent_id,
+                    i == 0,
+                    &at_path,
+                )?),
+            };
+            let Some((parent, there, Some(e))) = looked else {
                 continue;
             };
-            if !is_file(e.kind) {
-                continue;
-            }
             let taken = if e.id == entry.id {
+                if i > 0 {
+                    LATER_PARENT_TOOK.set(LATER_PARENT_TOOK.get() + 1);
+                }
                 std::mem::take(&mut lines)
             } else {
                 // The sizes the listings claim decide whether a side is read at all, so they are
@@ -396,6 +427,21 @@ pub fn who(repo: &Repository, req: &WhoRequest<'_>) -> Result<Whose, WhoError> {
         }
     }
 
+    if rule.is_some() {
+        let _ = writeln!(
+            std::io::stderr(),
+            "who, {}: {} comparisons, {} versions read, {} times a later parent with the same \
+             contents took the lines left",
+            if git_rule {
+                "Git's rule"
+            } else {
+                "Opalro's rule"
+            },
+            COMPARISONS.get(),
+            VERSIONS_READ.get(),
+            LATER_PARENT_TOOK.get(),
+        );
+    }
     let runs = runs_of(by);
     Ok(Whose {
         path,
@@ -409,6 +455,50 @@ pub fn who(repo: &Repository, req: &WhoRequest<'_>) -> Result<Whose, WhoError> {
 
 fn read_save(repo: &Repository, id: Id) -> Result<Save, RepoError> {
     Ok(repo.store().save(&id, repo.signatures_allowed())?)
+}
+
+/// The parent `parent_id` of `save`, looked up for the file at `at_path`, through the save's move
+/// notes when it is the first parent.
+fn parent_file(
+    repo: &Repository,
+    standing: &Listings<'_>,
+    stored: &Listings<'_>,
+    save: &Save,
+    parent_id: Id,
+    first: bool,
+    at_path: &Rc<str>,
+) -> Result<Looked, WhoError> {
+    let parent = read_save(repo, parent_id)?;
+    let mut there = Rc::clone(at_path);
+    if first && let Some(from) = moved_from(stored, save, &parent, at_path)? {
+        there = from.into();
+    }
+    let e = Tree::new(standing, parent.root, kept::EXACT).entry(&there)?;
+    Ok((parent, there, e.filter(|e| is_file(e.kind))))
+}
+
+/// Git's rule: the parents looked up in order before any is compared, up to the first holding
+/// `same`, which is then the only one asked.
+fn looked_ahead(
+    repo: &Repository,
+    standing: &Listings<'_>,
+    stored: &Listings<'_>,
+    save: &Save,
+    at_path: &Rc<str>,
+    same: Id,
+) -> Result<Vec<Option<Looked>>, WhoError> {
+    let mut all = Vec::new();
+    for (i, parent_id) in save.parents.iter().enumerate() {
+        let looked = parent_file(repo, standing, stored, save, *parent_id, i == 0, at_path)?;
+        if looked.2.as_ref().is_some_and(|e| e.id == same) {
+            all.clear();
+            all.resize_with(i, || None);
+            all.push(Some(looked));
+            break;
+        }
+        all.push(Some(looked));
+    }
+    Ok(all)
 }
 
 fn is_file(kind: EntryKind) -> bool {
@@ -448,6 +538,7 @@ fn version<'a>(
     {
         return Ok(Some(Cow::Borrowed(text)));
     }
+    VERSIONS_READ.set(VERSIONS_READ.get() + 1);
     let side = changes::stored(store, Some(entry.kind), Some(entry.id), Some(entry.size))?;
     Ok(match side {
         Side::Bytes(b) if changes::comparable(&b).is_ok() => Some(Cow::Owned(b)),
@@ -481,6 +572,7 @@ fn compare(
     };
     #[cfg(test)]
     READ_OLDER.with_borrow_mut(|r| *r.entry(older.id).or_default() += 1);
+    VERSIONS_READ.set(VERSIONS_READ.get() + 1);
     let Side::Bytes(old) =
         changes::stored(store, Some(older.kind), Some(older.id), Some(older.size))?
     else {
@@ -491,6 +583,7 @@ fn compare(
     }
     #[cfg(test)]
     COMPARED.set(COMPARED.get() + 1);
+    COMPARISONS.set(COMPARISONS.get() + 1);
     let (ops, late) = changes::line_ops(&keys_of(&old), &keys_of(here), changes::deadline());
     *coarse |= late;
     let found = ops
