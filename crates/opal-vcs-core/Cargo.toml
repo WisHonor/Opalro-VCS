@@ -21,7 +21,7 @@ opal-vcs-platform = { path = "../opal-vcs-platform" }
 directories = "6.0.0"
 encoding_rs = "0.8.44"
 getrandom = "0.4.3"
-jiff = "0.2.38"
+jiff = "0.2.43"
 miniz_oxide = "0.9.1"
 serde = { version = "1", features = ["derive"] }
 sha1-checked = { version = "0.10.0", default-features = false }
