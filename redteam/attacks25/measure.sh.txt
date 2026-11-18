@@ -1,0 +1,27 @@
+#!/bin/sh
+# Times one `opalro import` of a repository and its peak memory: measure.sh <dir> <label> [limit-s].
+# OPALRO_BIN picks the binary. Past limit-s seconds (default 600) the import is killed.
+# The project made is removed after, so the same repository can be imported again.
+dir=$1; label=$2; limit=${3:-600}
+cd "$dir" || exit 1
+rm -rf .opalro
+s=$(date +%s.%N)
+sh /work/rt26/op.sh import > /tmp/measure.out 2>&1 &
+pid=$!
+peak=0; hwm=0; killed=no
+while kill -0 $pid 2>/dev/null; do
+    r=$(grep rchar /proc/$pid/io 2>/dev/null | cut -d' ' -f2)
+    [ -n "$r" ] && peak=$r
+    h=$(grep VmHWM /proc/$pid/status 2>/dev/null | awk '{print $2}')
+    [ -n "$h" ] && hwm=$h
+    now=$(date +%s.%N)
+    if python3 -c "import sys; sys.exit(0 if $now-$s > $limit else 1)"; then
+        kill $pid; killed=yes; break
+    fi
+    sleep 0.2
+done
+wait $pid; code=$?
+e=$(date +%s.%N)
+python3 -c "print('$label: exit $code, killed $killed, %.2f s, read %.1f MB, peak %.0f MB' % ($e-$s, $peak/1e6, $hwm/1e3))"
+tail -3 /tmp/measure.out | head -2
+rm -rf .opalro

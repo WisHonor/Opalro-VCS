@@ -1,0 +1,31 @@
+journal left: 147 bytes
+Saved nztt "Moved on" on side  (1 file)
+fingerprint of the first save: da3ecf3c
+=== journal: b2
+[start --preset custom] exit 1, files same: error: This folder is already an Opalro project.
+[import] exit 1, files same: error: This folder is already an Opalro project. Picking up new Git commits comes in a later version.
+[discard a.txt] exit 1, files same: error: A switch between saves was stopped here, and Opalro can't finish it: .opalro/state/journal was made for another save than the one the project i
+[goto da3ecf3c] exit 1, files same: error: A switch between saves was stopped here, and Opalro can't finish it: .opalro/state/journal was made for another save than the one the project i
+[resolve --keep mine a.txt] exit 1, files same: error: A switch between saves was stopped here, and Opalro can't finish it: .opalro/state/journal was made for another save than the one the project i
+[resolve --copy theirs a.txt --to /tmp/j1-copy-b2] exit 1, files same: error: a.txt isn't in conflict, so nothing was recorded.
+[setup --upgrade --yes] exit 0, files same: Nothing to turn on: this project has every feature this version of Opalro knows.
+[setup] exit 0, files same: 
+[status] exit 0, files same: warning: A switch between saves was stopped here, and Opalro can't finish it: .opalro/state/journal was made for another save than the one the project
+[changes] exit 0, files same: warning: A switch between saves was stopped here, and Opalro can't finish it: .opalro/state/journal was made for another save than the one the project
+[who a.txt] exit 0, files same: warning: A switch between saves was stopped here, and Opalro can't finish it: .opalro/state/journal was made for another save than the one the project
+[show] exit 0, files same: warning: A switch between saves was stopped here, and Opalro can't finish it: .opalro/state/journal was made for another save than the one the project
+[verify] exit 0, files same: warning: A switch between saves was stopped here, and Opalro can't finish it: .opalro/state/journal was made for another save than the one the project
+=== journal: zero
+[start --preset custom] exit 1, files same: error: This folder is already an Opalro project.
+[import] exit 1, files same: error: This folder is already an Opalro project. Picking up new Git commits comes in a later version.
+[discard a.txt] exit 1, files same: error: A switch between saves was stopped here, and Opalro can't finish it: .opalro/state/journal can't be read (the data ended before the record was 
+[goto da3ecf3c] exit 1, files same: error: A switch between saves was stopped here, and Opalro can't finish it: .opalro/state/journal can't be read (the data ended before the record was 
+[resolve --keep mine a.txt] exit 1, files same: error: A switch between saves was stopped here, and Opalro can't finish it: .opalro/state/journal can't be read (the data ended before the record was 
+[resolve --copy theirs a.txt --to /tmp/j1-copy-zero] exit 1, files same: error: a.txt isn't in conflict, so nothing was recorded.
+[setup --upgrade --yes] exit 0, files same: Nothing to turn on: this project has every feature this version of Opalro knows.
+[setup] exit 0, files same: 
+[status] exit 0, files same: warning: A switch between saves was stopped here, and Opalro can't finish it: .opalro/state/journal can't be read (invalid value: not a switch journal
+[changes] exit 0, files same: warning: A switch between saves was stopped here, and Opalro can't finish it: .opalro/state/journal can't be read (invalid value: not a switch journal
+[who a.txt] exit 0, files same: warning: A switch between saves was stopped here, and Opalro can't finish it: .opalro/state/journal can't be read (invalid value: not a switch journal
+[show] exit 0, files same: warning: A switch between saves was stopped here, and Opalro can't finish it: .opalro/state/journal can't be read (invalid value: not a switch journal
+[verify] exit 0, files same: warning: A switch between saves was stopped here, and Opalro can't finish it: .opalro/state/journal can't be read (invalid value: not a switch journal

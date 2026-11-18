@@ -1,0 +1,82 @@
+== file-to-full-folder
+side:  . ./k.txt ./p ./p/q 
+goto main ->     1 file written, 2 removed.
+  disk: . ./k.txt ./p 
+goto side --json -> json written 1 removed 1
+  disk: . ./k.txt ./p ./p/q 
+undo -> Undid goto: back on main at rvmw, 1 file written, 2 removed.
+  disk: . ./k.txt ./p 
+redo -> Redid goto: on side at tyxv again, 1 file written, 1 removed.
+  disk: . ./k.txt ./p ./p/q 
+== link-to-empty-folder
+side:  . ./k.txt ./p 
+goto main ->     1 file written, 1 removed.
+  disk: . ./k.txt ./p 
+goto side --json -> json written 0 removed 1
+  disk: . ./k.txt ./p 
+undo -> Undid goto: back on main at zwpl, 1 file written, 1 removed.
+  disk: . ./k.txt ./p 
+redo -> Redid goto: on side at qunm again, 1 file removed.
+  disk: . ./k.txt ./p 
+== empty-folder-to-link
+side:  . ./k.txt ./p 
+goto main ->     1 file removed.
+  disk: . ./k.txt ./p 
+goto side --json -> json written 1 removed 1
+  disk: . ./k.txt ./p 
+undo -> Undid goto: back on main at osro, 1 file removed.
+  disk: . ./k.txt ./p 
+redo -> Redid goto: on side at mzpm again, 1 file written, 1 removed.
+  disk: . ./k.txt ./p 
+== file-to-link
+side:  . ./k.txt ./p 
+goto main ->     1 file written.
+  disk: . ./k.txt ./p 
+goto side --json -> json written 1 removed 0
+  disk: . ./k.txt ./p 
+undo -> Undid goto: back on main at xrlw, 1 file written.
+  disk: . ./k.txt ./p 
+redo -> Redid goto: on side at wqps again, 1 file written.
+  disk: . ./k.txt ./p 
+== deep-folder-to-file
+side:  . ./a ./k.txt 
+goto main ->     1 file written, 1 removed.
+  disk: . ./a ./a/b ./a/b/c ./k.txt 
+goto side --json -> json written 1 removed 3
+  disk: . ./a ./k.txt 
+undo -> Undid goto: back on main at koso, 1 file written, 1 removed.
+  disk: . ./a ./a/b ./a/b/c ./k.txt 
+redo -> Redid goto: on side at ztlo again, 1 file written, 3 removed.
+  disk: . ./a ./k.txt 
+== file-to-deep-folder
+side:  . ./a ./a/b ./a/b/c ./k.txt 
+goto main ->     1 file written, 3 removed.
+  disk: . ./a ./k.txt 
+goto side --json -> json written 1 removed 1
+  disk: . ./a ./a/b ./a/b/c ./k.txt 
+undo -> Undid goto: back on main at nqst, 1 file written, 3 removed.
+  disk: . ./a ./k.txt 
+redo -> Redid goto: on side at wxuz again, 1 file written, 1 removed.
+  disk: . ./a ./a/b ./a/b/c ./k.txt 
+== link-to-folder-to-file
+side:  . ./k.txt ./p ./t ./t/x 
+goto main ->     1 file written.
+  disk: . ./k.txt ./p ./t ./t/x 
+goto side --json -> json written 1 removed 0
+  disk: . ./k.txt ./p ./t ./t/x 
+undo -> Undid goto: back on main at skwt, 1 file written.
+  disk: . ./k.txt ./p ./t ./t/x 
+redo -> Redid goto: on side at lttk again, 1 file written.
+  disk: . ./k.txt ./p ./t ./t/x 
+== discard
+before: . ./e ./p ./p/n 
+discard ->      Safety copies of the 2 that held unsaved work were kept. 
+  disk: . ./e ./e/f ./p 
+undo -> Undid discard: 2 files back, 3 removed.
+  disk: . ./e ./p ./p/n 
+== shelf
+before: . ./p 
+shelf -> Shelved your unsaved changes in 1 file on shelf 1.
+  disk: . ./p 
+unshelf -> Unshelved shelf 1 "Shelved": 1 file removed.
+  disk: . ./p 

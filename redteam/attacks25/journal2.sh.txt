@@ -1,0 +1,23 @@
+#!/bin/sh
+# A finished goto's journal, left by a lost removal, back after an `undo` took the project to the
+# goto's own starting entry: head is the journal's `from` again, so it reads as a switch to
+# finish. Does the next command redo the goto the person undid?
+export OPALRO_BIN=${OPALRO_BIN:-/tmp/td/debug/opalro}
+op() { sh /work/rt26/op.sh "$@"; }
+base=/tmp/j2; rm -rf $base; mkdir -p $base/p; cd $base/p
+op start --preset custom >/dev/null
+printf '1\n' > a.txt; op save "A" >/dev/null
+op line new side >/dev/null; printf 'side\n' > b.txt; op save "On side" >/dev/null
+op goto main >/dev/null
+echo "head before the goto: $(cut -c1-12 .opalro/state/head)"
+OPALRO_FAULT_FAIL=journal:removing op goto side >/dev/null 2>&1
+cp .opalro/state/journal $base/journal.bytes
+echo "head after the goto:  $(cut -c1-12 .opalro/state/head); b.txt there: $(test -f b.txt && echo yes || echo no)"
+op undo 2>&1 | head -1; op undo 2>&1 | head -1
+echo "head after undo:      $(cut -c1-12 .opalro/state/head); b.txt there: $(test -f b.txt && echo yes || echo no); journal: $(test -f .opalro/state/journal && echo yes || echo no)"
+cp $base/journal.bytes .opalro/state/journal
+printf 'mine\n' > n.txt
+op status 2>&1 | head -3
+op line new other 2>&1 | head -4
+echo "head after line new:  $(cut -c1-12 .opalro/state/head); b.txt there: $(test -f b.txt && echo yes || echo no); n.txt: $(cat n.txt)"
+op status 2>&1 | head -4

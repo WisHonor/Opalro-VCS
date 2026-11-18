@@ -1,0 +1,22 @@
+   Compiling opal-vcs v0.2.0 (/work/crates/opal-vcs)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.79s
+     Running tests/rt25_explore.rs (/tmp/td/debug/deps/rt25_explore-57acde01a81e1175)
+
+running 2 tests
+test rt25_lfs_notes ... Imported 2 commits from Git: 1 line, 0 tags.
+
+    Brought in 3 Git LFS files (47 B) from .git/lfs/objects.
+    2 commits hold Git LFS files, so a later export can recreate their Git IDs only by turning those files back into pointers.
+    1 Git LFS pointer isn't in the exact form Git LFS writes, so a later export can't recreate it as it was.
+
+You're on line main.
+
+notes: [MoveNote { from: "a.bin", to: "b.bin" }, MoveNote { from: "c.bin", to: "d.bin" }, MoveNote { from: "e.txt", to: "f.txt" }]
+2 saves, 3 notes checked
+ok
+test rt25_notes_random ... 150 histories, 0 refused, 4500 saves, 1066 notes checked
+ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 24.39s
+
+done-0

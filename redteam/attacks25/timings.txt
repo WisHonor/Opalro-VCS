@@ -1,0 +1,62 @@
+RT26 timings, 2026-11-18, in the no-network sandbox (4 CPUs, 4 GB), one import at a time.
+Release builds in the sandbox: milestone 11 (fd0eb95) in /tmp/t11, v0.2 (main, 3f71add) in
+/tmp/t02. measure.sh gives the wall time, the bytes read (rchar) and the peak memory (VmHWM).
+
+packbuy.py <dir> <packs> <buy> <w> <k> <ln> <n> <commits>: every object loose; two top trees,
+A and B, taken in turns; each holds `buy` one-file trees (the same in both) and w folders that
+reach, k levels down under names of ln letters, a folder of n files that all differ between A
+and B. packs > 0 adds that many packs of one blob each (fillpacks.py).
+
+  repository                                   milestone 11                 v0.2
+  pb0: 0 packs, 0 buy, 100 5 760 99000, 4       stopped, 6.65 s (comparing)  0.22 s
+  pb1: 4095 packs, 3000 buy, same, 40 commits   imported, 135.74 s           0.87 s
+  pb2: pb1 without the 4095 packs               stopped, 5.78 s (comparing)  0.43 s
+
+So 4,095 packs of one blob each (about 5 MB of files) turned a stop at 5.8 s into an import
+that compares 3.4 s for every commit: by the counts, pb1's allowance is about 405 GB and each
+comparison spends about 634 MB, so it stops only after about 640 commits, about 36 minutes.
+  pb3: as pb1 with 100 buy                       stopped, 83.96 s, "15 GiB"    -
+
+pb3 stopped where the counts say: 32 x (115 trees x (4,096 searches + 1) KiB) is about 15 GiB,
+about 23 comparisons of 634 MB at 3.4 s each. So pb1 (3,000 buy) stops after about 640 commits
+(about 36 minutes), and 30,000 buy would give about 6,400 commits (about 6 hours), the
+repository growing by 30,000 loose trees of about 50 bytes.
+
+widedeep.py <dir> <n> <depth>: two commits; a folder `depth` bytes down holds n folders, each
+holding x (blob A, then blob B). widenest.py <dir> <n> <nest> <depth>: the same nested `nest`
+deep under `z`. Peak is VmHWM.
+
+  repository                                   milestone 11                 v0.2
+  wd250: n 250,000, depth 4,085 (1.4 MB)        1.95 s, peak 1,081 MB         0.43 s, peak 91 MB
+  wd1m: n 1,000,000, depth 4,085 (4.9 MB)       killed (137) after 18.16 s    1.96 s, peak 312 MB
+                                                at 4,153 MB, the sandbox's 4 GB
+  wn: n 250,000, nest 3, depth 4,075 (3.8 MB)   5.44 s, peak 3,147 MB         1.29 s, peak 179 MB
+
+notes16.py <dir> <n> <commits>: two top trees taken in turns, n files with contents of their
+own renamed back and forth at paths of 3,835 bytes, so every save holds as many notes as a save
+may (16 MiB of paths).
+
+  n16: n 8,000, 50 commits                      4.03 s (history after: 0.80 s)  0.65 s
+
+cachemem.py <dir> <n>: one commit, n folders each a distinct tree holding only `.git`, so each
+costs the comparison's cache its least, 64.
+
+  cm: n 300,000                                 13.73 s, peak 305 MB          15.04 s, peak 202 MB
+
+Debug builds of the proofs (sandbox, /tmp/td): redteam26 failed in 4.47 s; redteam26_platforms
+failed in 7.41 s at 522 MiB; its sanity run (rt26_sanity.rs.txt: the same folders at the top)
+passed in 13.21 s. RT25's explorer (attacks24/rt25_explore.rs.txt, RT25_SEEDS=150 RT25_OPS=14)
+passed in 24.39 s: 150 histories, 4,500 saves, 1,066 notes (explore.out.txt).
+
+The small trees' share of the base, without extra packs (the fixer's first doubt):
+  pb4: 0 packs, 100,000 buy, 100 5 760 97000,    stopped, 23.05 s, "4 GiB"     imported, 6.72 s
+       40 commits (97,000 files, so a save stays within 10,000,000 entries)
+So 100,000 small trees bought about 3.4 GB of comparing, about 16 s here: about 2.4 times
+v0.2's whole import, well within 32 times what reading those trees took.
+
+RT25's repositories on this code:
+  RT25-1's proof (redteam25_platforms.rs), debug   passed in 3.96 s (failed at 48.7 s before)
+  RT25-2's proof (redteam25.rs), debug             passed in 0.25 s
+  padpack.py /tmp/pf20 20 4000000 fixed, release   imported, 29.81 s (RT25: 261.09 s; v0.2
+                                                   29.84 s, the converter's own inflating, S1)
+pb1's 4,095 filler packs: 8,190 files, 5.2 MB of data (33 MB on disk in 4 KB blocks).

@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+"""A Git repository whose commits rename the same files back and forth at long paths, so every
+save the import makes holds as many move notes as a save may: two top trees, A and B, taken in
+turns. Each reaches, `k` levels down under names of 765 letters (and one of `last` letters), a
+folder holding `n` files with contents of their own: in A named x0000.., in B y0000.. . So each
+commit renames all n, at paths of about k * 766 + last + 6 bytes.
+Usage: notes16.py <dir> <n> <commits> [k] [last]"""
+import hashlib, os, subprocess, sys, zlib
+
+root, n, commits = sys.argv[1], int(sys.argv[2]), int(sys.argv[3])
+k = int(sys.argv[4]) if len(sys.argv) > 4 else 5
+last = int(sys.argv[5]) if len(sys.argv) > 5 else 0
+git = os.path.join(root, ".git")
+subprocess.run(["git", "init", "-q", "-b", "main", root], check=True)
+objects = os.path.join(git, "objects")
+
+
+def put(kind, data):
+    raw = b"%s %d\0" % (kind, len(data)) + data
+    oid = hashlib.sha1(raw).digest()
+    hexid = oid.hex()
+    folder = os.path.join(objects, hexid[:2])
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, hexid[2:])
+    if not os.path.exists(path):
+        with open(path, "wb") as f:
+            f.write(zlib.compress(raw))
+    return oid
+
+
+blobs = [put(b"blob", b"%d\n" % i) for i in range(n)]
+levels = [b"%d" % i + b"a" * 764 for i in range(k)] + ([b"z" * last] if last else [])
+
+
+def side(letter):
+    t = put(b"tree", b"".join(b"100644 " + letter + b"%04d\0" % i + blobs[i] for i in range(n)))
+    for name in reversed(levels):
+        t = put(b"tree", b"40000 " + name + b"\0" + t)
+    return t
+
+
+tops = [side(b"x"), side(b"y")]
+parent = None
+for i in range(commits):
+    text = b"tree %s\n" % tops[i % 2].hex().encode()
+    if parent:
+        text += b"parent %s\n" % parent.hex().encode()
+    text += b"author T <t@e> %d +0000\ncommitter T <t@e> %d +0000\n\nc%d\n" % (
+        1000000000 + i, 1000000000 + i, i)
+    parent = put(b"commit", text)
+with open(os.path.join(git, "refs", "heads", "main"), "w") as f:
+    f.write(parent.hex() + "\n")
+print("written", root, "path bytes", sum(len(l) + 1 for l in levels) + 5)

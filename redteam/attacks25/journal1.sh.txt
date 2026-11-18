@@ -1,0 +1,39 @@
+#!/bin/sh
+# A hostile switch journal (item 6): one of 0 bytes, and one written back after a later command
+# (head moved on), put to the commands recovery.rs doesn't run: start, import, discard <path>,
+# goto <fingerprint>, resolve --keep / --copy, setup --upgrade, and the reading ones.
+# Needs the debug build with fault injection: OPALRO_BIN=/tmp/td/debug/opalro.
+export OPALRO_BIN=${OPALRO_BIN:-/tmp/td/debug/opalro}
+op() { sh /work/rt26/op.sh "$@"; }
+snap() { (cd "$1" && { find . -path ./.opalro -prune -o -type f -print | sort | xargs -r sha1sum; cat .opalro/state/head; ls .opalro/store 2>/dev/null; cat .opalro/state/journal 2>/dev/null | sha1sum; } | sha1sum | cut -c1-12); }
+base=/tmp/j1; rm -rf $base; mkdir -p $base/p; cd $base/p
+op start --preset custom >/dev/null
+printf '1\n2\n3\n' > a.txt; op save "A" >/dev/null
+op line new side >/dev/null; printf 'side\n' > b.txt; op save "On side" >/dev/null
+op goto main >/dev/null
+OPALRO_FAULT_FAIL=journal:removing op goto side >/dev/null 2>&1
+ls -la .opalro/state/journal | awk '{print "journal left:", $5, "bytes"}'
+cp .opalro/state/journal $base/journal.bytes
+printf 'moved\n' > m.txt; op save "Moved on" 2>&1 | head -2; printf 'mine\n' > n.txt
+cp $base/journal.bytes .opalro/state/journal
+cp -r $base/p $base/b2
+: > .opalro/state/journal
+cp -r $base/p $base/zero
+fp=$(cd $base/b2 && op history --json 2>/dev/null | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d["saves"][-1]["id"][:8])' 2>/dev/null)
+echo "fingerprint of the first save: $fp"
+for kind in b2 zero; do
+  echo "=== journal: $kind"
+  for args in "start --preset custom" "import" "discard a.txt" "goto $fp" "resolve --keep mine a.txt" \
+              "resolve --copy theirs a.txt --to /tmp/j1-copy-$kind" "setup --upgrade --yes" "setup" \
+              "status" "changes" "who a.txt" "show" "verify"; do
+    rm -rf $base/run; cp -r $base/$kind $base/run; cd $base/run
+    before=$(snap .)
+    out=$(op $args 2>&1); code=$?
+    after=$(snap .)
+    same=same; [ "$before" = "$after" ] || same=CHANGED
+    first=$(printf '%s' "$out" | grep -m1 -E 'error|warning|Imported|Switched|Nothing|hint' | cut -c1-150)
+    echo "[$args] exit $code, files $same: $first"
+    cd $base
+  done
+done
+ls -la /tmp/j1-copy-* 2>/dev/null

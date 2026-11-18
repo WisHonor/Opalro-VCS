@@ -1,0 +1,16 @@
+head before the goto: fc16f53c43a8
+head after the goto:  01d7f69c787f; b.txt there: yes
+Finished the goto that was stopped, so nothing more was undone. Running opalro undo again takes one more step.
+Undid goto: back on main at nots, 1 file removed.
+head after undo:      81f0c9e423d4; b.txt there: no; journal: no
+On line main at save nots "A"  (just now)
+
+Changed since then (1 file):
+error: A switch between saves was stopped here, and Opalro can't finish it: .opalro/state/journal was made for another save than the one the project is on.
+
+hint: Nothing was changed. Your files are as the stopped switch left them, and `opalro status` shows how they differ from the save the project is on. To go on without finishing the switch, delete .opalro/state/journal: a later `opalro save` then records the folder as it is at that time.
+head after line new:  81f0c9e423d4; b.txt there: no; n.txt: mine
+On line main at save nots "A"  (just now)
+
+Changed since then (1 file):
+

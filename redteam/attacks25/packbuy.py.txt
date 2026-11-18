@@ -1,0 +1,79 @@
+#!/usr/bin/env python3
+"""A Git repository, every object loose, whose comparison is costly and whose converter's reads
+are cheap but counted dear: `packs` packs of one blob each (fillpacks.py) make every loose read
+search them all, 1 KiB of the base for each.
+
+The commits flip between two top trees, A and B. Each holds `buy/`, the same in both: `buy`
+one-file trees, each converted once, buying the comparison 32 KiB for each pack searched. And
+`w` folders d000.. that each hold, `k` levels down under names of `ln` letters, a folder S of `n`
+files: in A every file is the blob X, in B the blob Y, so every file differs, at a path of
+about k * (ln + 1) bytes, and the comparison walks w * n of them in every commit.
+
+Usage: packbuy.py <dir> <packs> <buy> <w> <k> <ln> <n> <commits>"""
+import hashlib, os, subprocess, sys, zlib
+
+root = sys.argv[1]
+packs, buy, w, k, ln, n, commits = (int(a) for a in sys.argv[2:9])
+git = os.path.join(root, ".git")
+subprocess.run(["git", "init", "-q", "-b", "main", root], check=True)
+objects = os.path.join(git, "objects")
+
+
+def put(kind, data):
+    raw = b"%s %d\0" % (kind, len(data)) + data
+    oid = hashlib.sha1(raw).digest()
+    hexid = oid.hex()
+    folder = os.path.join(objects, hexid[:2])
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, hexid[2:])
+    if not os.path.exists(path):
+        with open(path, "wb") as f:
+            f.write(zlib.compress(raw))
+    return oid
+
+
+def tree(entries):
+    """entries: (mode, name, oid); sorted as Git sorts them."""
+    key = lambda e: e[1] + (b"/" if e[0] == b"40000" else b"")
+    return put(b"tree", b"".join(m + b" " + nm + b"\0" + o for m, nm, o in sorted(entries, key=key)))
+
+
+def name36(i, width):
+    digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+    s = ""
+    for _ in range(width):
+        s = digits[i % 36] + s
+        i //= 36
+    return s.encode()
+
+
+x, y = put(b"blob", b"X\n"), put(b"blob", b"Y\n")
+z = put(b"blob", b"Z\n")
+buys = [tree([(b"100644", b"x" + name36(i, 4), z)]) for i in range(buy)]
+buy_tree = tree([(b"40000", b"b" + name36(i, 4), t) for i, t in enumerate(buys)]) if buy else None
+
+
+def side(blob):
+    s = tree([(b"100644", b"f" + name36(j, 4), blob) for j in range(n)])
+    for level in range(k):
+        s = tree([(b"40000", (b"%d" % level) + b"a" * (ln - 1), s)])
+    top = [(b"40000", b"d%04d" % i, s) for i in range(w)]
+    if buy_tree:
+        top.append((b"40000", b"buy", buy_tree))
+    return tree(top)
+
+
+tops = [side(x), side(y)]
+parent = None
+for i in range(commits):
+    text = b"tree %s\n" % tops[i % 2].hex().encode()
+    if parent:
+        text += b"parent %s\n" % parent.hex().encode()
+    when = 1000000000 + i
+    text += b"author T <t@e> %d +0000\ncommitter T <t@e> %d +0000\n\nc%d\n" % (when, when, i)
+    parent = put(b"commit", text)
+with open(os.path.join(git, "refs", "heads", "main"), "w") as f:
+    f.write(parent.hex() + "\n")
+if packs:
+    subprocess.run(["python3", "/work/rt26/fillpacks.py", objects, str(packs)], check=True)
+print("written", root)
