@@ -6,6 +6,8 @@ The decisions are records [193](../decisions/193-the-next-version-starts-with-wh
 
 ## Please confirm
 
+**Reviewed with the owner on 2026-11-18 ([decision 198](../decisions/198-the-owners-review-of-milestone-11.md)).** The owner took Claude's recommendation on the first four: each is kept as built. Items 8 and 9 led to two more questions, settled the same way: the flush after the journal is removed stays, and Git's rule for `who` at a combine is taken in a later version, through a decision of its own. Items 5, 6, 7 and 10 were not put one by one; they stand until the owner reverses one with a new record.
+
 The first four carry a real choice; the rest keep what the owner already asked for, in the way set out.
 
 1. **An import now gives different fingerprints than 0.2 did** ([195](../decisions/195-the-import-records-the-renames-it-is-sure-of.md)). A rename noted in a save is part of the save's fingerprint, so every save from the first commit that renames a file without changing it gets a new one; the change IDs people see stay. Each version imports the same repository the same way every time; projects already imported keep their saves. The other choice was a separate list of renames beside the saves, a second place for one fact and a new thing on disk after format 1 freezes.
