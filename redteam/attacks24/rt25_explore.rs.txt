@@ -1,0 +1,345 @@
+//! Red-team session RT25 (milestone 11): exploring tests. Not part of the suite.
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+#![allow(dead_code)]
+
+mod support;
+use std::collections::{BTreeMap, BTreeSet};
+use std::path::Path;
+
+use opal_core::id::Id;
+use opal_core::listing::{Entry, EntryKind};
+use opal_core::repo::Repository;
+use support::{Env, git_with_input, text};
+
+/// A small deterministic generator.
+struct Rng(u64);
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+    fn below(&mut self, n: usize) -> usize {
+        (self.next() % n as u64) as usize
+    }
+    fn chance(&mut self, percent: u64) -> bool {
+        self.next() % 100 < percent
+    }
+}
+
+/// Every entry of a save's tree, by path, folders included.
+fn flat(repo: &Repository, root: Id) -> BTreeMap<String, Entry> {
+    let store = repo.store();
+    let mut out = BTreeMap::new();
+    let mut todo = vec![(root, String::new())];
+    while let Some((id, at)) = todo.pop() {
+        for e in store.listing(&id).unwrap().entries() {
+            let path = if at.is_empty() {
+                e.name.clone()
+            } else {
+                format!("{at}/{}", e.name)
+            };
+            if e.kind == EntryKind::Folder {
+                todo.push((e.id, path.clone()));
+            }
+            out.insert(path, e.clone());
+        }
+    }
+    out
+}
+
+fn is_file(e: Option<&Entry>) -> Option<&Entry> {
+    e.filter(|e| matches!(e.kind, EntryKind::File | EntryKind::Executable) && e.size > 0)
+}
+
+/// `moves::true_of`, written again from its words.
+fn true_of(before: &BTreeMap<String, Entry>, after: &BTreeMap<String, Entry>, from: &str, to: &str) -> bool {
+    let Some(left) = is_file(before.get(from)) else {
+        return false;
+    };
+    after.get(from).is_none()
+        && before.get(to).is_none()
+        && is_file(after.get(to)).is_some_and(|e| e.id == left.id)
+}
+
+/// The save's rule from its words: contents that left exactly one path (holding nothing after)
+/// and arrived at exactly one path (holding nothing before).
+fn rule(before: &BTreeMap<String, Entry>, after: &BTreeMap<String, Entry>) -> BTreeSet<(String, String)> {
+    let mut left: BTreeMap<Id, Vec<String>> = BTreeMap::new();
+    let mut arrived: BTreeMap<Id, Vec<String>> = BTreeMap::new();
+    for (p, e) in before {
+        if let Some(f) = is_file(Some(e))
+            && after.get(p).is_none()
+        {
+            left.entry(f.id).or_default().push(p.clone());
+        }
+    }
+    for (p, e) in after {
+        if let Some(f) = is_file(Some(e))
+            && before.get(p).is_none()
+        {
+            arrived.entry(f.id).or_default().push(p.clone());
+        }
+    }
+    let mut out = BTreeSet::new();
+    for (id, froms) in &left {
+        if froms.len() == 1
+            && let Some(tos) = arrived.get(id)
+            && tos.len() == 1
+        {
+            out.insert((froms[0].clone(), tos[0].clone()));
+        }
+    }
+    out
+}
+
+/// Checks every save reachable from the project's lines: each note true of its save, and the
+/// notes exactly those the rule gives. Returns (saves, notes).
+fn check_notes(env: &Env, why: &str) -> (usize, usize) {
+    let (repo, state) = env.state();
+    let mut todo: Vec<Id> = state.lines.values().copied().collect();
+    let mut seen = BTreeSet::new();
+    let (mut saves, mut notes) = (0, 0);
+    while let Some(id) = todo.pop() {
+        if !seen.insert(id) {
+            continue;
+        }
+        saves += 1;
+        let save = repo.store().save(&id, false).unwrap();
+        todo.extend(save.parents.iter().copied());
+        let after = flat(&repo, save.root);
+        let before = match save.parents.first() {
+            Some(p) => flat(&repo, repo.store().save(p, false).unwrap().root),
+            None => BTreeMap::new(),
+        };
+        let ours: BTreeSet<(String, String)> = (save.move_notes.iter())
+            .map(|n| (n.from.clone(), n.to.clone()))
+            .collect();
+        notes += ours.len();
+        for (from, to) in &ours {
+            assert!(
+                true_of(&before, &after, from, to),
+                "{why}: note {from:?} -> {to:?} is false of save {} ({})",
+                id.to_hex(),
+                save.message
+            );
+        }
+        let want = rule(&before, &after);
+        assert_eq!(ours, want, "{why}: save {} ({})", id.to_hex(), save.message);
+    }
+    (saves, notes)
+}
+
+/// The lines' saves after an import of a copy of `env`'s Git repository.
+fn import_again(env: &Env) -> BTreeMap<String, Id> {
+    let other = Env::empty();
+    support::copy_dir(&env.root().join(".git"), &other.root().join(".git"));
+    other.import();
+    other.state().1.lines
+}
+
+const NAMES: &[&str] = &[
+    "a", "b", "A", "x.txt", "X.TXT", "\u{e9}", "e\u{301}", "d", "D", ".git", ".opalro", ".GIT",
+    "git~1", "sub dir", "k", "\u{202e}rtl",
+];
+const CONTENTS: &[&str] = &["", "one\n", "two\n", "three\n", "four\n", "five\n"];
+
+type State = BTreeMap<String, (u32, usize)>;
+
+fn put(state: &mut State, path: String, what: (u32, usize)) {
+    // No file above it and nothing below it.
+    let parts: Vec<&str> = path.split('/').collect();
+    for i in 1..parts.len() {
+        state.remove(&parts[..i].join("/"));
+    }
+    let below = format!("{path}/");
+    state.retain(|p, _| !p.starts_with(&below));
+    state.insert(path, what);
+}
+
+fn random_path(r: &mut Rng) -> String {
+    let depth = 1 + r.below(3);
+    let mut parts: Vec<&str> = (0..depth).map(|_| NAMES[r.below(NAMES.len())]).collect();
+    // `.opalro` at the top of the commit Git is on refuses the import.
+    if parts[0] == ".opalro" {
+        parts[0] = "top";
+    }
+    parts.join("/")
+}
+
+fn mutate(r: &mut Rng, state: &mut State) {
+    let most: usize = std::env::var("RT25_OPS").ok().and_then(|v| v.parse().ok()).unwrap_or(4);
+    for _ in 0..1 + r.below(most) {
+        let keys: Vec<String> = state.keys().cloned().collect();
+        match r.below(10) {
+            0..=2 => {
+                let mode = [0o100644, 0o100644, 0o100644, 0o100755, 0o120000, 0o160000][r.below(6)];
+                put(state, random_path(r), (mode, r.below(CONTENTS.len())));
+            }
+            3 if !keys.is_empty() => {
+                state.remove(&keys[r.below(keys.len())]);
+            }
+            4..=6 if !keys.is_empty() => {
+                let from = keys[r.below(keys.len())].clone();
+                let what = state.remove(&from).unwrap();
+                put(state, random_path(r), what);
+            }
+            7 if !keys.is_empty() => {
+                let from = keys[r.below(keys.len())].clone();
+                let what = state[&from];
+                put(state, random_path(r), what);
+            }
+            8 if !keys.is_empty() => {
+                // A folder moved whole.
+                let from = &keys[r.below(keys.len())];
+                if let Some((folder, _)) = from.rsplit_once('/') {
+                    let to = random_path(r);
+                    let moved: Vec<(String, (u32, usize))> = (state.iter())
+                        .filter(|(p, _)| p.starts_with(&format!("{folder}/")))
+                        .map(|(p, w)| (format!("{to}/{}", &p[folder.len() + 1..]), *w))
+                        .collect();
+                    state.retain(|p, _| !p.starts_with(&format!("{folder}/")));
+                    for (p, w) in moved {
+                        put(state, p, w);
+                    }
+                }
+            }
+            _ => {
+                if !keys.is_empty() {
+                    let at = keys[r.below(keys.len())].clone();
+                    let (mode, _) = state[&at];
+                    state.insert(at, (mode, r.below(CONTENTS.len())));
+                }
+            }
+        }
+    }
+}
+
+fn gitlink(content: usize) -> String {
+    format!("{:040x}", 0xabc0_0000_u64 + content as u64)
+}
+
+/// A fast-import stream of a random history on `main` and `side`, with merges both ways.
+fn history(seed: u64, commits: usize) -> String {
+    let mut r = Rng(seed | 1);
+    let mut s = String::new();
+    for (i, c) in CONTENTS.iter().enumerate() {
+        s += &format!("blob\nmark :{}\ndata {}\n{}\n", i + 1, c.len(), c);
+    }
+    let mut mark = 100;
+    let mut heads: [Option<(usize, State)>; 2] = [None, None];
+    for n in 0..commits {
+        let b = if heads[0].is_none() || r.chance(60) { 0 } else { 1 };
+        let mut state = match (&heads[b], &heads[0]) {
+            (Some((_, st)), _) => st.clone(),
+            (None, Some((_, st))) => st.clone(),
+            _ => State::new(),
+        };
+        let other = 1 - b;
+        let merging = heads[b].is_some() && heads[other].is_some() && r.chance(25);
+        if merging {
+            let theirs = heads[other].as_ref().unwrap().1.clone();
+            for (p, w) in theirs {
+                if r.chance(50) {
+                    put(&mut state, p, w);
+                }
+            }
+        }
+        mutate(&mut r, &mut state);
+        mark += 1;
+        let branch = ["main", "side"][b];
+        s += &format!("commit refs/heads/{branch}\nmark :{mark}\n");
+        s += &format!("committer T <t@e> {} +0000\ndata 4\n{n:03}\n", 1_000_000 + n);
+        match (&heads[b], &heads[0]) {
+            (Some((m, _)), _) => s += &format!("from :{m}\n"),
+            (None, Some((m, _))) => s += &format!("from :{m}\n"),
+            _ => {}
+        }
+        if merging {
+            s += &format!("merge :{}\n", heads[other].as_ref().unwrap().0);
+        }
+        s += "deleteall\n";
+        for (p, (mode, c)) in &state {
+            let quoted = format!("\"{}\"", p.replace('\\', "\\\\").replace('"', "\\\""));
+            if *mode == 0o160000 {
+                s += &format!("M 160000 {} {quoted}\n", gitlink(*c));
+            } else {
+                s += &format!("M {mode:o} :{} {quoted}\n", c + 1);
+            }
+        }
+        s += "\n";
+        heads[b] = Some((mark, state));
+    }
+    s += "done\n";
+    s
+}
+
+#[test]
+fn rt25_notes_random() {
+    let seeds: u64 = std::env::var("RT25_SEEDS").ok().and_then(|v| v.parse().ok()).unwrap_or(40);
+    let (mut saves, mut notes, mut refused) = (0, 0, 0);
+    for seed in 1..=seeds {
+        let env = Env::new();
+        let stream = history(seed * 7919, 30);
+        let out = git_with_input(env.root(), &["fast-import", "--quiet"], stream.as_bytes());
+        assert!(out.status.success(), "{}", text(&out.stderr));
+        let run = env.opalro().arg("import").output().unwrap();
+        if run.status.code() != Some(0) {
+            refused += 1;
+            println!("seed {seed}: import refused: {}", text(&run.stderr));
+            continue;
+        }
+        let (s, n) = check_notes(&env, &format!("seed {seed}"));
+        saves += s;
+        notes += n;
+        assert_eq!(import_again(&env), env.state().1.lines, "seed {seed}: a second import differs");
+    }
+    println!("{seeds} histories, {refused} refused, {saves} saves, {notes} notes checked");
+}
+
+/// A Git LFS file renamed, one swapped for the bytes it stands for, and an LF pointer swapped for
+/// a CRLF one to the same object: each is noted by what it holds, and every note is true.
+#[test]
+fn rt25_lfs_notes() {
+    use opal_core::git::craft::lfs_pointer_to;
+    let env = Env::new();
+    let mut objects = Vec::new();
+    let mut pointer = |contents: &str| {
+        let (p, path) = lfs_pointer_to(contents.as_bytes());
+        objects.push((path, contents.to_owned()));
+        p
+    };
+    let (a, c, e) = (pointer("alpha contents\n"), pointer("gamma contents\n"), pointer("epsilon contents\n"));
+    let e_crlf = e.replace('\n', "\r\n");
+    for (path, contents) in &objects {
+        let at = env.root().join(".git").join(path);
+        std::fs::create_dir_all(at.parent().unwrap()).unwrap();
+        std::fs::write(at, contents).unwrap();
+    }
+    let blob = |mark: u32, bytes: &str| format!("blob\nmark :{mark}\ndata {}\n{bytes}\n", bytes.len());
+    let mut s = String::new();
+    s += &blob(1, &a);
+    s += &blob(2, &c);
+    s += &blob(3, &e);
+    s += &blob(4, "gamma contents\n");
+    s += &blob(5, &e_crlf);
+    s += &blob(6, "*.bin filter=lfs diff=lfs merge=lfs -text\n*.txt filter=lfs diff=lfs merge=lfs -text\n");
+    s += "commit refs/heads/main\nmark :10\ncommitter T <t@e> 1000000 +0000\ndata 3\none\n";
+    s += "M 100644 :6 .gitattributes\nM 100644 :1 a.bin\nM 100644 :2 c.bin\nM 100644 :3 e.txt\n\n";
+    s += "commit refs/heads/main\nmark :11\ncommitter T <t@e> 1000001 +0000\ndata 3\ntwo\nfrom :10\n";
+    s += "D a.bin\nM 100644 :1 b.bin\nD c.bin\nM 100644 :4 d.bin\nD e.txt\nM 100644 :5 f.txt\n\n";
+    s += "done\n";
+    let out = git_with_input(env.root(), &["fast-import", "--quiet"], s.as_bytes());
+    assert!(out.status.success(), "{}", text(&out.stderr));
+    let (said, warned) = env.import();
+    println!("{said}{warned}");
+    let (repo, state) = env.state();
+    let save = repo.store().save(&state.lines["main"], false).unwrap();
+    println!("notes: {:?}", save.move_notes);
+    let (saves, notes) = check_notes(&env, "lfs");
+    println!("{saves} saves, {notes} notes checked");
+    assert_eq!(import_again(&env), env.state().1.lines);
+}
+
+fn _unused(_: &Path) {}

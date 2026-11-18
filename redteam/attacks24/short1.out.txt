@@ -1,0 +1,101 @@
+change ids: unkqpmyyntqvvyxwrpmyponwwppnqzwo kkpympkorsqlswxnqsozrlwoqlvvlqrn ummvlymkkxpxpszkulukmuvztqmzvqzv lryunnrkokqxznknromuulvwtprokmsr oywouovmwlurslxourtmxsupoxurlwwn sovmqkllwslvrroxsrmknrxwqlrusuur zkqrullyswvstxnuqkluunvkpzsupyru ptsqosumpnwwxyzqszryproqvussprpo tknpplomtyswmvusowkrmxvmssykumsk
+third save's starts: u um umm ummv
+$ opalro show u
+    error: No save, line or ID matches "u".
+    
+    hint: A save's change ID is typed with at least 4 letters; see your saves with: opalro history
+$ opalro show um
+    error: No save, line or ID matches "um".
+    
+    hint: A save's change ID is typed with at least 4 letters; see your saves with: opalro history
+$ opalro show umm
+    error: No save, line or ID matches "umm".
+    
+    hint: A save's change ID is typed with at least 4 letters; see your saves with: opalro history
+$ opalro show ummv
+    Save ummv "S6"
+    
+        Author       Test <test@example.com>, 2026-11-18 07:19 +00:00  (just now)
+        Saved by     Test <test@example.com>, 2026-11-18 07:19 +00:00  (just now)
+        Line         main
+        After        44f57aa15394 "S5"
+        Fingerprint  0f716a31966738060feb99bf163b249f8a5e9a0668360f933bac0045d3a0606a
+    
+    1 file changed:
+    
+        added  f6.txt  2 B
+$ opalro line new umm
+    Started line umm at save unkq "S8".
+    
+        You're on it: your next save goes on umm.
+$ opalro goto main
+    Switched to line main at save unkq "S8".
+    
+        No file needed changing.
+$ opalro show umm
+    Save unkq "S8"
+    
+        Author       Test <test@example.com>, 2026-11-18 07:19 +00:00  (just now)
+        Saved by     Test <test@example.com>, 2026-11-18 07:19 +00:00  (just now)
+        Line         main
+        After        8c0ef115e851 "S7"
+        Fingerprint  14c01fde58e80240a20e32e8ffaf36da71994459d34d6c60f233e593c8ed0876
+    
+    1 file changed:
+    
+        added  f8.txt  2 B
+$ opalro line delete umm --yes
+    Deleted line umm, which was at save unkq "S8".
+$ opalro show umm
+    error: No save, line or ID matches "umm".
+    
+    hint: A save's change ID is typed with at least 4 letters; see your saves with: opalro history
+$ opalro goto umm
+    error: No save, line or ID matches "umm".
+    
+    hint: A save's change ID is typed with at least 4 letters; see your saves with: opalro history
+$ opalro who f1.txt --save um
+    error: No save, line or ID matches "um".
+    
+    hint: A save's change ID is typed with at least 4 letters; see your saves with: opalro history
+$ opalro history u
+    error: No save, line or ID matches "u".
+    
+    hint: A save's change ID is typed with at least 4 letters; see your saves with: opalro history
+$ opalro combine um
+    error: No save, line or ID matches "um".
+    
+    hint: A save's change ID is typed with at least 4 letters; see your saves with: opalro history
+$ opalro undo --to umm
+    error: "umm" can't name a diary entry: that takes at least 8 hex digits of its ID.
+    
+    hint: opalro undo --list shows the steps undo and redo can take with the start of each entry's ID, and opalro undo --list --all shows every entry.
+$ opalro tag um
+    Tagged save unkq "S8" as um.
+$ opalro show um
+    Save unkq "S8"
+    
+        Author       Test <test@example.com>, 2026-11-18 07:19 +00:00  (just now)
+        Saved by     Test <test@example.com>, 2026-11-18 07:19 +00:00  (just now)
+        Line         main
+        Tags         um
+        After        8c0ef115e851 "S7"
+        Fingerprint  14c01fde58e80240a20e32e8ffaf36da71994459d34d6c60f233e593c8ed0876
+    
+    1 file changed:
+    
+        added  f8.txt  2 B
+$ opalro tag --delete um --yes
+    Deleted tag um, which was at save unkq "S8".
+$ opalro show um
+    error: No save, line or ID matches "um".
+    
+    hint: A save's change ID is typed with at least 4 letters; see your saves with: opalro history
+$ opalro show kkkk
+    error: No save, line or ID matches "kkkk".
+    
+    hint: See your saves with: opalro history
+$ opalro show k\x1b[31m
+    error: No save, line or ID matches "k\x1b[31m".
+    
+    hint: See your saves with: opalro history

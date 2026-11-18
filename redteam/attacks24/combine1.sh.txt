@@ -1,0 +1,30 @@
+#!/bin/sh
+# Imported renames followed by combine and who.
+o() { echo "\$ opalro $*"; sh /work/rt25/op.sh "$@" 2>&1 | sed 's/^/    /'; }
+g() { git -c user.name=T -c user.email=t@e "$@"; }
+rm -rf /tmp/cb1; mkdir /tmp/cb1; cd /tmp/cb1
+g init -q -b main .
+seq 1 10 > x.txt; seq 21 30 > z.txt; g add -A; g commit -qm A
+g checkout -qb side
+sed -i 's/^2$/two on side/' x.txt; g commit -qam "side edits x"
+g mv z.txt w.txt; g commit -qm "side renames z to w"
+g checkout -q main
+g mv x.txt y.txt; g commit -qm "main renames x to y"
+sed -i 's/^25$/twenty-five on main/' z.txt; g commit -qam "main edits z"
+# a rename chain a -> b -> a, and a rename with a new file put back at the old name
+echo chain > a.txt; g add -A; g commit -qm "add a"
+g mv a.txt b.txt; g commit -qm "a to b"
+g mv b.txt a.txt; g commit -qm "b back to a"
+echo old > o.txt; g add -A; g commit -qm "add o"
+g mv o.txt p.txt; echo new > o.txt; g add -A; g commit -qm "o to p, new o"
+o import
+o history --json > /dev/null
+sh /work/rt25/op.sh history 2>&1 | head -12
+o combine side
+cat y.txt | head -3; echo "w.txt: $(sed -n 5p w.txt 2>&1)"; ls
+o status
+o who y.txt
+o who w.txt
+o who a.txt
+o who p.txt
+o who o.txt

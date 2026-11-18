@@ -1,0 +1,68 @@
+$ opalro import
+    Imported 10 commits from Git: 2 lines, 0 tags.
+    
+    You're on line main.
+Saves on line main, newest first:
+
+> oxpo  just now  T  o to p, new o  [main]
+  mltp  just now  T  add o
+  loov  just now  T  b back to a
+  ztzx  just now  T  a to b
+  lusw  just now  T  add a
+  yuvq  just now  T  main edits z
+  sxnz  just now  T  main renames x to y
+  konx  just now  T  A
+$ opalro combine side
+    Combined side into main: save trvn "Combine side into main".
+    
+        2 files written, 1 removed.
+1
+two on side
+3
+w.txt: twenty-five on main
+a.txt
+o.txt
+p.txt
+w.txt
+y.txt
+$ opalro status
+    On line main at save trvn "Combine side into main"  (just now)
+    Nothing changed since then.
+$ opalro who y.txt
+    Each line of y.txt and the save it is from:
+    
+    konx  T     2026-11-18   1 | 1
+    trvn  Test  2026-11-18   2 | two on side
+    konx  T     2026-11-18   3 | 3
+    konx  T     2026-11-18   4 | 4
+    konx  T     2026-11-18   5 | 5
+    konx  T     2026-11-18   6 | 6
+    konx  T     2026-11-18   7 | 7
+    konx  T     2026-11-18   8 | 8
+    konx  T     2026-11-18   9 | 9
+    konx  T     2026-11-18  10 | 10
+$ opalro who w.txt
+    Each line of w.txt and the save it is from:
+    
+    konx  T  2026-11-18   1 | 21
+    konx  T  2026-11-18   2 | 22
+    konx  T  2026-11-18   3 | 23
+    konx  T  2026-11-18   4 | 24
+    yuvq  T  2026-11-18   5 | twenty-five on main
+    konx  T  2026-11-18   6 | 26
+    konx  T  2026-11-18   7 | 27
+    konx  T  2026-11-18   8 | 28
+    konx  T  2026-11-18   9 | 29
+    konx  T  2026-11-18  10 | 30
+$ opalro who a.txt
+    Each line of a.txt and the save it is from:
+    
+    lusw  T  2026-11-18  1 | chain
+$ opalro who p.txt
+    Each line of p.txt and the save it is from:
+    
+    oxpo  T  2026-11-18  1 | old
+$ opalro who o.txt
+    Each line of o.txt and the save it is from:
+    
+    oxpo  T  2026-11-18  1 | new

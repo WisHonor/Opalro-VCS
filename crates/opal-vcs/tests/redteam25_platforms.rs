@@ -1,0 +1,130 @@
+//! Red-team session RT25 (milestone 11): proofs that need Linux's `/proc`.
+#![cfg(target_os = "linux")]
+#![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+mod support;
+use std::path::Path;
+use std::process::Stdio;
+use std::time::Duration;
+
+use opal_core::git::craft::Craft;
+use opal_core::git::{GitId, HashKind, ObjectType, object_id};
+use support::Env;
+
+/// zlib's checksum.
+fn adler32(data: &[u8]) -> u32 {
+    let (mut a, mut b) = (1u32, 0u32);
+    for &byte in data {
+        a = (a + u32::from(byte)) % 65521;
+        b = (b + a) % 65521;
+    }
+    (b << 16) | a
+}
+
+/// A zlib stream that inflates to `data`, with `pad` bytes of empty stored blocks before it.
+fn padded(data: &[u8], pad: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(pad + data.len() + 16);
+    out.extend_from_slice(&[0x78, 0x01]);
+    for _ in 0..pad / 5 {
+        out.extend_from_slice(&[0x00, 0x00, 0x00, 0xff, 0xff]);
+    }
+    let len = u16::try_from(data.len()).unwrap();
+    out.push(0x01);
+    out.extend_from_slice(&len.to_le_bytes());
+    out.extend_from_slice(&(!len).to_le_bytes());
+    out.extend_from_slice(data);
+    out.extend_from_slice(&adler32(data).to_be_bytes());
+    out
+}
+
+/// The bytes of every file below `dir`.
+fn bytes_below(dir: &Path) -> u64 {
+    let mut total = 0;
+    for e in std::fs::read_dir(dir).unwrap() {
+        let e = e.unwrap();
+        let meta = e.metadata().unwrap();
+        total += if meta.is_dir() {
+            bytes_below(&e.path())
+        } else {
+            meta.len()
+        };
+    }
+    total
+}
+
+/// What the process `pid` has read so far, by `/proc`.
+fn read_so_far(pid: u32) -> Option<u64> {
+    let io = std::fs::read_to_string(format!("/proc/{pid}/io")).ok()?;
+    io.lines()
+        .find_map(|l| l.strip_prefix("rchar: "))?
+        .trim()
+        .parse()
+        .ok()
+}
+
+/// RT25-1: the comparison's allowance counts the bytes a Git tree holds, not what reading it
+/// takes. Two one-file trees, each stored loose with 32 MiB of empty deflate blocks before its 29
+/// bytes, and 60 commits that switch between them: each comparison inflates 64 MiB and counts
+/// 58 bytes. The import should read the repository a few times and its allowance, 1 GiB, at
+/// most; it reads 64 MiB more for every commit.
+#[test]
+#[ignore = "RT25-1: the comparison's allowance doesn't count what inflating a tree takes"]
+fn an_import_reads_no_more_than_its_allowance_past_the_repository() {
+    const PAD: usize = 32 << 20;
+    const COMMITS: usize = 60;
+    let env = Env::empty();
+    let git = Craft::new(env.root(), HashKind::Sha1);
+    let mut trees = Vec::new();
+    for body in [b"one\n".as_slice(), b"two\n"] {
+        let blob = git.object(ObjectType::Blob, body);
+        let tree = [b"100644 f\0".as_slice(), blob.as_bytes()].concat();
+        let id = object_id(ObjectType::Tree, &tree, HashKind::Sha1).unwrap();
+        let raw = [format!("tree {}\0", tree.len()).as_bytes(), &tree].concat();
+        git.raw_loose(&id.to_hex(), &padded(&raw, PAD));
+        trees.push(id);
+    }
+    let mut tip: Option<GitId> = None;
+    for i in 0..COMMITS {
+        let mut raw = format!("tree {}\n", trees[i % 2].to_hex());
+        if let Some(parent) = tip {
+            raw += &format!("parent {}\n", parent.to_hex());
+        }
+        raw += "author T <t@e> 1000000000 +0000\ncommitter T <t@e> 1000000000 +0000\n\n";
+        raw += &format!("commit {i}\n");
+        tip = Some(git.commit(raw.as_bytes()));
+    }
+    git.loose_ref("refs/heads/main", &format!("{}\n", tip.unwrap().to_hex()));
+    let repository = bytes_below(&env.root().join(".git"));
+    // Each object read a few times, and the comparison's 1 GiB once over, with room to spare.
+    let most = 4 * repository + (2 << 30);
+
+    let mut child = env
+        .opal_process_in(env.root())
+        .arg("import")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let mut read = 0;
+    let ended = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break Some(status);
+        }
+        read = read_so_far(child.id()).unwrap_or(read);
+        if read > most {
+            child.kill().unwrap();
+            child.wait().unwrap();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(
+        ended.is_some(),
+        "the import of a {} MiB repository of {COMMITS} commits had read {} MiB, past the {} MiB \
+         it should need, and was still going",
+        repository >> 20,
+        read >> 20,
+        most >> 20
+    );
+}

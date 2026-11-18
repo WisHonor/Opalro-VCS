@@ -1,0 +1,22 @@
+#!/bin/sh
+# mkchain.sh <dir> <depth> <commits> <pack|loose|packs> [fillers]
+# A Git repository from chain.py: packed in one pack, loose, or loose beside <fillers> packs.
+set -e
+dir=$1; depth=$2; commits=$3; mode=$4; fillers=${5:-4095}
+rm -rf "$dir"; mkdir -p "$dir"; cd "$dir"
+git init -q -b main .
+python3 /work/rt25/chain.py "$depth" "$commits" | git fast-import --quiet
+case "$mode" in
+pack) git repack -a -d -q ;;
+loose)
+    git repack -a -d -q
+    mv .git/objects/pack/*.pack /tmp/rt25.pack; rm -f .git/objects/pack/*
+    git unpack-objects -q < /tmp/rt25.pack; rm -f /tmp/rt25.pack ;;
+packs)
+    git repack -a -d -q
+    mv .git/objects/pack/*.pack /tmp/rt25.pack; rm -f .git/objects/pack/*
+    git unpack-objects -q < /tmp/rt25.pack; rm -f /tmp/rt25.pack
+    python3 /work/rt25/fillpacks.py .git/objects "$fillers" ;;
+esac
+git checkout -q -f main 2>/dev/null || true
+echo "made $dir: $(git rev-list --count main) commits, $(ls .git/objects/pack | grep -c idx) packs, $(find .git/objects -type f | wc -l) object files"
