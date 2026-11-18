@@ -28,7 +28,7 @@ sha1-checked = { version = "0.10.0", default-features = false }
 sha2 = { version = "0.10.9", default-features = false }
 similar = { version = "2.7.0", default-features = false }
 thiserror = "2.0.21"
-toml = "1.1.8"
+toml = "1.2.1"
 unicode-normalization = "0.1.26"
 # Without the legacy decoders: format 1 holds only frames from zstd 1.0 on.
 zstd = { version = "0.14.3", default-features = false }
