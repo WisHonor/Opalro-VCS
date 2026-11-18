@@ -76,15 +76,14 @@ fn costly_to_compare(env: &Env, packs: usize) {
     }
 }
 
-/// RT26-1: each pack index searched to find a tree the import converts adds 1 KiB to the base,
-/// so buys the comparison 32 KiB, though a search of an index in memory takes tens of
+/// RT26-1: each pack index searched to find a tree the import converted added 1 KiB to the
+/// base, so bought the comparison 32 KiB, though a search of an index in memory takes tens of
 /// nanoseconds. Beside 4,095 packs of one blob each (about 5 MB, nothing of the history in
-/// them), every loose tree read searches 4,096 indexes and buys 128 MiB of comparing. This
-/// history stops at its first comparison without them; with them it imports all 20 commits,
+/// them), every loose tree read searched 4,096 indexes and bought 128 MiB of comparing. This
+/// history stopped at its first comparison without them; with them it imported all 20 commits,
 /// comparing 23 GB. In release, a larger history of the same shape compared 3.4 s for every
 /// commit where v0.2 imported it whole in 0.87 s (`packbuy.py`).
 #[test]
-#[ignore = "RT26-1: pack index searches buy the comparison 32 KiB each, so filler packs lift its stop"]
 fn a_history_the_floor_stops_still_stops_beside_packs_of_one_blob() {
     let import = |packs: usize| {
         let env = Env::empty();

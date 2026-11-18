@@ -70,7 +70,7 @@ const COMPARE_WORK_PER_TREE_BYTE: u64 = 32;
 /// Work counted for each Git tree read, besides its bytes: about what inflating a kilobyte takes.
 const TREE_READ_WORK: u64 = 1 << 10;
 
-/// Work counted for each pack index searched to find a tree.
+/// Work counted for each pack index searched to find a tree the comparison reads again.
 const INDEX_SEARCH_WORK: u64 = 1 << 10;
 
 /// Work counted for each compressed byte a tree's stream takes past what zlib could need: an
@@ -105,13 +105,9 @@ fn compare_allowance(trees: u64) -> u64 {
     least.max(COMPARE_WORK_PER_TREE_BYTE.saturating_mul(trees))
 }
 
-/// The work reading a Git tree of `bytes` takes, as both sides of the allowance count it, when
-/// finding it searched `searched` pack indexes.
-fn read_work(bytes: u64, searched: u64) -> u64 {
-    let searches = INDEX_SEARCH_WORK.saturating_mul(searched);
-    bytes
-        .saturating_add(TREE_READ_WORK)
-        .saturating_add(searches)
+/// The work reading a Git tree of `bytes` takes, as both sides of the allowance count it.
+fn read_work(bytes: u64) -> u64 {
+    bytes.saturating_add(TREE_READ_WORK)
 }
 
 const BUG_HINT: &str = "Nothing was changed. This is a bug in Opalro, not a problem with the \
@@ -852,10 +848,11 @@ impl<'r> Converter<'r> {
         let object = self.git.read(&id).map_err(|e| at(e, place))?;
         let bytes = object.data.len() as u64;
         let searched = self.git.searched().saturating_sub(searched);
+        let again = read_work(bytes).saturating_add(INDEX_SEARCH_WORK.saturating_mul(searched));
         // A stream padded past what zlib needs costs time to inflate whatever the tree holds.
         let excess = self.git.excess().saturating_sub(excess);
         let padding = EXCESS_WORK_PER_BYTE.saturating_mul(excess);
-        self.spend(read_work(bytes, searched).saturating_add(padding))?;
+        self.spend(again.saturating_add(padding))?;
         expect_kind(object.kind, ObjectType::Tree, &id, place)?;
         let entries = parse_tree(&object.data, self.git.hash()).map_err(|e| at(e, place))?;
         let mut items: Vec<Item> = (entries.into_iter())
@@ -1098,12 +1095,11 @@ impl<'r> Converter<'r> {
         };
         let commit = walk.commit;
         let place = || folder_place(&path_of(stack, &[]), &id, commit);
-        let searched = self.git.searched();
         let object = self.git.read(&id).map_err(|e| at(e, place))?;
         let bytes = object.data.len() as u64;
-        // Never the compressed bytes: padding mustn't buy the comparison work.
-        let searched = self.git.searched().saturating_sub(searched);
-        let work = read_work(bytes, searched);
+        // Never the compressed bytes or the pack indexes searched: how Git packed the trees
+        // mustn't buy the comparison work.
+        let work = read_work(bytes);
         self.converted_trees = self.converted_trees.saturating_add(work);
         expect_kind(object.kind, ObjectType::Tree, &id, place)?;
         let entries = parse_tree(&object.data, self.git.hash()).map_err(|e| at(e, place))?;
@@ -3987,9 +3983,9 @@ mod tests {
         assert_eq!(converted, 60);
     }
 
-    /// What converting a tree buys is its bytes and its read, never its compressed bytes; a tree
-    /// the comparison reads again costs that, and a thousand for each byte its stream took past
-    /// what zlib could need.
+    /// What converting a tree buys is its bytes and its read, never its compressed bytes or the
+    /// pack indexes searched to find it; a tree the comparison reads again costs that, each index
+    /// searched, and a thousand for each byte its stream took past what zlib could need.
     #[test]
     fn padding_buys_nothing_and_costs_a_thousand_a_byte_to_read_again() {
         let (dir, git) = repo(Sha1);
@@ -4022,17 +4018,21 @@ mod tests {
         let excess = 2 + 100 * 5 + 5 + 37 + 4 - (29 + 64);
         assert_eq!(compared, 29 + 1024 + 1000 * excess);
 
-        // A tree found in a pack counts the index searched too.
+        // A tree found in a pack buys nothing for the index searched, and read again costs it.
         let (dir, git) = repo(Sha1);
         let tree = [b"100644 f\0".as_slice(), blob(&git, b"x\n").as_bytes()].concat();
         git.pack(&[PackEntry::Whole(ObjectType::Tree, tree.clone())]);
         let tree = object_id(ObjectType::Tree, &tree, Sha1).unwrap();
         let commit = git.commit(&commit_bytes(&tree, &[], "", b"m\n"));
-        let (converted, _) = convert(dir.path(), "a", |c| {
+        let ((converted, compared), _) = convert(dir.path(), "a", |c| {
             c.commit(&commit).unwrap();
-            c.converted_trees
+            let mut cold = TreeCache::new(0);
+            std::mem::swap(&mut c.cache, &mut cold);
+            c.kept(Some(tree), "c", "").unwrap();
+            (c.converted_trees, c.compared_trees)
         });
-        assert_eq!(converted, 29 + 1024 + 1024);
+        assert_eq!(converted, 29 + 1024);
+        assert_eq!(compared, 29 + 1024 + 1024);
     }
 
     /// RT25-1's dearest shape, at the real floor and cache, to time by hand: a first commit
