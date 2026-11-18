@@ -826,6 +826,209 @@ fn undo_two_over_a_step_that_changes_files_then_one_that_doesnt_leaves_no_stale_
     assert_eq!(head(&env).1.action, Action::Undo(two));
 }
 
+/// `a.txt` as the person fixed it by hand.
+#[cfg(feature = "fault-injection")]
+const FIXED: &str = "1\nboth\n3\n4\n5\n6\n7\n8\n";
+
+/// A project on `main` at a combined save holding `a.txt` in conflict, with the line `side`, the
+/// tag `v0.9` and a shelf, reached by a `goto` that couldn't remove its journal, then `a.txt` fixed
+/// by hand: the journal back with `head` on its target, as a lost removal leaves it. The entry
+/// before the `goto`, and what `a.txt` held after it.
+#[cfg(feature = "fault-injection")]
+fn journal_left_by_a_goto() -> (Env, Id, Vec<u8>) {
+    let env = Env::empty();
+    ok(&env, &["start", "--preset", "custom"]);
+    write(&env, "a.txt", "1\n2\n3\n4\n5\n6\n7\n8\n");
+    ok(&env, &["save", "A"]);
+    ok(&env, &["tag", "v0.9"]);
+    ok(&env, &["line", "new", "side"]);
+    write(&env, "b.txt", "side\n");
+    ok(&env, &["save", "On side"]);
+    ok(&env, &["goto", "main"]);
+    ok(&env, &["line", "new", "clash"]);
+    write(&env, "a.txt", "1\nclash\n3\n4\n5\n6\n7\n8\n");
+    ok(&env, &["save", "On clash"]);
+    ok(&env, &["goto", "main"]);
+    write(&env, "a.txt", "1\nmain\n3\n4\n5\n6\n7\n8\n");
+    ok(&env, &["save", "On main"]);
+    ok(&env, &["combine", "clash"]);
+    write(&env, "c.txt", "kept\n");
+    ok(&env, &["shelf"]);
+    ok(&env, &["goto", "side"]);
+    let before = head(&env).0;
+    let out = env
+        .opalro()
+        .args(["goto", "main"])
+        .env("OPALRO_FAULT_FAIL", "journal:removing")
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(env.root().join(".opalro/state/journal").exists());
+    let marked = read(&env, "a.txt");
+    write(&env, "a.txt", FIXED);
+    (env, before, marked)
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn a_journal_left_after_its_switch_was_done_is_only_removed_and_reading_commands_say_so() {
+    let (template, before, marked) = journal_left_by_a_goto();
+    let goto = head(&template).0;
+    let to = before.to_hex()[..8].to_owned();
+    let finished = |rest: &str| format!("Finished the goto that was stopped, so {rest}\n");
+    let redone =
+        finished("nothing more was redone. Running opalro redo again takes one more step.");
+    let gone_to = finished(&format!(
+        "nothing more was done. Running opalro undo --to {to} again goes on from there."
+    ));
+    let none_back = finished(
+        "no shelf was brought back this time. Running opalro unshelf again brings back the newest \
+         shelf left.",
+    );
+    // Each command runs on a copy of the same state, and removes the journal without a word.
+    let removed = |args: &[&str]| {
+        let env = Env::empty();
+        support::copy_dir(template.root(), env.root());
+        let out = env.opalro().args(args).output().unwrap();
+        let said = text(&out.stderr);
+        assert_eq!(out.status.code(), Some(0), "{args:?}: {said}");
+        assert!(!said.contains("warning:"), "{args:?}: {said}");
+        let journal = env.root().join(".opalro/state/journal");
+        assert!(!journal.exists(), "{args:?}");
+        (env, text(&out.stdout))
+    };
+    // A command that takes a step takes it right after the goto, the fix as the person left it.
+    for (args, command) in [
+        (&["combine", "side"][..], "combine"),
+        (&["resolve"][..], "resolve"),
+        (&["line", "new", "other"][..], "line new"),
+        (&["line", "rename", "side", "other"][..], "line rename"),
+        (&["line", "delete", "side", "--yes"][..], "line delete"),
+        (&["tag", "v1.0"][..], "tag"),
+        (&["tag", "--delete", "v0.9", "--yes"][..], "tag"),
+        (&["setup", "--preset", "code", "--yes"][..], "setup"),
+    ] {
+        let (env, _) = removed(args);
+        let entry = head(&env).1;
+        let step = (entry.parent, entry.command.as_str());
+        assert_eq!(step, (Some(goto), command), "{args:?}");
+        assert_eq!(read(&env, "a.txt"), FIXED.as_bytes(), "{args:?}");
+    }
+    // The shelf takes the fix.
+    let (env, _) = removed(&["shelf"]);
+    let entry = head(&env).1;
+    let step = (entry.parent, entry.command.as_str());
+    assert_eq!(step, (Some(goto), "shelf"));
+    assert_eq!(read(&env, "a.txt"), marked);
+    let shelf = entry.state.shelves[0].1;
+    assert_eq!(support::saved_files(&env, shelf)["a.txt"], FIXED.as_bytes());
+    // These finish the stopped switch and take no step, as after any stop; tidy takes none either.
+    for (args, says) in [
+        (&["redo"][..], redone.as_str()),
+        (&["undo", "--to", &to][..], gone_to.as_str()),
+        (&["unshelf"][..], none_back.as_str()),
+        (&["tidy"][..], "Nothing to free"),
+    ] {
+        let (env, shown) = removed(args);
+        assert!(shown.contains(says), "{args:?}: {shown}");
+        assert_eq!(head(&env).0, goto, "{args:?}");
+        assert_eq!(read(&env, "a.txt"), FIXED.as_bytes(), "{args:?}");
+    }
+    every_reading_command_warns(
+        &template,
+        "warning: A switch between saves was stopped just after it was done:",
+    );
+}
+
+/// Runs every command that only reads in `env`: each must exit 0, `verify` only when it finds no
+/// problem, and say `warning`.
+#[cfg(feature = "fault-injection")]
+fn every_reading_command_warns(env: &Env, warning: &str) {
+    for args in [
+        &["status"][..],
+        &["changes"],
+        &["history"],
+        &["show"],
+        &["who", "a.txt"],
+        &["line"],
+        &["tag"],
+        &["shelf", "--list"],
+        &["undo", "--list"],
+        &["verify"],
+    ] {
+        let out = env.opalro().args(args).output().unwrap();
+        let said = text(&out.stderr);
+        assert_eq!(out.status.code(), Some(0), "{args:?}: {said}");
+        assert!(said.contains(warning), "{args:?}: {said}");
+    }
+}
+
+#[cfg(feature = "fault-injection")]
+#[test]
+fn a_journal_back_after_head_moved_on_stops_every_changing_command_and_reading_commands_say_so() {
+    let (template, before, _) = journal_left_by_a_goto();
+    let journal = template.root().join(".opalro/state/journal");
+    let bytes = fs::read(&journal).unwrap();
+    // The next command removes it and moves `head` on; then it is back, as only a drive that put
+    // that later rename of `head` on the disk before the removal could leave it.
+    ok(&template, &["save", "Fixed"]);
+    assert!(!journal.exists());
+    fs::write(&journal, &bytes).unwrap();
+    write(&template, "n.txt", "mine\n");
+    let to = before.to_hex()[..8].to_owned();
+    let unusable = "error: A switch between saves was stopped here, and Opalro can't finish it: \
+                    .opalro/state/journal was made for another save than the one the project is \
+                    on.\n";
+    let hint = "hint: Nothing was changed. Your files are as the stopped switch left them, and \
+                `opalro status` shows how they differ from the save the project is on. To go on \
+                without finishing the switch, delete .opalro/state/journal: a later `opalro save` \
+                then records the folder as it is at that time.\n";
+    for args in [
+        &["save", "Three"][..],
+        &["goto", "side"],
+        &["discard"],
+        &["combine", "side"],
+        &["resolve"],
+        &["line", "new", "other"],
+        &["line", "rename", "side", "other"],
+        &["line", "delete", "side", "--yes"],
+        &["tag", "v1.0"],
+        &["tag", "--delete", "v0.9", "--yes"],
+        &["undo"],
+        &["redo"],
+        &["undo", "--to", &to],
+        &["shelf"],
+        &["unshelf"],
+        &["tidy"],
+        &["setup", "--preset", "code", "--yes"],
+    ] {
+        let env = Env::empty();
+        support::copy_dir(template.root(), env.root());
+        let (standing, folder) = (env.standing(), support::files(env.root()));
+        let (_, said) = refused(&env, args);
+        assert!(
+            said.contains(unusable) && said.contains(hint),
+            "{args:?}: {said}"
+        );
+        // Nothing written: the same entry, packs, files and journal.
+        assert_eq!(env.standing(), standing, "{args:?}");
+        assert_eq!(support::files(env.root()), folder, "{args:?}");
+        assert_eq!(read(&env, ".opalro/state/journal"), bytes, "{args:?}");
+    }
+    every_reading_command_warns(
+        &template,
+        "warning: A switch between saves was stopped here, and Opalro can't finish it: \
+         .opalro/state/journal was made for another save than the one the project is on. \
+         Commands that change the project won't run until it is dealt with.",
+    );
+    // Deleted as its hint says, the next save goes on, and nothing was lost.
+    fs::remove_file(&journal).unwrap();
+    ok(&template, &["save", "Mine"]);
+    let status = json(&template, &["status"]);
+    assert_eq!(status["unfinished_switch"], false, "{status}");
+    assert_eq!(status["changes"], serde_json::json!([]), "{status}");
+}
+
 #[test]
 fn undo_list_with_a_lost_head_goes_on_past_a_parent_that_is_no_entry() {
     let (env, [.., two]) = project();
