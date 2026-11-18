@@ -4615,16 +4615,15 @@ fn resolve_at(
             None => stored.place(p, part_at(&m.folder, p).as_ref()),
         }
     }
-    // A side kept whole that empties a folder gone from the folder takes the folder out too.
-    if keep.is_some() {
-        for p in &places {
-            let mut up = p.as_str();
-            while let Some((above, _)) = up.rsplit_once('/') {
-                if !m.folder.folders.contains(above) && !holds_below(&stored, above) {
-                    stored.remove(above);
-                }
-                up = above;
+    // What empties a folder gone from the folder, a side kept whole or the folder's nothing,
+    // takes the folder out too, as `save <path>` does.
+    for p in &places {
+        let mut up = p.as_str();
+        while let Some((above, _)) = up.rsplit_once('/') {
+            if !m.folder.folders.contains(above) && !holds_below(&stored, above) {
+                stored.remove(above);
             }
+            up = above;
         }
     }
     assert_eq!(
@@ -5489,6 +5488,30 @@ fn a_file_moved_to_two_places_held_alike_at_one_is_no_conflict_there() {
             pick: 774_662_330_187_787_330,
             message: true,
             clean: true,
+        },
+    ]);
+}
+
+/// The seed's history: `resolve` of the whole project, without a side, takes the two places in
+/// conflict that were all a deleted folder held, and the save leaves the folder out.
+#[test]
+fn resolve_at_a_path_that_takes_the_last_of_a_folder_gone_from_the_folder() {
+    run(&[
+        Act::Conflicted {
+            pick: 0,
+            picture: false,
+            then: 92,
+        },
+        Act::FixFile { pick: 0 },
+        Act::CrissCross {
+            pick: 18_008_979_888_479_143_252,
+            fix: true,
+            clean: false,
+        },
+        Act::DeleteFolder("d"),
+        Act::Resolve {
+            pick: 1_235_458_846_132_079_774,
+            how: ResolveHow::Paths,
         },
     ]);
 }
